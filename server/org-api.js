@@ -7,7 +7,33 @@ import {
   paginate,
   toDeptOptions,
 } from "../shared/org.js";
+import { audit } from "./src/log/audit.js";
 import { menuOptions } from "./menus.js";
+
+async function record(ctx, action, targetType, targetId, result) {
+  try {
+    let orgName = "";
+    if (ctx.user?.dept_id) {
+      const dept = await ctx.db.get("SELECT name FROM sys_dept WHERE id = ?", [
+        String(ctx.user.dept_id),
+      ]);
+      orgName = dept?.name || "";
+    }
+    await audit(ctx.db, {
+      orgId: String(ctx.user?.dept_id || ""),
+      orgName,
+      actorId: String(ctx.user?.id || ""),
+      actorName: ctx.user?.nickname || ctx.user?.username || "",
+      action,
+      targetType,
+      targetId: String(targetId || ""),
+      result,
+      ip: ctx.ip || "",
+    });
+  } catch (error) {
+    console.error("操作日志写入失败", error instanceof Error ? error.message : "未知错误");
+  }
+}
 
 function toDept(row) {
   return {
@@ -95,14 +121,23 @@ export async function deptForm(ctx) {
 
 export async function createDept(ctx) {
   const body = ctx.body || {};
-  if (!body.name || !body.code) return ctx.fail("部门名称和编号不能为空");
+  if (!body.name || !body.code) {
+    await record(ctx, "新增部门", "dept", "", "失败");
+    return ctx.fail("部门名称和编号不能为空");
+  }
   const parentId = String(body.parentId ?? "0");
   if (parentId !== "0") {
     const parent = await ctx.db.get("SELECT id FROM sys_dept WHERE id = ?", [parentId]);
-    if (!parent) return ctx.fail("上级部门不存在");
+    if (!parent) {
+      await record(ctx, "新增部门", "dept", "", "失败");
+      return ctx.fail("上级部门不存在");
+    }
   }
   const duplicated = await ctx.db.get("SELECT id FROM sys_dept WHERE code = ?", [body.code]);
-  if (duplicated) return ctx.fail("部门编号已存在");
+  if (duplicated) {
+    await record(ctx, "新增部门", "dept", "", "失败");
+    return ctx.fail("部门编号已存在");
+  }
   const id = await nextId(ctx.db, "sys_dept");
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await ctx.db.run(
@@ -110,15 +145,22 @@ export async function createDept(ctx) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, parentId, body.name, body.code, Number(body.sort) || 1, Number(body.status ?? 1), now, now]
   );
+  await record(ctx, "新增部门", "dept", id, "成功");
   ctx.ok(null, `新增部门${body.name}成功`);
 }
 
 export async function updateDept(ctx) {
   const body = ctx.body || {};
   const current = await ctx.db.get("SELECT * FROM sys_dept WHERE id = ?", [ctx.params.id]);
-  if (!current) return ctx.fail("部门不存在");
+  if (!current) {
+    await record(ctx, "修改部门", "dept", ctx.params.id, "失败");
+    return ctx.fail("部门不存在");
+  }
   const parentId = String(body.parentId ?? current.parent_id);
-  if (parentId === current.id) return ctx.fail("上级部门不能是自己");
+  if (parentId === current.id) {
+    await record(ctx, "修改部门", "dept", current.id, "失败");
+    return ctx.fail("上级部门不能是自己");
+  }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await ctx.db.run(
     `UPDATE sys_dept SET parent_id = ?, name = ?, code = ?, sort = ?, status = ?, update_time = ? WHERE id = ?`,
@@ -132,6 +174,7 @@ export async function updateDept(ctx) {
       current.id,
     ]
   );
+  await record(ctx, "修改部门", "dept", current.id, "成功");
   ctx.ok(null, `修改部门${body.name || current.name}成功`);
 }
 
@@ -145,15 +188,22 @@ export async function deleteDepts(ctx) {
       "SELECT COUNT(*) AS total FROM sys_dept WHERE parent_id = ?",
       [id]
     );
-    if (Number(children?.total || 0) > 0) return ctx.fail("请先删除下级部门");
+    if (Number(children?.total || 0) > 0) {
+      await record(ctx, "删除部门", "dept", id, "失败");
+      return ctx.fail("请先删除下级部门");
+    }
     const users = await ctx.db.get("SELECT COUNT(*) AS total FROM sys_user WHERE dept_id = ?", [
       id,
     ]);
-    if (Number(users?.total || 0) > 0) return ctx.fail("部门下还有用户，不能删除");
+    if (Number(users?.total || 0) > 0) {
+      await record(ctx, "删除部门", "dept", id, "失败");
+      return ctx.fail("部门下还有用户，不能删除");
+    }
   }
   for (const id of ids) {
     await ctx.db.run("DELETE FROM sys_dept WHERE id = ?", [id]);
   }
+  await record(ctx, "删除部门", "dept", ids.join(","), "成功");
   ctx.ok(null, "删除部门成功");
 }
 
@@ -192,9 +242,15 @@ export async function roleForm(ctx) {
 
 export async function createRole(ctx) {
   const body = ctx.body || {};
-  if (!body.name || !body.code) return ctx.fail("角色名称和编码不能为空");
+  if (!body.name || !body.code) {
+    await record(ctx, "新增角色", "role", "", "失败");
+    return ctx.fail("角色名称和编码不能为空");
+  }
   const duplicated = await ctx.db.get("SELECT id FROM sys_role WHERE code = ?", [body.code]);
-  if (duplicated) return ctx.fail("角色编码已存在");
+  if (duplicated) {
+    await record(ctx, "新增角色", "role", "", "失败");
+    return ctx.fail("角色编码已存在");
+  }
   const id = await nextId(ctx.db, "sys_role");
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await ctx.db.run(
@@ -211,13 +267,17 @@ export async function createRole(ctx) {
       now,
     ]
   );
+  await record(ctx, "新增角色", "role", id, "成功");
   ctx.ok(null, `新增角色${body.name}成功`);
 }
 
 export async function updateRole(ctx) {
   const body = ctx.body || {};
   const current = await ctx.db.get("SELECT * FROM sys_role WHERE id = ?", [ctx.params.id]);
-  if (!current) return ctx.fail("角色不存在");
+  if (!current) {
+    await record(ctx, "修改角色", "role", ctx.params.id, "失败");
+    return ctx.fail("角色不存在");
+  }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await ctx.db.run(
     `UPDATE sys_role SET name = ?, code = ?, data_scope = ?, sort = ?, status = ?, update_time = ? WHERE id = ?`,
@@ -231,6 +291,7 @@ export async function updateRole(ctx) {
       current.id,
     ]
   );
+  await record(ctx, "修改角色", "role", current.id, "成功");
   ctx.ok(null, `修改角色${body.name || current.name}成功`);
 }
 
@@ -241,13 +302,20 @@ export async function deleteRoles(ctx) {
     .filter(Boolean);
   for (const id of ids) {
     const role = await ctx.db.get("SELECT code FROM sys_role WHERE id = ?", [id]);
-    if (role?.code === "ADMIN") return ctx.fail("不能删除系统管理员");
-    if (role?.code === "HOME_SWITCH") return ctx.fail("不能删除视角切换角色");
+    if (role?.code === "ADMIN") {
+      await record(ctx, "删除角色", "role", id, "失败");
+      return ctx.fail("不能删除系统管理员");
+    }
+    if (role?.code === "HOME_SWITCH") {
+      await record(ctx, "删除角色", "role", id, "失败");
+      return ctx.fail("不能删除视角切换角色");
+    }
   }
   for (const id of ids) {
     await ctx.db.run("DELETE FROM sys_user_role WHERE role_id = ?", [id]);
     await ctx.db.run("DELETE FROM sys_role WHERE id = ?", [id]);
   }
+  await record(ctx, "删除角色", "role", ids.join(","), "成功");
   ctx.ok(null, "删除角色成功");
 }
 
@@ -297,12 +365,17 @@ export async function userForm(ctx) {
 
 export async function createUser(ctx) {
   const body = ctx.body || {};
-  if (!body.username || !body.nickname || !body.deptId)
+  if (!body.username || !body.nickname || !body.deptId) {
+    await record(ctx, "新增用户", "user", "", "失败");
     return ctx.fail("用户名、昵称和部门不能为空");
+  }
   const duplicated = await ctx.db.get("SELECT id FROM sys_user WHERE username = ?", [
     body.username,
   ]);
-  if (duplicated) return ctx.fail("用户名已存在");
+  if (duplicated) {
+    await record(ctx, "新增用户", "user", "", "失败");
+    return ctx.fail("用户名已存在");
+  }
   const id = await nextId(ctx.db, "sys_user");
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const { hashPassword } = await import("./auth.js");
@@ -331,13 +404,20 @@ export async function createUser(ctx) {
       String(roleId),
     ]);
   }
+  await record(ctx, "新增用户", "user", id, "成功");
   ctx.ok(null, `新增用户${body.nickname}成功`);
 }
 
 export async function updateUser(ctx) {
   const body = ctx.body || {};
   const current = await ctx.db.get("SELECT * FROM sys_user WHERE id = ?", [ctx.params.id]);
-  if (!current) return ctx.fail("用户不存在");
+  if (!current) {
+    await record(ctx, "修改用户", "user", ctx.params.id, "失败");
+    return ctx.fail("用户不存在");
+  }
+  const nextStatus = Number(body.status ?? current.status);
+  const action =
+    nextStatus !== Number(current.status) ? (nextStatus === 1 ? "激活" : "停用") : "修改用户";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   await ctx.db.run(
     `UPDATE sys_user
@@ -364,6 +444,7 @@ export async function updateUser(ctx) {
       ]);
     }
   }
+  await record(ctx, action, "user", current.id, "成功");
   ctx.ok(null, `修改用户${body.nickname || current.nickname}成功`);
 }
 
@@ -372,21 +453,29 @@ export async function deleteUsers(ctx) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-  if (ids.includes("2")) return ctx.fail("不能删除系统管理员");
+  if (ids.includes("2")) {
+    await record(ctx, "删除用户", "user", "2", "失败");
+    return ctx.fail("不能删除系统管理员");
+  }
   for (const id of ids) {
     await ctx.db.run("DELETE FROM sys_user_role WHERE user_id = ?", [id]);
     await ctx.db.run("DELETE FROM sys_user WHERE id = ?", [id]);
   }
+  await record(ctx, "删除用户", "user", ids.join(","), "成功");
   ctx.ok(null, "删除用户成功");
 }
 
 export async function resetPassword(ctx) {
   const password = ctx.query.password;
-  if (!password || String(password).length < 6) return ctx.fail("密码至少需要6位字符");
+  if (!password || String(password).length < 6) {
+    await record(ctx, "重置密码", "user", ctx.params.id, "失败");
+    return ctx.fail("密码至少需要6位字符");
+  }
   const { hashPassword } = await import("./auth.js");
   await ctx.db.run("UPDATE sys_user SET password_hash = ? WHERE id = ?", [
     hashPassword(String(password)),
     ctx.params.id,
   ]);
+  await record(ctx, "重置密码", "user", ctx.params.id, "成功");
   ctx.ok(null, `重置密码成功，新密码为：${password}`);
 }

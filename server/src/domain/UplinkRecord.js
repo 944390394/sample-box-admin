@@ -6,6 +6,7 @@ import { formatTimestamp } from "./Clock.js";
  */
 export class UplinkRecord {
   constructor(fields) {
+    this.id = fields.id == null ? "" : String(fields.id);
     this.boxId = fields.boxId;
     this.imei = fields.imei;
     this.receivedAt = fields.receivedAt;
@@ -42,8 +43,9 @@ export class UplinkRecord {
       receivedAt: UplinkRecord.#asText(row.received_at),
       deviceTime: row.device_time || "",
       kind: row.kind,
+      id: row.id,
       summary: row.summary,
-      raw: row.raw,
+      raw: row.raw == null ? "" : row.raw,
       lbsLng: row.lbs_lng == null ? null : Number(row.lbs_lng),
       lbsLat: row.lbs_lat == null ? null : Number(row.lbs_lat),
       gpsLng: row.gps_lng == null ? null : Number(row.gps_lng),
@@ -53,11 +55,29 @@ export class UplinkRecord {
 
   toJSON() {
     return {
+      id: this.id,
       box: this.boxId,
       time: this.receivedAt,
       text: this.summary,
       by: "设备",
       raw: this.raw,
+      deviceTime: this.deviceTime,
+      kind: this.kind,
+      lbsLng: this.lbsLng,
+      lbsLat: this.lbsLat,
+      gpsLng: this.gpsLng,
+      gpsLat: this.gpsLat,
+    };
+  }
+
+  /** 列表不带原文。原文只在点开一条时读取。 */
+  toListJSON() {
+    return {
+      id: this.id,
+      box: this.boxId,
+      time: this.receivedAt,
+      text: this.summary,
+      by: "设备",
       deviceTime: this.deviceTime,
       kind: this.kind,
       lbsLng: this.lbsLng,

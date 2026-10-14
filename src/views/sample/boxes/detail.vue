@@ -91,14 +91,17 @@
           <el-empty v-else description="暂无事件" :image-size="56" />
         </el-card>
 
-        <el-card v-if="allow(BOX_PERM.log)" shadow="never" header="日志">
+        <el-card v-if="allow(BOX_PERM.log)" shadow="never" header="日志（最近 7 天）">
           <ul v-if="logs.length" class="feed">
             <li v-for="(item, index) in logs" :key="item.time + item.text + index">
               <time>{{ item.time }}</time>
               <div>
                 <span>{{ item.text }}</span>
                 <em>{{ item.by }}</em>
-                <code v-if="item.raw">{{ formatRaw(item.raw) }}</code>
+                <el-button v-if="serverMode && item.id" link type="primary" @click="openRaw(item)">
+                  原文
+                </el-button>
+                <code v-if="shownRaw(item)">{{ formatRaw(shownRaw(item)) }}</code>
               </div>
             </li>
           </ul>
@@ -191,6 +194,7 @@ const currentTask = ref<LinkedTask | null>(null);
 const serverMode = import.meta.env.VITE_MOCK_DEV_SERVER !== "true";
 const remoteBox = ref<SampleBox | null>(null);
 const remoteLogs = ref<BoxLogItem[]>([]);
+const rawById = ref<Record<string, string>>({});
 const ready = ref(!serverMode);
 const boxId = computed(() => String(route.params.id || ""));
 const box = computed(() => (serverMode ? remoteBox.value : findBox(boxId.value)));
@@ -204,7 +208,7 @@ async function loadRemote() {
       SampleBoxAPI.logs(boxId.value),
     ]);
     remoteBox.value = nextBox;
-    remoteLogs.value = nextLogs;
+    remoteLogs.value = nextLogs.list;
   } catch {
     remoteBox.value = null;
     remoteLogs.value = [];
@@ -282,13 +286,41 @@ const events = computed(() => {
   return rows.sort((a, b) => (a.time < b.time ? 1 : -1));
 });
 
-const logs = computed(() => {
+const logs = computed((): BoxLogItem[] => {
   if (serverMode) return remoteLogs.value;
   return boxSession.logs
     .filter((item) => item.box === boxId.value)
     .slice()
-    .sort((a, b) => (a.time < b.time ? 1 : -1));
+    .sort((a, b) => (a.time < b.time ? 1 : -1))
+    .map((item) => ({
+      box: item.box,
+      time: item.time,
+      text: item.text,
+      by: item.by,
+      raw: item.raw,
+      lbsLng: null,
+      lbsLat: null,
+      gpsLng: null,
+      gpsLat: null,
+    }));
 });
+
+function shownRaw(item: BoxLogItem) {
+  if (serverMode) return item.id ? rawById.value[item.id] || "" : "";
+  return item.raw || "";
+}
+
+async function openRaw(item: BoxLogItem) {
+  if (!item.id) return;
+  if (rawById.value[item.id]) {
+    const next = { ...rawById.value };
+    delete next[item.id];
+    rawById.value = next;
+    return;
+  }
+  const data = await SampleBoxAPI.raw(boxId.value, item.id, item.time);
+  rawById.value = { ...rawById.value, [item.id]: data.raw };
+}
 
 function formatRaw(raw: string) {
   try {

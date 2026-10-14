@@ -35,10 +35,26 @@ export class MemoryBoxStore extends BoxStore {
     this.logs.push(record);
   }
 
-  async listLogs(boxId) {
+  async listLogs(boxId, range) {
     return this.logs
       .filter((item) => item.boxId === boxId)
-      .sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1));
+      .filter((item) => {
+        if (!range?.from || !range?.to) return true;
+        const time = item.receivedAt || item.toJSON?.().time || "";
+        return time >= range.from && time <= range.to;
+      })
+      .sort((a, b) => {
+        const left = a.receivedAt || a.toJSON?.().time || "";
+        const right = b.receivedAt || b.toJSON?.().time || "";
+        return left < right ? 1 : left > right ? -1 : 0;
+      });
+  }
+
+  async readRaw(boxId, logId) {
+    const found = this.logs.find(
+      (item) => item.boxId === boxId && String(item.id) === String(logId)
+    );
+    return found ? found.raw : null;
   }
 
   async listRecent(limit = 50) {

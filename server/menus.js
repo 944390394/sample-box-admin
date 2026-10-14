@@ -51,6 +51,13 @@ export const menuRoutes = [
     menu("settings", "system/settings/index", "SystemSettings", "系统设置", "el-icon-Setting"),
     menu("role", "system/role/index", "Role", "角色管理", "role"),
     menu("dept", "system/dept/index", "Dept", "部门管理", "el-icon-OfficeBuilding"),
+    menu(
+      "operation-log",
+      "system/operation-log/index",
+      "OperationLog",
+      "操作日志",
+      "el-icon-Document"
+    ),
   ]),
 ];
 

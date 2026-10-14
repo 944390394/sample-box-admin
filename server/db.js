@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { depts, flattenDepts, roles, users } from "../shared/org.js";
 import { hashPassword } from "./auth.js";
+import { ensureSchema } from "./src/store/schema.js";
 import { SqliteExecutor } from "./src/store/SqliteExecutor.js";
 
 const MIGRATION_TABLE = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -21,6 +22,9 @@ export async function openDatabase(config, projectRoot) {
       user: config.user,
       password: config.password,
       database: config.database,
+      charset: "utf8mb4",
+      timezone: "+08:00",
+      dateStrings: true,
       multipleStatements: true,
     });
     return {
@@ -81,6 +85,7 @@ export async function migrate(db) {
       new Date().toISOString(),
     ]);
   }
+  await ensureSchema(db);
 }
 
 export async function seedOrg(db) {

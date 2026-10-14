@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,10 @@ import { migrate, openDatabase, seedOrg, testConnection } from "./db.js";
 import { menuOptions, menuRoutes } from "./menus.js";
 import * as org from "./org-api.js";
 import { startSampleRuntime } from "./src/createSampleApp.js";
+import { audit } from "./src/log/audit.js";
+import { queryOperationLogs } from "./src/log/operationLog.js";
 import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js";
+import { mergeDatabaseSettings, publicDatabase, scrub } from "./src/settings/databaseConfig.js";
 import { tcpPassthroughSettings } from "./src/tcpSettings.js";
 
 const serverRoot = dirname(fileURLToPath(import.meta.url));
@@ -214,6 +217,12 @@ const routes = [
   { method: "DELETE", path: "/api/v1/users/:id", auth: true, handler: org.deleteUsers },
   {
     method: "GET",
+    path: "/api/v1/sample/boxes/:id/logs/:logId",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.raw(ctx)),
+  },
+  {
+    method: "GET",
     path: "/api/v1/sample/boxes/:id/logs",
     auth: true,
     handler: (ctx) => useSample(ctx, (api) => api.logs(ctx)),
@@ -247,6 +256,18 @@ const routes = [
     path: "/api/v1/system/settings",
     auth: true,
     handler: systemSettings,
+  },
+  {
+    method: "PUT",
+    path: "/api/v1/system/settings/database",
+    auth: true,
+    handler: saveDatabase,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/system/operation-logs",
+    auth: true,
+    handler: operationLogs,
   },
   { method: "GET", path: "/api/v1/sample/tasks", auth: true, reserved: true },
   { method: "GET", path: "/api/v1/sample/alerts", auth: true, reserved: true },
@@ -288,13 +309,17 @@ async function installSetup(ctx) {
 async function login(ctx) {
   if (!state.installed) return ctx.fail("请先完成数据库安装");
   const body = ctx.body || {};
-  if (!consumeCaptcha(body.captchaId, body.captchaCode)) return ctx.fail("验证码错误");
+  if (!consumeCaptcha(body.captchaId, body.captchaCode)) {
+    await writeLogin(ctx, body.username, null, "失败");
+    return ctx.fail("验证码错误");
+  }
   const user = await state.db.get("SELECT * FROM sys_user WHERE username = ?", [body.username]);
   if (
     !user ||
     Number(user.status) !== 1 ||
     !verifyPassword(body.password || "", user.password_hash)
   ) {
+    await writeLogin(ctx, body.username, user, "失败");
     return ctx.fail("用户名或密码错误");
   }
   const accessToken = signToken(
@@ -307,7 +332,33 @@ async function login(ctx) {
     state.config.secret,
     7 * 24 * 3600
   );
+  await writeLogin(ctx, body.username, user, "成功");
   ctx.ok({ accessToken, refreshToken, tokenType: "Bearer", expiresIn: 7200 });
+}
+
+async function writeLogin(ctx, username, user, result) {
+  try {
+    let orgName = "";
+    if (user?.dept_id) {
+      const dept = await state.db.get("SELECT name FROM sys_dept WHERE id = ?", [
+        String(user.dept_id),
+      ]);
+      orgName = dept?.name || "";
+    }
+    await audit(state.db, {
+      orgId: String(user?.dept_id || ""),
+      orgName,
+      actorId: String(user?.id || ""),
+      actorName: user?.nickname || String(username || ""),
+      action: "登录",
+      targetType: "user",
+      targetId: String(user?.id || ""),
+      result,
+      ip: ctx.ip || "",
+    });
+  } catch (error) {
+    console.error("操作日志写入失败", error instanceof Error ? error.message : "未知错误");
+  }
 }
 
 async function refresh(ctx) {
@@ -370,12 +421,126 @@ function useSample(ctx, run) {
 
 async function systemSettings(ctx) {
   const certExpiresAt = await readServingCertExpiry();
-  ctx.ok(
-    tcpPassthroughSettings(sampleRuntime?.tcpAddress?.port, process.env, {
+  ctx.ok({
+    ...tcpPassthroughSettings(sampleRuntime?.tcpAddress?.port, process.env, {
       version: readDeployedCommit(projectRoot),
       certExpiresAt,
-    })
-  );
+    }),
+    database: publicDatabase(state.config),
+  });
+}
+
+async function saveDatabase(ctx) {
+  const roles = await roleCodes(ctx.user.id);
+  if (!roles.includes("ADMIN")) {
+    await audit(state.db, {
+      orgId: String(ctx.user.dept_id || ""),
+      orgName: "",
+      actorId: String(ctx.user.id),
+      actorName: ctx.user.nickname || ctx.user.username,
+      action: "修改数据库",
+      targetType: "database",
+      targetId: "",
+      result: "失败",
+      ip: ctx.ip || "",
+    });
+    return ctx.fail("只有系统管理员可以修改数据库");
+  }
+  let next;
+  try {
+    next = mergeDatabaseSettings(state.config, ctx.body || {});
+  } catch (error) {
+    return ctx.fail(error instanceof Error ? error.message : "数据库配置不正确");
+  }
+  const secret = next.password || "";
+  if (next.dialect === "mysql") {
+    try {
+      await testConnection(next, projectRoot);
+    } catch (error) {
+      const message = scrub(error instanceof Error ? error.message : "连接失败", secret);
+      console.error("数据库连接失败", message);
+      return ctx.fail(`连接失败：${message}`);
+    }
+  }
+  try {
+    await switchDatabase(next);
+  } catch (error) {
+    const message = scrub(error instanceof Error ? error.message : "保存失败", secret);
+    console.error("数据库配置未生效", message);
+    return ctx.fail(`保存失败：${message}`);
+  }
+  await audit(state.db, {
+    orgId: String(ctx.user.dept_id || ""),
+    orgName: "",
+    actorId: String(ctx.user.id),
+    actorName: ctx.user.nickname || ctx.user.username,
+    action: "修改数据库",
+    targetType: "database",
+    targetId: next.dialect,
+    result: "成功",
+    ip: ctx.ip || "",
+  });
+  ctx.ok(publicDatabase(state.config), "已保存");
+}
+
+async function switchDatabase(nextConfig) {
+  const db = await openDatabase(nextConfig, projectRoot);
+  try {
+    await migrate(db);
+    await seedOrg(db);
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
+  const previousDb = state.db;
+  const previousRuntime = sampleRuntime;
+  state.db = db;
+  state.config = nextConfig;
+  if (previousRuntime) {
+    try {
+      await previousRuntime.close();
+    } catch (error) {
+      console.error("关闭原接入失败", error instanceof Error ? error.message : "未知错误");
+    }
+    sampleRuntime = null;
+    sampleApi = null;
+  }
+  if (previousDb && previousDb !== db) {
+    try {
+      await previousDb.close();
+    } catch (error) {
+      console.error("关闭原数据库失败", error instanceof Error ? error.message : "未知错误");
+    }
+  }
+  try {
+    const runtime = await startSampleRuntime({
+      httpServer,
+      db: state.db,
+      config: state.config,
+      authorize: authorizeSocket,
+    });
+    sampleRuntime = runtime;
+    sampleApi = runtime.controller;
+  } catch (error) {
+    console.error("采样接入未启动", error instanceof Error ? error.message : "未知错误");
+  }
+  writeFileSync(configPath, JSON.stringify(nextConfig, null, 2), { encoding: "utf8", mode: 0o600 });
+  chmodSync(configPath, 0o600);
+  if (!existsSync(lockPath)) writeFileSync(lockPath, new Date().toISOString(), "utf8");
+  console.log(`数据库已切换为 ${nextConfig.dialect}`);
+}
+
+async function operationLogs(ctx) {
+  const page = await queryOperationLogs(state.db, ctx.user, ctx.query);
+  if (page.error) return ctx.fail(page.error);
+  ctx.ok({ list: page.list, nextCursor: page.nextCursor });
+}
+
+function clientIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "")
+    .split(",")[0]
+    .trim();
+  return (forwarded || req.socket?.remoteAddress || "").slice(0, 64);
 }
 
 function authorizeSocket(token) {
@@ -430,6 +595,7 @@ const httpServer = createServer(async (req, res) => {
     query,
     body,
     params: matched.params,
+    ip: clientIp(req),
     user: null,
     ok: (data, msg) => ok(res, data, msg),
     fail: (msg, code, status) => fail(res, msg, code, status),

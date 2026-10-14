@@ -64,9 +64,10 @@ test("SQLite 入库后能按箱号读回原始报文", async () => {
     { dialect: "sqlite", sqlitePath: path.join(dir, "box.db") },
     process.cwd()
   );
+  let boxes;
   try {
     await migrate(db);
-    const boxes = new SqlBoxStore(db);
+    boxes = new SqlBoxStore(db);
     const ingest = new IngestService({
       boxes,
       cache: new MemoryStateCache(),
@@ -81,15 +82,26 @@ test("SQLite 入库后能按箱号读回原始报文", async () => {
     });
     await ingest.accept(raw);
     const box = await boxes.findByImei("864317080992517");
-    const [log] = await boxes.listLogs(box.id);
+    const page = await boxes.listLogs(box.id, {
+      from: "2026-09-28 00:00:00.000",
+      to: "2026-09-28 23:59:59.999",
+    });
+    const log = page.list[0];
     assert.equal(box.life, "待激活");
     assert.equal(box.lbsLng, Number("114.1172010"));
-    assert.equal(log.raw, raw);
+    assert.equal(log.raw, "");
+    assert.equal(Object.hasOwn(log.toListJSON(), "raw"), false);
+    assert.equal(await boxes.readRaw(box.id, log.id, log.receivedAt), raw);
+    const stored = await db.get("SELECT raw FROM sample_uplink WHERE id = ?", [Number(log.id)]);
+    const bytes = Buffer.from(stored.raw);
+    assert.equal(bytes[0], 0x1f);
+    assert.equal(bytes[1], 0x8b);
     assert.match(log.receivedAt, /2026-09-28 17:11:27\.128/);
     const again = await ingest.accept(packet({ uart: "why=timer,aa55=0", csq: 12 }));
     assert.equal(again.box.id, box.id);
     assert.equal(again.box.csq, 12);
   } finally {
+    if (boxes) await boxes.flush();
     await db.close();
     await rm(dir, { recursive: true, force: true });
   }

@@ -102,9 +102,17 @@ test("查询接口按箱号返回日志", async () => {
   const box = sampleBox();
   await boxes.save(box);
   await boxes.appendLog({
+    id: "1",
     boxId: box.id,
+    raw: '{"imei":"864317080992517"}',
     toJSON() {
-      return { time: box.last, text: "定时上报", by: "设备", raw: '{"imei":"864317080992517"}' };
+      return {
+        id: "1",
+        time: box.last,
+        text: "定时上报",
+        by: "设备",
+        raw: this.raw,
+      };
     },
   });
   const controller = new SampleController(boxes);
@@ -128,14 +136,26 @@ test("查询接口按箱号返回日志", async () => {
   assert.equal(missing.status, 404);
   const logs = {
     params: { id: "BOX-001" },
+    query: { from: "2026-09-22", to: "2026-09-29" },
     data: null,
     ok(data) {
       this.data = data;
     },
   };
   await controller.logs(logs);
-  assert.match(logs.data[0].raw, /864317080992517/);
-  assert.equal(logs.data[0].time, "2026-09-28 17:11:27.128");
+  assert.equal(logs.data.list[0].raw, undefined);
+  assert.equal(logs.data.list[0].time, "2026-09-28 17:11:27.128");
+  const raw = {
+    params: { id: "BOX-001", logId: "1" },
+    query: { receivedAt: logs.data.list[0].time },
+    data: null,
+    ok(data) {
+      this.data = data;
+    },
+    fail() {},
+  };
+  await controller.raw(raw);
+  assert.match(raw.data.raw, /864317080992517/);
 });
 
 test("WebSocket 在令牌有效时收到箱子状态", async () => {

@@ -40,6 +40,7 @@ export async function startSampleRuntime({ httpServer, db, config, authorize }) 
       await tcp.close();
       await sockets.close();
       await cache.close();
+      if (typeof boxes.flush === "function") await boxes.flush();
       await executor.close();
     },
   };
