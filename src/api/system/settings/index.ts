@@ -1,8 +1,14 @@
 import request from "@/utils/request";
 
 export interface TcpSettings {
+  mode: string;
   address: string;
-  port: number;
+  port: number | null;
+  hint: string;
+  adminUrl: string;
+  listening: boolean;
+  version: string;
+  certExpiresAt: string;
 }
 
 const SettingsAPI = {

@@ -9,6 +9,7 @@ import { migrate, openDatabase, seedOrg, testConnection } from "./db.js";
 import { menuOptions, menuRoutes } from "./menus.js";
 import * as org from "./org-api.js";
 import { startSampleRuntime } from "./src/createSampleApp.js";
+import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js";
 import { tcpPassthroughSettings } from "./src/tcpSettings.js";
 
 const serverRoot = dirname(fileURLToPath(import.meta.url));
@@ -367,10 +368,14 @@ function useSample(ctx, run) {
   return run(sampleApi);
 }
 
-function systemSettings(ctx) {
-  const data = tcpPassthroughSettings(sampleRuntime?.tcpAddress?.port);
-  if (!data) return ctx.fail("TCP 透传未在监听");
-  ctx.ok(data);
+async function systemSettings(ctx) {
+  const certExpiresAt = await readServingCertExpiry();
+  ctx.ok(
+    tcpPassthroughSettings(sampleRuntime?.tcpAddress?.port, process.env, {
+      version: readDeployedCommit(projectRoot),
+      certExpiresAt,
+    })
+  );
 }
 
 function authorizeSocket(token) {
