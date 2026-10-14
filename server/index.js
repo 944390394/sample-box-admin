@@ -9,6 +9,7 @@ import { migrate, openDatabase, seedOrg, testConnection } from "./db.js";
 import { menuOptions, menuRoutes } from "./menus.js";
 import * as org from "./org-api.js";
 import { startSampleRuntime } from "./src/createSampleApp.js";
+import { tcpPassthroughSettings } from "./src/tcpSettings.js";
 
 const serverRoot = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(serverRoot, "..");
@@ -64,6 +65,7 @@ const boxPermsByRole = {
 
 const state = { installed: false, db: null, config: null };
 let sampleApi = null;
+let sampleRuntime = null;
 
 function send(res, status, payload) {
   res.writeHead(status, {
@@ -239,6 +241,12 @@ const routes = [
     auth: true,
     handler: (ctx) => ctx.ok({ list: [], total: 0 }),
   },
+  {
+    method: "GET",
+    path: "/api/v1/system/settings",
+    auth: true,
+    handler: systemSettings,
+  },
   { method: "GET", path: "/api/v1/sample/tasks", auth: true, reserved: true },
   { method: "GET", path: "/api/v1/sample/alerts", auth: true, reserved: true },
   { method: "GET", path: "/api/v1/sample/commands", auth: true, reserved: true },
@@ -359,6 +367,12 @@ function useSample(ctx, run) {
   return run(sampleApi);
 }
 
+function systemSettings(ctx) {
+  const data = tcpPassthroughSettings(sampleRuntime?.tcpAddress?.port);
+  if (!data) return ctx.fail("TCP 透传未在监听");
+  ctx.ok(data);
+}
+
 function authorizeSocket(token) {
   const payload = readToken(token, state.config?.secret || "");
   return Boolean(payload?.userId && payload.typ !== "refresh");
@@ -438,6 +452,7 @@ loadInstalled()
           config: state.config,
           authorize: authorizeSocket,
         });
+        sampleRuntime = runtime;
         sampleApi = runtime.controller;
         console.log(
           `采样接入 TCP ${runtime.tcpAddress.address}:${runtime.tcpAddress.port}，实时通道 /api/v1/sample/stream`

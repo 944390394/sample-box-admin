@@ -48,6 +48,7 @@ export const menuRoutes = [
   ]),
   group("/system", "系统管理", "system", "/system/user", [
     menu("user", "system/user/index", "User", "用户管理", "el-icon-User"),
+    menu("settings", "system/settings/index", "SystemSettings", "系统设置", "el-icon-Setting"),
     menu("role", "system/role/index", "Role", "角色管理", "role"),
     menu("dept", "system/dept/index", "Dept", "部门管理", "el-icon-OfficeBuilding"),
   ]),
