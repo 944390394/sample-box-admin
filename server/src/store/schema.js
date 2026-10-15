@@ -99,6 +99,7 @@ const INDEXES = [
   ["sys_operation_log", "idx_op_org_time", ["org_id", "created_at", "id"]],
   ["sys_operation_log", "idx_op_actor_time", ["actor_id", "created_at", "id"]],
   ["sys_operation_log", "idx_op_target_time", ["target_id", "created_at", "id"]],
+  ["sys_operation_log", "idx_op_time", ["created_at"]],
 ];
 
 function ident(name) {

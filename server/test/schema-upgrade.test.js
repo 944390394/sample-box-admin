@@ -285,8 +285,14 @@ test("MySQL 空库建分区表，旧库不重建上报流水", async () => {
   assert.equal(/\bTRUNCATE\b/i.test(text), false);
 });
 
-test("没有日志全表统计接口", async () => {
-  const source = await readFile(new URL("../index.js", import.meta.url), "utf8");
-  assert.equal(source.includes("/api/v1/logs/analytics"), false);
-  assert.equal(source.includes("COUNT(*)"), false);
+test("日志统计只读操作日志", async () => {
+  const routes = await readFile(new URL("../index.js", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/log/operationAnalytics.js", import.meta.url),
+    "utf8"
+  );
+  assert.match(routes, /\/api\/v1\/logs\/analytics\/overview/);
+  assert.match(routes, /\/api\/v1\/logs\/analytics\/trend/);
+  assert.equal(routes.includes("COUNT(*)"), false);
+  assert.equal(source.includes("sample_uplink"), false);
 });

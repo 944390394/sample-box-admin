@@ -10,6 +10,7 @@ import { menuOptions, menuRoutes } from "./menus.js";
 import * as org from "./org-api.js";
 import { startSampleRuntime } from "./src/createSampleApp.js";
 import { audit } from "./src/log/audit.js";
+import { queryVisitOverview, queryVisitTrend } from "./src/log/operationAnalytics.js";
 import { queryOperationLogs } from "./src/log/operationLog.js";
 import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js";
 import { mergeDatabaseSettings, publicDatabase, scrub } from "./src/settings/databaseConfig.js";
@@ -268,6 +269,18 @@ const routes = [
     path: "/api/v1/system/operation-logs",
     auth: true,
     handler: operationLogs,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/logs/analytics/overview",
+    auth: true,
+    handler: visitOverview,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/logs/analytics/trend",
+    auth: true,
+    handler: visitTrend,
   },
   { method: "GET", path: "/api/v1/sample/tasks", auth: true, reserved: true },
   { method: "GET", path: "/api/v1/sample/alerts", auth: true, reserved: true },
@@ -534,6 +547,16 @@ async function operationLogs(ctx) {
   const page = await queryOperationLogs(state.db, ctx.user, ctx.query);
   if (page.error) return ctx.fail(page.error);
   ctx.ok({ list: page.list, nextCursor: page.nextCursor });
+}
+
+async function visitOverview(ctx) {
+  ctx.ok(await queryVisitOverview(state.db, ctx.user));
+}
+
+async function visitTrend(ctx) {
+  const trend = await queryVisitTrend(state.db, ctx.user, ctx.query);
+  if (trend.error) return ctx.fail(trend.error);
+  ctx.ok(trend);
 }
 
 function clientIp(req) {
