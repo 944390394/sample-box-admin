@@ -1,14 +1,18 @@
 import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
 import { formatTimestamp } from "../domain/Clock.js";
+import { listColumns } from "../store/schema.js";
 import { parseTimestamp } from "./timeRange.js";
 
 const MAX_DAYS = 31;
+const ONLINE_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * 只按天汇总 sys_operation_log。
  * 浏览量是操作条数，访客量是不重复的操作者。
  * 累计访客按整个范围去重，不是把每天的访客量相加。
- * 不读上报流水。
+ * 在线人数是最近 15 分钟里出现过的不重复操作者。
+ * 系统用户只读 sys_user。有 create_time 时，增长率是今天新增相对昨天。
+ * 不读上报流水。新增查询都带时间范围；用户表没有创建时间时只点人数。
  */
 
 function dayExpression(dialect) {
@@ -19,6 +23,11 @@ function dayExpression(dialect) {
 function formatDay(date) {
   const pad = (value) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatSecond(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${formatDay(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function startOfDay(date) {
@@ -44,14 +53,15 @@ function dayKey(value) {
   return String(value ?? "").slice(0, 10);
 }
 
-function orgClause(scope) {
+function orgClause(scope, column = "org_id") {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) throw new Error("非法标识符");
   if (!scope || scope.kind === "none") return { empty: true, where: [], params: [] };
   if (scope.kind === "depts") {
     const ids = (scope.ids || []).map(String).filter(Boolean);
     if (!ids.length) return { empty: true, where: [], params: [] };
     return {
       empty: false,
-      where: [`org_id IN (${ids.map(() => "?").join(", ")})`],
+      where: [`${column} IN (${ids.map(() => "?").join(", ")})`],
       params: ids,
     };
   }
@@ -81,6 +91,44 @@ export function totalStatsSql(scope) {
     empty: false,
     params: org.params,
     sql: `SELECT COUNT(*) AS pv, COUNT(DISTINCT actor_id) AS uv FROM sys_operation_log${where}`,
+  };
+}
+
+export function onlineActorsSql(scope) {
+  const org = orgClause(scope);
+  if (org.empty) return { empty: true, sql: "", params: [] };
+  const where = ["created_at >= ?", "created_at <= ?", "actor_id <> ''", ...org.where];
+  return {
+    empty: false,
+    params: org.params,
+    sql: `SELECT COUNT(DISTINCT actor_id) AS total
+      FROM sys_operation_log
+      WHERE ${where.join(" AND ")}`,
+  };
+}
+
+export function userTotalSql(scope, hasCreateTime) {
+  const org = orgClause(scope, "dept_id");
+  if (org.empty) return { empty: true, sql: "", params: [] };
+  const where = [];
+  if (hasCreateTime) where.push("(create_time IS NULL OR create_time <= ?)");
+  where.push(...org.where);
+  const clause = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+  return {
+    empty: false,
+    params: org.params,
+    sql: `SELECT COUNT(*) AS total FROM sys_user${clause}`,
+  };
+}
+
+export function userNewSql(scope) {
+  const org = orgClause(scope, "dept_id");
+  if (org.empty) return { empty: true, sql: "", params: [] };
+  const where = ["create_time >= ?", "create_time <= ?", ...org.where];
+  return {
+    empty: false,
+    params: org.params,
+    sql: `SELECT COUNT(*) AS total FROM sys_user WHERE ${where.join(" AND ")}`,
   };
 }
 
@@ -194,6 +242,47 @@ export async function queryVisitOverview(db, user, now = new Date()) {
     totalPvCount: toCount(total.pv),
     pvGrowthRate: growthRate(todayPvCount, yesterdayPv),
   };
+}
+
+export async function queryOnlineActors(db, user, now = new Date()) {
+  const scope = await analyticsScope(db, user);
+  const built = onlineActorsSql(scope);
+  if (built.empty) return { count: 0 };
+  const from = formatTimestamp(new Date(now.getTime() - ONLINE_WINDOW_MS));
+  const to = formatTimestamp(now);
+  const row = await db.get(built.sql, [from, to, ...built.params]);
+  return { count: toCount(row?.total) };
+}
+
+async function countUsers(db, built, params) {
+  const row = await db.get(built.sql, params);
+  return toCount(row?.total);
+}
+
+export async function queryUserStats(db, user, now = new Date()) {
+  const scope = await analyticsScope(db, user);
+  const probe = userTotalSql(scope, false);
+  if (probe.empty) return { total: 0, growthRate: null };
+  const columns = await listColumns(db, "sys_user");
+  const hasCreateTime = columns.some((column) => column.name === "create_time");
+  if (!hasCreateTime) {
+    return { total: await countUsers(db, probe, probe.params), growthRate: null };
+  }
+  const total = userTotalSql(scope, true);
+  const newer = userNewSql(scope);
+  const today = startOfDay(now);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const [headcount, todayNew, yesterdayNew] = await Promise.all([
+    countUsers(db, total, [formatTimestamp(now), ...total.params]),
+    countUsers(db, newer, [formatSecond(today), formatTimestamp(endOfDay(today)), ...newer.params]),
+    countUsers(db, newer, [
+      formatSecond(yesterday),
+      formatTimestamp(endOfDay(yesterday)),
+      ...newer.params,
+    ]),
+  ]);
+  return { total: headcount, growthRate: growthRate(todayNew, yesterdayNew) };
 }
 
 export async function queryVisitTrend(db, user, query = {}) {

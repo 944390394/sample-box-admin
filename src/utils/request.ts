@@ -7,6 +7,13 @@ import { usePermissionStoreHook } from "@/stores/permission";
 import { AuthStorage, redirectToLogin } from "@/utils/auth";
 import type { ApiResult } from "@/api/common";
 
+declare module "axios" {
+  interface AxiosRequestConfig {
+    /** 为 true 时失败不弹全局提示，由调用方自己处理 */
+    silent?: boolean;
+  }
+}
+
 // 防止同一请求在 token 刷新后重复进入重试，导致死循环
 const retriedRequests = new WeakSet<InternalAxiosRequestConfig>();
 
@@ -49,7 +56,7 @@ http.interceptors.response.use(
       return data;
     }
 
-    ElMessage.error(msg || "系统出错");
+    if (!response.config.silent) ElMessage.error(msg || "系统出错");
     return Promise.reject(new Error(msg || "系统出错"));
   },
 
@@ -57,7 +64,7 @@ http.interceptors.response.use(
     const { config, response } = error;
 
     if (!response) {
-      ElMessage.error("网络连接失败");
+      if (!config?.silent) ElMessage.error("网络连接失败");
       return Promise.reject(error);
     }
 
@@ -102,7 +109,7 @@ http.interceptors.response.use(
       return Promise.reject(new Error(msg || "权限不足"));
     }
 
-    ElMessage.error(msg || "请求失败");
+    if (!config?.silent) ElMessage.error(msg || "请求失败");
     return Promise.reject(new Error(msg || "请求失败"));
   }
 );

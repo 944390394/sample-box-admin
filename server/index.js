@@ -10,7 +10,12 @@ import { menuOptions, menuRoutes } from "./menus.js";
 import * as org from "./org-api.js";
 import { startSampleRuntime } from "./src/createSampleApp.js";
 import { audit } from "./src/log/audit.js";
-import { queryVisitOverview, queryVisitTrend } from "./src/log/operationAnalytics.js";
+import {
+  queryOnlineActors,
+  queryUserStats,
+  queryVisitOverview,
+  queryVisitTrend,
+} from "./src/log/operationAnalytics.js";
 import { queryOperationLogs } from "./src/log/operationLog.js";
 import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js";
 import { mergeDatabaseSettings, publicDatabase, scrub } from "./src/settings/databaseConfig.js";
@@ -275,6 +280,18 @@ const routes = [
     path: "/api/v1/logs/analytics/overview",
     auth: true,
     handler: visitOverview,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/logs/analytics/online",
+    auth: true,
+    handler: onlineActors,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/logs/analytics/users",
+    auth: true,
+    handler: userStats,
   },
   {
     method: "GET",
@@ -551,6 +568,14 @@ async function operationLogs(ctx) {
 
 async function visitOverview(ctx) {
   ctx.ok(await queryVisitOverview(state.db, ctx.user));
+}
+
+async function onlineActors(ctx) {
+  ctx.ok(await queryOnlineActors(state.db, ctx.user));
+}
+
+async function userStats(ctx) {
+  ctx.ok(await queryUserStats(state.db, ctx.user));
 }
 
 async function visitTrend(ctx) {

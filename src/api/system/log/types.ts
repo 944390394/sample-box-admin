@@ -85,3 +85,14 @@ export interface VisitOverviewDetail {
   /** 页面浏览量增长率 */
   pvGrowthRate: number;
 }
+
+/** 最近 15 分钟内出现过的不重复操作者 */
+export interface OnlineActorCount {
+  count: number;
+}
+
+/** 系统用户人数。没有创建时间时 growthRate 为空，页面只显示人数。 */
+export interface UserStatsDetail {
+  total: number;
+  growthRate: number | null;
+}

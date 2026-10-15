@@ -72,12 +72,13 @@
           <span class="stat-card__num">{{ onlineUserCount }}</span>
         </div>
         <span
+          v-if="onlineState !== 'pending'"
           :class="[
             'stat-card__badge',
-            isConnected ? 'stat-card__badge--on' : 'stat-card__badge--off',
+            onlineState === 'live' ? 'stat-card__badge--on' : 'stat-card__badge--off',
           ]"
         >
-          {{ isConnected ? "实时" : "离线" }}
+          {{ onlineState === "live" ? "近15分钟" : "离线" }}
         </span>
       </div>
 
@@ -91,9 +92,9 @@
         </div>
         <span
           v-if="uvGrowthText !== '--'"
-          :class="['stat-card__trend', `stat-card__trend--${uvTrendTone}`]"
+          :class="['stat-card__trend', uvTrendTone && `stat-card__trend--${uvTrendTone}`]"
         >
-          <el-icon :size="12">
+          <el-icon v-if="uvTrendTone" :size="12">
             <ArrowUp v-if="uvIsUp" />
             <ArrowDown v-else />
           </el-icon>
@@ -111,9 +112,9 @@
         </div>
         <span
           v-if="pvGrowthText !== '--'"
-          :class="['stat-card__trend', `stat-card__trend--${pvTrendTone}`]"
+          :class="['stat-card__trend', pvTrendTone && `stat-card__trend--${pvTrendTone}`]"
         >
-          <el-icon :size="12">
+          <el-icon v-if="pvTrendTone" :size="12">
             <ArrowUp v-if="pvIsUp" />
             <ArrowDown v-else />
           </el-icon>
@@ -127,11 +128,17 @@
         </div>
         <div class="stat-card__body">
           <span class="stat-card__label">系统用户</span>
-          <span class="stat-card__num">6</span>
+          <span class="stat-card__num">{{ userTotal }}</span>
         </div>
-        <span :class="['stat-card__trend', `stat-card__trend--${systemTrendTone}`]">
-          <el-icon :size="12"><ArrowUp /></el-icon>
-          12.5%
+        <span
+          v-if="userGrowthText"
+          :class="['stat-card__trend', userTrendTone && `stat-card__trend--${userTrendTone}`]"
+        >
+          <el-icon v-if="userTrendTone" :size="12">
+            <ArrowUp v-if="userIsUp" />
+            <ArrowDown v-else />
+          </el-icon>
+          {{ userGrowthText }}
         </span>
       </div>
     </section>
@@ -261,11 +268,15 @@ import {
   Document,
   VideoPlay,
 } from "@element-plus/icons-vue";
-import { useOnlineUsers } from "@/composables";
 
 const userStore = useUserStore();
 const settingsStore = useSettingsStore();
-const { onlineUserCount, isConnected } = useOnlineUsers();
+
+const ONLINE_POLL_MS = 30_000;
+const onlineUserCount = ref(0);
+const onlineState = ref<"pending" | "live" | "down">("pending");
+let onlineTimer = 0;
+let onlinePolling = false;
 
 const hours = new Date().getHours();
 const greetings = computed(() => {
@@ -374,11 +385,30 @@ const pvGrowthText = computed(() => {
   const r = visitOverviewData.value.pvGrowthRate;
   return r == null ? "--" : formatGrowthRate(r);
 });
+function trendTone(rate: number | null | undefined) {
+  if (rate == null || rate === 0) return "";
+  return rate > 0 ? "success" : "danger";
+}
+
 const uvIsUp = computed(() => (visitOverviewData.value.uvGrowthRate || 0) > 0);
 const pvIsUp = computed(() => (visitOverviewData.value.pvGrowthRate || 0) > 0);
-const uvTrendTone = computed(() => (uvIsUp.value ? "success" : "danger"));
-const pvTrendTone = computed(() => (pvIsUp.value ? "success" : "danger"));
-const systemTrendTone = "success";
+const uvTrendTone = computed(() => trendTone(visitOverviewData.value.uvGrowthRate));
+const pvTrendTone = computed(() => trendTone(visitOverviewData.value.pvGrowthRate));
+
+const userStats = ref<{ total: number; growthRate: number | null }>({
+  total: 0,
+  growthRate: null,
+});
+const userStatsReady = ref(false);
+const userTotal = computed(() => userStats.value.total);
+const userGrowthText = computed(() => {
+  if (!userStatsReady.value || userStats.value.growthRate == null) return "";
+  return formatGrowthRate(userStats.value.growthRate);
+});
+const userTrendTone = computed(() =>
+  userStatsReady.value ? trendTone(userStats.value.growthRate) : ""
+);
+const userIsUp = computed(() => (userStats.value.growthRate || 0) > 0);
 
 const tUv = useTransition(
   computed(() => visitOverviewData.value.todayUvCount),
@@ -435,6 +465,46 @@ function fetchVisitOverviewData() {
   LogAPI.getVisitOverview().then((d) => {
     visitOverviewData.value = d;
   });
+}
+
+function fetchUserStats() {
+  LogAPI.getUserStats().then((data) => {
+    userStats.value = {
+      total: Number(data.total) || 0,
+      growthRate:
+        data.growthRate == null || !Number.isFinite(Number(data.growthRate))
+          ? null
+          : Number(data.growthRate),
+    };
+    userStatsReady.value = true;
+  });
+}
+
+async function fetchOnlineUsers() {
+  try {
+    const data = await LogAPI.getOnlineActors();
+    const count = Number(data?.count);
+    onlineUserCount.value = Number.isFinite(count) ? Math.max(0, Math.round(count)) : 0;
+    onlineState.value = "live";
+  } catch {
+    onlineState.value = "down";
+  }
+}
+
+function startOnlinePoll() {
+  if (onlinePolling) return;
+  onlinePolling = true;
+  void fetchOnlineUsers();
+  onlineTimer = window.setInterval(() => {
+    void fetchOnlineUsers();
+  }, ONLINE_POLL_MS);
+}
+
+function stopOnlinePoll() {
+  onlinePolling = false;
+  if (!onlineTimer) return;
+  window.clearInterval(onlineTimer);
+  onlineTimer = 0;
 }
 
 function fetchVisitTrendData() {
@@ -561,7 +631,12 @@ watch(
 );
 onMounted(() => {
   fetchVisitOverviewData();
+  fetchUserStats();
+  startOnlinePoll();
 });
+onActivated(startOnlinePoll);
+onDeactivated(stopOnlinePoll);
+onUnmounted(stopOnlinePoll);
 </script>
 
 <style lang="scss" scoped>

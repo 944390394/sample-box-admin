@@ -8,10 +8,15 @@ import { migrate, openDatabase, seedOrg } from "../db.js";
 import { formatTimestamp } from "../src/domain/Clock.js";
 import {
   dailyStatsSql,
+  onlineActorsSql,
+  queryOnlineActors,
+  queryUserStats,
   queryVisitOverview,
   queryVisitTrend,
   resolveTrendDates,
   totalStatsSql,
+  userNewSql,
+  userTotalSql,
 } from "../src/log/operationAnalytics.js";
 
 const NOW = new Date(2026, 9, 15, 12, 0, 0, 0);
@@ -39,6 +44,34 @@ test("统计语句只读操作日志，并且趋势带时间", () => {
   assert.match(total.sql, /org_id IN \(\?\)/);
   assert.equal(total.sql.includes("sample_uplink"), false);
   assert.deepEqual(total.params, ["21"]);
+
+  const online = onlineActorsSql({ kind: "depts", ids: ["21", "2"] });
+  assert.match(online.sql, /FROM sys_operation_log/);
+  assert.match(online.sql, /created_at >= \?/);
+  assert.match(online.sql, /created_at <= \?/);
+  assert.match(online.sql, /COUNT\(DISTINCT actor_id\)/);
+  assert.match(online.sql, /actor_id <> ''/);
+  assert.match(online.sql, /org_id IN \(\?, \?\)/);
+  assert.equal(online.sql.includes("sample_uplink"), false);
+  assert.deepEqual(online.params, ["21", "2"]);
+
+  const headcount = userTotalSql({ kind: "all" }, true);
+  assert.match(headcount.sql, /FROM sys_user/);
+  assert.match(headcount.sql, /create_time <= \?/);
+  assert.equal(headcount.sql.includes("sample_uplink"), false);
+  assert.equal(headcount.sql.includes("sys_operation_log"), false);
+
+  const born = userNewSql({ kind: "depts", ids: ["11"] });
+  assert.match(born.sql, /FROM sys_user/);
+  assert.match(born.sql, /create_time >= \?/);
+  assert.match(born.sql, /create_time <= \?/);
+  assert.match(born.sql, /dept_id IN \(\?\)/);
+  assert.equal(born.sql.includes("sample_uplink"), false);
+  assert.deepEqual(born.params, ["11"]);
+
+  const undated = userTotalSql({ kind: "all" }, false);
+  assert.equal(undated.sql, "SELECT COUNT(*) AS total FROM sys_user");
+  assert.equal(undated.sql.includes("create_time"), false);
 
   const range = resolveTrendDates({ startDate: "2026-10-01", endDate: "2026-10-31" });
   assert.equal(range.dates.length, 31);
@@ -240,6 +273,128 @@ test("旧库只补操作日志的时间索引，原有行还在", async () => {
       uplinkAfter.map((item) => item.name),
       uplinkBefore.map((item) => item.name)
     );
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("在线人数取最近 15 分钟的操作者，用户增长率按今天相对昨天", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sample-box-dashboard-stats-"));
+  const db = await openDatabase(
+    { dialect: "sqlite", sqlitePath: path.join(dir, "stats.db") },
+    process.cwd()
+  );
+  try {
+    await migrate(db);
+    await seedOrg(db);
+    const logs = [
+      ["11", "2", "2026-10-15 11:50:00.000"],
+      ["11", "2", "2026-10-15 11:55:00.000"],
+      ["2", "20", "2026-10-15 11:45:00.000"],
+      ["21", "6", "2026-10-15 11:44:59.999"],
+      ["11", "", "2026-10-15 11:50:00.000"],
+      ["31", "30", "2026-10-15 11:50:00.000"],
+    ];
+    for (const [orgId, actorId, createdAt] of logs) {
+      await db.run(
+        `INSERT INTO sys_operation_log
+          (org_id, org_name, actor_id, actor_name, action, target_type, target_id, result, created_at, ip)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          orgId,
+          orgId,
+          actorId,
+          actorId,
+          "登录",
+          "user",
+          actorId || "0",
+          "成功",
+          createdAt,
+          "10.0.0.1",
+        ]
+      );
+    }
+    await db.run(
+      `INSERT INTO sample_uplink (box_id, imei, received_at, kind, summary, raw)
+       VALUES ('BOX-009', '860000000000001', ?, 'heartbeat', 'ok', '')`,
+      ["2026-10-15 11:50:00.000"]
+    );
+    const people = [
+      ["100", "11", "2026-10-15 09:00:00"],
+      ["101", "11", "2026-10-15 00:00:00"],
+      ["102", "21", "2026-10-14 18:00:00"],
+      ["103", "11", "2026-10-13 18:00:00"],
+      ["104", "31", "2026-10-15 08:00:00"],
+      ["105", "11", null],
+    ];
+    for (const [id, deptId, createTime] of people) {
+      await db.run(
+        `INSERT INTO sys_user
+          (id, username, nickname, password_hash, dept_id, status, create_time, update_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, `u${id}`, `u${id}`, "x", deptId, 1, createTime, createTime]
+      );
+    }
+
+    const admin = await db.get("SELECT * FROM sys_user WHERE username = ?", ["admin"]);
+    const branch = await db.get("SELECT * FROM sys_user WHERE username = ?", ["chen.ke"]);
+    const partner = await db.get("SELECT * FROM sys_user WHERE username = ?", ["lin.xia"]);
+    assert.equal((await queryOnlineActors(db, admin, NOW)).count, 3);
+    assert.equal((await queryOnlineActors(db, branch, NOW)).count, 1);
+    assert.equal((await queryOnlineActors(db, partner, NOW)).count, 0);
+    assert.equal((await queryOnlineActors(db, { dept_id: "" }, NOW)).count, 0);
+
+    const users = await queryUserStats(db, admin, NOW);
+    assert.equal(users.total, 12);
+    assert.equal(users.growthRate, 2);
+    const south = await queryUserStats(db, branch, NOW);
+    assert.equal(south.total, 2);
+    assert.equal(south.growthRate, -1);
+    const agency = await queryUserStats(db, partner, NOW);
+    assert.equal(agency.total, 2);
+    assert.equal(agency.growthRate, 0);
+    assert.deepEqual(await queryUserStats(db, { dept_id: "" }, NOW), {
+      total: 0,
+      growthRate: null,
+    });
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("用户表没有创建时间时只返回人数", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "sample-box-users-undated-"));
+  const db = await openDatabase(
+    { dialect: "sqlite", sqlitePath: path.join(dir, "undated.db") },
+    process.cwd()
+  );
+  try {
+    await db.exec(`CREATE TABLE sys_dept (
+      id TEXT PRIMARY KEY,
+      parent_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL,
+      sort INT NOT NULL,
+      status INT NOT NULL
+    )`);
+    await db.exec(`CREATE TABLE sys_user (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      dept_id TEXT NOT NULL,
+      status INT NOT NULL
+    )`);
+    await db.run(
+      "INSERT INTO sys_dept (id, parent_id, name, code, sort, status) VALUES ('1', '0', '总公司', 'HQ', 1, 1)"
+    );
+    await db.run(
+      "INSERT INTO sys_user (id, username, dept_id, status) VALUES ('2', 'admin', '1', 1), ('4', 'other', '1', 1)"
+    );
+    assert.deepEqual(await queryUserStats(db, { dept_id: "1" }, NOW), {
+      total: 2,
+      growthRate: null,
+    });
   } finally {
     await db.close();
     await rm(dir, { recursive: true, force: true });
