@@ -17,7 +17,7 @@ export class IngestService {
     this.events = new EventStream();
     this.events.subscribe((event) => this.cache.put(event.box));
     this.events.subscribe((event) => {
-      this.hub.publish(event.box);
+      this.hub.publish(event.box, event.record);
     });
   }
 

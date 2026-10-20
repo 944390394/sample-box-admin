@@ -20,10 +20,12 @@ export class SampleSocketServer {
         socket.close(4401, "登录已过期");
         return;
       }
-      const unsubscribe = this.hub.subscribe((box) => {
-        if (socket.readyState === socket.OPEN) {
-          socket.send(JSON.stringify({ type: "box", box: box.toJSON() }));
-        }
+      const unsubscribe = this.hub.subscribe((box, record) => {
+        if (socket.readyState !== socket.OPEN) return;
+        const message = { type: "box", box: box.toJSON() };
+        const uplink = uplinkList(record);
+        if (uplink) message.uplink = uplink;
+        socket.send(JSON.stringify(message));
       });
       socket.on("close", unsubscribe);
     });
@@ -35,4 +37,13 @@ export class SampleSocketServer {
       this.wss.close(() => resolve());
     });
   }
+}
+
+/** 实时通道只追加列表字段。原文等点开后再按主键解压。 */
+function uplinkList(record) {
+  if (!record || typeof record.toListJSON !== "function") return null;
+  const uplink = record.toListJSON();
+  if (!uplink || typeof uplink !== "object") return null;
+  delete uplink.raw;
+  return uplink;
 }

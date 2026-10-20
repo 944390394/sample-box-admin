@@ -182,11 +182,25 @@ test("WebSocket 在令牌有效时收到箱子状态", async () => {
       client.once("message", (data) => resolve(JSON.parse(String(data))));
       client.once("error", reject);
     });
-    hub.publish(sampleBox());
+    hub.publish(sampleBox(), {
+      toListJSON() {
+        return {
+          id: "",
+          box: "BOX-001",
+          time: "2026-09-28 17:11:27.128",
+          text: "定时上报",
+          kind: "timer",
+          raw: '{"secret":true}',
+        };
+      },
+    });
     const message = await incoming;
     assert.equal(message.type, "box");
     assert.equal(message.box.imei, "864317080992517");
     assert.equal(message.box.gps, "未定位");
+    assert.equal(message.uplink.kind, "timer");
+    assert.equal(message.uplink.text, "定时上报");
+    assert.equal(Object.hasOwn(message.uplink, "raw"), false);
     client.close();
   } finally {
     await sockets.close();

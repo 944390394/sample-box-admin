@@ -100,6 +100,16 @@ test("SQLite 入库后能按箱号读回原始报文", async () => {
     const again = await ingest.accept(packet({ uart: "why=timer,aa55=0", csq: 12 }));
     assert.equal(again.box.id, box.id);
     assert.equal(again.box.csq, 12);
+    // 同一秒内的上电和定时都要留下，不能按上报间隔抽成一条。
+    const both = await boxes.listLogs(box.id, {
+      from: "2026-09-28 00:00:00.000",
+      to: "2026-09-28 23:59:59.999",
+      limit: 100,
+    });
+    assert.deepEqual(both.list.map((item) => item.kind).sort(), ["boot", "timer"]);
+    for (const item of both.list) {
+      assert.equal(Object.hasOwn(item.toListJSON(), "raw"), false);
+    }
   } finally {
     if (boxes) await boxes.flush();
     await db.close();
@@ -141,4 +151,47 @@ test("事务失败时写入一起撤销，并发事务都能留下", async () =>
     await db.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("单箱报文查询带箱号和时间，不用 OFFSET，列表不含原文", async () => {
+  const calls = [];
+  const store = new SqlBoxStore({
+    dialect: "sqlite",
+    async all(sql, params) {
+      calls.push({ sql, params });
+      return [];
+    },
+  });
+  const page = await store.listLogs("BOX-001", {
+    from: "2026-10-01 00:00:00.000",
+    to: "2026-10-20 23:59:59.999",
+    limit: 100,
+  });
+  assert.equal(page.list.length, 0);
+  assert.equal(page.nextCursor, null);
+  assert.match(calls[0].sql, /FROM sample_uplink/);
+  assert.match(calls[0].sql, /box_id = \?/);
+  assert.match(calls[0].sql, /received_at >= \?/);
+  assert.match(calls[0].sql, /received_at <= \?/);
+  assert.equal(calls[0].sql.includes("OFFSET"), false);
+  assert.equal(calls[0].sql.includes("raw"), false);
+  assert.deepEqual(calls[0].params, [
+    "BOX-001",
+    "2026-10-01 00:00:00.000",
+    "2026-10-20 23:59:59.999",
+  ]);
+});
+
+test("箱子列表只查当前状态表", async () => {
+  const calls = [];
+  const store = new SqlBoxStore({
+    async all(sql) {
+      calls.push(sql);
+      return [];
+    },
+  });
+  await store.list();
+  assert.match(calls[0], /FROM sample_box/);
+  assert.equal(calls[0].includes("sample_uplink"), false);
+  assert.equal(calls[0].includes("raw"), false);
 });

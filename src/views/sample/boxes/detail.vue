@@ -7,7 +7,7 @@
       <el-button @click="router.push('/device/boxes')">返回采样箱</el-button>
     </el-empty>
 
-    <template v-else>
+    <template v-else-if="box">
       <el-card shadow="never">
         <template #header>
           <div class="head">
@@ -91,21 +91,38 @@
           <el-empty v-else description="暂无事件" :image-size="56" />
         </el-card>
 
-        <el-card v-if="allow(BOX_PERM.log)" shadow="never" header="日志（最近 7 天）">
+        <el-card v-if="allow(BOX_PERM.log)" shadow="never">
+          <template #header>
+            <div class="debug-head">
+              <span>{{ serverMode ? "调试" : "日志（最近 7 天）" }}</span>
+              <em v-if="serverMode">{{ streamState }} · 最近 7 天</em>
+            </div>
+          </template>
           <ul v-if="logs.length" class="feed">
-            <li v-for="(item, index) in logs" :key="item.time + item.text + index">
+            <li
+              v-for="(item, index) in logs"
+              :key="(item.id || item.time) + item.text + index"
+              :class="{ pick: serverMode }"
+              @click="openRaw(item)"
+            >
               <time>{{ item.time }}</time>
               <div>
-                <span>{{ item.text }}</span>
-                <em>{{ item.by }}</em>
-                <el-button v-if="serverMode && item.id" link type="primary" @click="openRaw(item)">
-                  原文
+                <template v-if="serverMode">
+                  <b>{{ uplinkType(item) }}</b>
+                  <span>{{ uplinkSummary(item) }}</span>
+                </template>
+                <template v-else>
+                  <span>{{ item.text }}</span>
+                  <em>{{ item.by }}</em>
+                </template>
+                <el-button v-if="serverMode" link type="primary" @click.stop="openRaw(item)">
+                  {{ shownRaw(item) ? "收起" : "原文" }}
                 </el-button>
-                <code v-if="shownRaw(item)">{{ formatRaw(shownRaw(item)) }}</code>
+                <code v-if="shownRaw(item)" @click.stop>{{ formatRaw(shownRaw(item)) }}</code>
               </div>
             </li>
           </ul>
-          <el-empty v-else description="暂无日志" :image-size="56" />
+          <el-empty v-else :description="serverMode ? '暂无报文' : '暂无日志'" :image-size="56" />
         </el-card>
       </div>
 
@@ -154,6 +171,7 @@
 <script setup lang="ts">
 import SampleBoxAPI, { type BoxLogItem } from "@/api/sample/box";
 import { useUserStore } from "@/stores/user";
+import { AuthStorage } from "@/utils/auth";
 import {
   alerts,
   BOX_PERM,
@@ -191,30 +209,215 @@ const activateOpen = ref(false);
 const taskOpen = ref(false);
 const currentTask = ref<LinkedTask | null>(null);
 
+const DEBUG_LIMIT = 100;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const POLL_MS = 3000;
+const STREAM_RETRY_MS = 5000;
+
 const serverMode = import.meta.env.VITE_MOCK_DEV_SERVER !== "true";
 const remoteBox = ref<SampleBox | null>(null);
 const remoteLogs = ref<BoxLogItem[]>([]);
 const rawById = ref<Record<string, string>>({});
 const ready = ref(!serverMode);
+const streamLive = ref(false);
+const polling = ref(false);
 const boxId = computed(() => String(route.params.id || ""));
 const box = computed(() => (serverMode ? remoteBox.value : findBox(boxId.value)));
-let poll = 0;
+const streamState = computed(() => {
+  if (streamLive.value) return "实时";
+  if (polling.value) return "轮询";
+  return "连接中";
+});
+
+let debugTicket = 0;
+let reconcileTimer = 0;
+let pollTimer = 0;
+let retryTimer = 0;
+let connectTimer = 0;
+let socket: WebSocket | null = null;
+let streamStopped = false;
+
+function padStamp(value: number, width = 2) {
+  return String(value).padStart(width, "0");
+}
+
+function formatStamp(date: Date) {
+  return `${date.getFullYear()}-${padStamp(date.getMonth() + 1)}-${padStamp(date.getDate())} ${padStamp(date.getHours())}:${padStamp(date.getMinutes())}:${padStamp(date.getSeconds())}.${padStamp(date.getMilliseconds(), 3)}`;
+}
+
+/** 结束时间多留一天，避免浏览器时区和服务器不一致时把刚到的报文排除。不按上报间隔抽稀。 */
+function debugQuery() {
+  const now = Date.now();
+  return {
+    from: formatStamp(new Date(now - 7 * DAY_MS)),
+    to: formatStamp(new Date(now + DAY_MS)),
+    limit: DEBUG_LIMIT,
+  };
+}
+
+function stripRaw(item: BoxLogItem): BoxLogItem {
+  const next = { ...item };
+  delete next.raw;
+  return next;
+}
+
+function sortLogs(rows: BoxLogItem[]) {
+  return [...rows].sort((left, right) => {
+    if (left.time !== right.time) return left.time < right.time ? 1 : -1;
+    return (Number(right.id) || 0) - (Number(left.id) || 0);
+  });
+}
+
+function sameUplink(left: BoxLogItem, right: BoxLogItem) {
+  if (left.id && right.id) return left.id === right.id;
+  return left.time === right.time && left.kind === right.kind && left.text === right.text;
+}
+
+async function loadDebug() {
+  const ticket = ++debugTicket;
+  const id = boxId.value;
+  const page = await SampleBoxAPI.logs(id, debugQuery());
+  if (ticket !== debugTicket || id !== boxId.value) return;
+  remoteLogs.value = sortLogs(page.list.map(stripRaw)).slice(0, DEBUG_LIMIT);
+}
+
+function scheduleReconcile() {
+  window.clearTimeout(reconcileTimer);
+  reconcileTimer = window.setTimeout(() => {
+    loadDebug().catch(() => undefined);
+  }, 200);
+}
+
+function prependUplink(item: BoxLogItem) {
+  if (item.box && item.box !== boxId.value) return;
+  const next = stripRaw(item);
+  if (remoteLogs.value.some((row) => sameUplink(row, next))) return;
+  remoteLogs.value = sortLogs([next, ...remoteLogs.value]).slice(0, DEBUG_LIMIT);
+  scheduleReconcile();
+}
 
 async function loadRemote() {
   if (!serverMode || !boxId.value) return;
+  const id = boxId.value;
   try {
-    const [nextBox, nextLogs] = await Promise.all([
-      SampleBoxAPI.detail(boxId.value),
-      SampleBoxAPI.logs(boxId.value),
-    ]);
-    remoteBox.value = nextBox;
-    remoteLogs.value = nextLogs.list;
+    const next = await SampleBoxAPI.detail(id);
+    if (id === boxId.value) remoteBox.value = next;
   } catch {
-    remoteBox.value = null;
-    remoteLogs.value = [];
-  } finally {
-    ready.value = true;
+    if (id === boxId.value) remoteBox.value = null;
   }
+  try {
+    await loadDebug();
+  } catch {
+    // 初次失败保持空列表，轮询或下一条实时报文再补。
+  } finally {
+    if (id === boxId.value) ready.value = true;
+  }
+}
+
+async function refreshLive() {
+  const id = boxId.value;
+  try {
+    const next = await SampleBoxAPI.detail(id);
+    if (id === boxId.value) remoteBox.value = next;
+  } catch {
+    // 短轮询失败时留着已经打开的箱子。
+  }
+  try {
+    await loadDebug();
+  } catch {
+    // 留着已经列出的报文。
+  }
+}
+
+function startPoll() {
+  if (pollTimer || streamStopped) return;
+  polling.value = true;
+  void refreshLive();
+  pollTimer = window.setInterval(() => {
+    void refreshLive();
+  }, POLL_MS);
+}
+
+function stopPoll() {
+  window.clearInterval(pollTimer);
+  pollTimer = 0;
+  polling.value = false;
+}
+
+function streamUrl() {
+  const token = encodeURIComponent(AuthStorage.getAccessToken());
+  const base = String(import.meta.env.VITE_APP_BASE_API || "").replace(/\/$/, "");
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${base}/api/v1/sample/stream?token=${token}`;
+}
+
+function applyLiveBox(next: SampleBox) {
+  if (!remoteBox.value || next.id !== remoteBox.value.id) return;
+  remoteBox.value = {
+    ...remoteBox.value,
+    ...next,
+    status: next.life || remoteBox.value.status,
+  };
+}
+
+function onStreamMessage(raw: string) {
+  let message: { type?: string; box?: SampleBox; uplink?: BoxLogItem };
+  try {
+    message = JSON.parse(raw) as { type?: string; box?: SampleBox; uplink?: BoxLogItem };
+  } catch {
+    return;
+  }
+  const live = message.box;
+  if (message.type !== "box" || !live || live.id !== boxId.value) return;
+  applyLiveBox(live);
+  if (message.uplink) prependUplink(message.uplink);
+}
+
+function connectStream() {
+  if (!serverMode || streamStopped) return;
+  window.clearTimeout(retryTimer);
+  if (!AuthStorage.getAccessToken()) {
+    streamLive.value = false;
+    startPoll();
+    return;
+  }
+  const current = new WebSocket(streamUrl());
+  socket = current;
+  window.clearTimeout(connectTimer);
+  connectTimer = window.setTimeout(() => {
+    if (streamStopped || socket !== current) return;
+    if (current.readyState !== WebSocket.OPEN) startPoll();
+  }, POLL_MS);
+  current.onopen = () => {
+    if (socket !== current) return;
+    streamLive.value = true;
+    stopPoll();
+    // 连上之前漏掉的报文补一次，之后只靠这条通道追加。
+    loadDebug().catch(() => undefined);
+  };
+  current.onmessage = (event) => {
+    if (socket !== current) return;
+    onStreamMessage(String(event.data));
+  };
+  current.onclose = () => {
+    if (socket !== current) return;
+    socket = null;
+    streamLive.value = false;
+    if (streamStopped) return;
+    startPoll();
+    retryTimer = window.setTimeout(connectStream, STREAM_RETRY_MS);
+  };
+}
+
+function stopStream() {
+  streamStopped = true;
+  window.clearTimeout(retryTimer);
+  window.clearTimeout(connectTimer);
+  window.clearTimeout(reconcileTimer);
+  stopPoll();
+  const current = socket;
+  socket = null;
+  current?.close();
 }
 
 watch(
@@ -223,6 +426,9 @@ watch(
     if (!serverMode) return;
     ready.value = false;
     remoteBox.value = null;
+    remoteLogs.value = [];
+    rawById.value = {};
+    window.clearTimeout(reconcileTimer);
     loadRemote();
   },
   { immediate: true }
@@ -230,11 +436,11 @@ watch(
 
 onMounted(() => {
   if (!serverMode) return;
-  poll = window.setInterval(loadRemote, 3000);
+  connectStream();
 });
 
 onUnmounted(() => {
-  window.clearInterval(poll);
+  stopStream();
 });
 
 const stepIndex = computed(() => {
@@ -305,21 +511,48 @@ const logs = computed((): BoxLogItem[] => {
     }));
 });
 
+function uplinkType(item: BoxLogItem) {
+  if (item.kind === "boot") return "上电上报";
+  if (item.kind === "timer") return "定时上报";
+  if (item.kind === "pad") return "开箱上报";
+  if (item.text) return item.text;
+  return "设备上报";
+}
+
+function uplinkSummary(item: BoxLogItem) {
+  const summary = item.text && item.text !== uplinkType(item) ? item.text : "";
+  const device = item.deviceTime ? `设备时间 ${item.deviceTime}` : "";
+  return [summary, device].filter(Boolean).join(" · ") || item.text || "—";
+}
+
 function shownRaw(item: BoxLogItem) {
   if (serverMode) return item.id ? rawById.value[item.id] || "" : "";
   return item.raw || "";
 }
 
+function hideRaw(id: string) {
+  if (!rawById.value[id]) return false;
+  const next = { ...rawById.value };
+  delete next[id];
+  rawById.value = next;
+  return true;
+}
+
 async function openRaw(item: BoxLogItem) {
-  if (!item.id) return;
-  if (rawById.value[item.id]) {
-    const next = { ...rawById.value };
-    delete next[item.id];
-    rawById.value = next;
-    return;
+  if (!serverMode) return;
+  let target = item;
+  if (!target.id) {
+    try {
+      await loadDebug();
+    } catch {
+      return;
+    }
+    target = remoteLogs.value.find((row) => row.id && sameUplink(row, item)) || item;
   }
-  const data = await SampleBoxAPI.raw(boxId.value, item.id, item.time);
-  rawById.value = { ...rawById.value, [item.id]: data.raw };
+  if (!target.id) return;
+  if (hideRaw(target.id)) return;
+  const data = await SampleBoxAPI.raw(boxId.value, target.id, target.time);
+  rawById.value = { ...rawById.value, [target.id]: data.raw };
 }
 
 function formatRaw(raw: string) {
@@ -509,8 +742,21 @@ function openTask(row: LinkedTask) {
   font-style: normal;
   color: var(--el-text-color-secondary);
 }
+.feed li.pick {
+  cursor: pointer;
+}
 .feed li > div {
   min-width: 0;
+}
+.debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.debug-head em {
+  font-size: 12px;
+  font-style: normal;
+  color: var(--el-text-color-secondary);
 }
 .feed code {
   display: block;
