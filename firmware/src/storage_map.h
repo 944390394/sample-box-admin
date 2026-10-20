@@ -1,0 +1,16 @@
+#ifndef SAMPLE_BOX_STORAGE_MAP_H
+#define SAMPLE_BOX_STORAGE_MAP_H
+
+#include <stdint.h>
+
+/* GD25Q80C，1 MB。扇区 4 KB。前 16 KB 是两份元数据和两份任务状态，剩下是上报队列。 */
+#define STORAGE_ERASE 0x1000u
+#define STORAGE_META_A 0x0000u
+#define STORAGE_META_B 0x1000u
+#define STORAGE_STATE_A 0x2000u
+#define STORAGE_STATE_B 0x3000u
+#define STORAGE_DATA_BASE 0x4000u
+#define STORAGE_CHIP_SIZE 0x100000u
+#define STORAGE_DATA_SIZE (STORAGE_CHIP_SIZE - STORAGE_DATA_BASE)
+
+#endif
