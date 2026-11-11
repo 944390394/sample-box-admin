@@ -115,10 +115,25 @@ function openVideo(id: string) {
   emit("video", id);
 }
 
+/** 封箱的时间（毫秒）；没封过箱为 null。 */
+const sealedAt = computed(() => {
+  const log = props.logs.find((l) => l.status === "已封箱");
+  return log ? (toDate(log.time)?.getTime() ?? null) : null;
+});
+
 /** 设备和推出来的事件怎么说。 */
 function describe(event: TaskEvent): Pick<Item, "type" | "title" | "extra" | "icon"> {
   const name = nameOf(event.boxId);
-  if (event.kind === "pad") return { type: "lid", title: `${name} 被打开`, icon: Unlock };
+  if (event.kind === "pad") {
+    // 封箱以后不该再开箱，单独说出来
+    const after = sealedAt.value != null && (toDate(event.time)?.getTime() ?? 0) > sealedAt.value;
+    return {
+      type: "lid",
+      title: `${name} 被打开${after ? "（封箱后）" : ""}`,
+      extra: after ? "封箱以后又打开过，签收核验会列为异常" : undefined,
+      icon: Unlock,
+    };
+  }
   if (event.kind === "shut") return { type: "lid", title: `${name} 已关上`, icon: Lock };
   if (event.kind === "boot")
     return {

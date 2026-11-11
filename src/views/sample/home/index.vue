@@ -40,8 +40,17 @@
           <section class="block">
             <div class="card-head section-head">
               <span class="card-head__title">待我处理</span>
-              <span class="text-muted">
-                {{ todoTotal ? `共 ${todoTotal} 件` : "暂时没有要你处理的事" }}
+              <span
+                class="text-muted"
+                title="能推进的任务（一张单只算一次）加待激活的箱子；低电、开着盖等是提醒，不算件数"
+              >
+                {{
+                  todoTotal
+                    ? `共 ${todoTotal} 件`
+                    : activeCards.length
+                      ? "只有提醒，没有要你推进的事"
+                      : "暂时没有要你处理的事"
+                }}
               </span>
             </div>
             <div v-if="activeCards.length" class="cards">
@@ -199,6 +208,7 @@ import {
   Unlock,
 } from "@element-plus/icons-vue";
 import WorkbenchAPI, {
+  todoCount,
   type BoxBrief,
   type Bucket,
   type FeedItem,
@@ -277,12 +287,6 @@ const tiles = computed<StatTile[]>(() => {
       value: stats.flags.low ?? 0,
       tone: stats.flags.low ? "danger" : "default",
     });
-  list.push({
-    key: "flag:alert",
-    label: "告警",
-    value: stats.flags.alert ?? 0,
-    tone: stats.flags.alert ? "danger" : "default",
-  });
   if (tasks?.moving)
     list.push({
       key: "task:moving",
@@ -409,16 +413,6 @@ const cards = computed<Card[]>(() => {
   );
   push(
     {
-      key: "alert",
-      title: "告警",
-      tone: "danger",
-      more: { path: "/device/boxes", query: { tile: "flag:alert" } },
-    },
-    b.alert,
-    true
-  );
-  push(
-    {
       key: "offline",
       title: "在途但离线",
       hint: "超过 3 个上报周期没上报",
@@ -454,7 +448,8 @@ const cards = computed<Card[]>(() => {
 const totalOf = (card: Card) => card.tasks?.total ?? card.boxes?.total ?? 0;
 const activeCards = computed(() => cards.value.filter((card) => totalOf(card) > 0));
 const quietCards = computed(() => cards.value.filter((card) => totalOf(card) === 0));
-const todoTotal = computed(() => activeCards.value.reduce((n, card) => n + totalOf(card), 0));
+// 和顶栏铃铛同一个数：卡片之间会重叠（一张单可能既待签收又开箱超限），不能把卡片数加起来
+const todoTotal = computed(() => (data.value ? todoCount(data.value) : 0));
 const showField = computed(() => {
   const d = data.value;
   if (!d) return false;

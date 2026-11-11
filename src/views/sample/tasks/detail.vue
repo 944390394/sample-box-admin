@@ -146,7 +146,7 @@
         type="error"
         :closable="false"
         class="block"
-        :title="`${overLimit.map((b) => `${b.name || b.id} 开了 ${b.opensDuring} 次`).join('，')}，超过任务上限 ${task.maxOpens} 次`"
+        :title="`${overLimit.map((b) => `${b.name || b.id} 开了 ${b.opensDuring} 次`).join('，')}，超过任务上限 ${task.maxOpens} 次，样品作废`"
       />
 
       <el-row :gutter="12" class="block equal">
@@ -741,8 +741,13 @@ async function inspectBox(boxId: string) {
   inspecting.value = boxId;
   try {
     const result = await API.inspect(String(routeInfo.params.id), boxId);
+    const skipped = (detail.value?.boxes || []).some((b) => b.voided && !b.inspectedAt);
     ElMessage.success(
-      result.done ? "全部箱子已开始检测，任务结束" : `已开始检测，还剩 ${result.left} 台`
+      result.done
+        ? skipped
+          ? "已开始检测，任务结束；作废的箱子不检测"
+          : "全部箱子已开始检测，任务结束"
+        : `已开始检测，还剩 ${result.left} 台`
     );
     await load();
   } finally {
@@ -777,18 +782,31 @@ const actionText = computed(() => {
   const n = t.boxIds.length;
   if (action.to === "待检测") {
     const over = overLimit.value.length
-      ? `其中 ${overLimit.value.length} 台开箱次数超过上限，异常的可以拒收。`
+      ? `其中 ${overLimit.value.length} 台开箱次数超过上限，样品作废：可以拒收；签收后这几台也不能开始检测。`
       : "";
     return `签收 ${n} 台采样箱${t.kind === "调拨" ? `，箱子改归 ${t.toOrg}` : ""}。签收后开箱次数不再累计，开箱检测时每台扫码点「开始检测」。${over}`;
   }
   if (action.to === "已检测") {
-    const left = (detail.value?.boxes || []).filter((b) => !b.inspectedAt).length;
-    return `剩下 ${left} 台箱子一起开始检测，任务结束。也可以在箱子列表里逐台开始检测。`;
+    const waiting = (detail.value?.boxes || []).filter((b) => !b.inspectedAt);
+    const voided = waiting.filter((b) => b.voided).length;
+    const left = waiting.length - voided;
+    const skip = voided ? `${voided} 台开箱超限、样品作废，不检测。` : "";
+    return left
+      ? `剩下 ${left} 台箱子一起开始检测，任务结束。${skip}也可以在箱子列表里逐台开始检测。`
+      : `${skip}任务结束，箱子回到未使用。`;
   }
   if (action.to === "已签收" && t.kind === "调拨")
     return `由 ${t.signer} 签收 ${n} 台采样箱，签收后箱子改归 ${t.toOrg}${t.signerId ? `，由 ${t.signer} 保管` : ""}。`;
-  if (action.to === "强制签收")
-    return `指定签收人是 ${t.signer}。你代为签收 ${n} 台采样箱，流转记录里记为「强制签收」并写明原因；箱子改归 ${t.toOrg}，仍由 ${t.signer} 保管。`;
+  if (action.to === "强制签收") {
+    const voided = overLimit.value.length
+      ? `开箱超限的 ${overLimit.value.length} 台签收后仍算样品作废，不能开始检测。`
+      : "";
+    if (t.kind !== "调拨")
+      return `核验有异常，你仍要签收 ${n} 台采样箱。流转记录里记为「强制签收」并写明原因。${voided}`;
+    return `${t.signer ? `指定签收人是 ${t.signer}。你代为签收` : "签收"} ${n} 台采样箱，流转记录里记为「强制签收」并写明原因；箱子改归 ${t.toOrg}${t.signer ? `，仍由 ${t.signer} 保管` : ""}。${voided}`;
+  }
+  if (action.to === "已拒收" && t.kind === "采样")
+    return `拒收即样品作废：任务结束，箱子回到未使用，需要的话重新建单补采。`;
   if (action.to === "已拒收")
     return detail.value?.can?.["退回中"]
       ? `拒收后箱子仍属 ${t.fromOrg}。勾选退回时任务加上返程，寄出方扫码接收后结束；不勾任务直接结束。`

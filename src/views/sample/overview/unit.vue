@@ -283,12 +283,6 @@ const tiles = computed<StatTile[]>(() => {
       value: s.flags.low ?? 0,
       tone: s.flags.low ? "danger" : "default",
     },
-    {
-      key: "flag:alert",
-      label: "告警",
-      value: s.flags.alert ?? 0,
-      tone: s.flags.alert ? "danger" : "default",
-    },
   ];
 });
 const stationTiles = computed<StatTile[]>(() => {

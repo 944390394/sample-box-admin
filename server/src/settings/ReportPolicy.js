@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ENDED, ENDED_SQL, initialOf, nextOf } from "./taskFlow.js";
+import { voidBoxIds } from "./taskPlaces.js";
 import {
   currentBoxSettings,
   firmwareAcceptsConfig,
@@ -423,6 +424,12 @@ export class ReportPolicy {
             [box_id, id, box_id]
           );
         }
+      } else if (status === "已封箱") {
+        // 记下封箱时的开箱次数：之后再开箱就是「封箱后开箱」
+        await tx.run(
+          "UPDATE sample_task_box SET opens_seal=(SELECT opens FROM sample_box WHERE id=sample_task_box.box_id) WHERE task_id=? AND opens_start IS NOT NULL",
+          [id]
+        );
       } else if (status === "待检测") {
         // 检测站签收：开箱次数到此为止（检测时开箱不算），箱子等着逐台扫码开始检测
         await tx.run(
@@ -431,11 +438,17 @@ export class ReportPolicy {
         );
       } else if (ENDED.includes(status)) {
         if (status === "已检测") {
-          // 整张单一起「开始检测」：还没扫的箱子都记上
-          await tx.run(
-            "UPDATE sample_task_box SET inspected_at=?, inspected_by=? WHERE task_id=? AND inspected_at IS NULL",
-            [new Date().toISOString(), String(actor.name || "").slice(0, 64), id]
-          );
+          // 整张单一起「开始检测」：还没扫的箱子都记上；开箱超限作废的不检测，不记
+          const voided = await voidBoxIds(tx, id, JSON.parse(task.body));
+          const at = new Date().toISOString(),
+            by = String(actor.name || "").slice(0, 64);
+          for (const { box_id } of ids) {
+            if (voided.has(box_id)) continue;
+            await tx.run(
+              "UPDATE sample_task_box SET inspected_at=?, inspected_by=? WHERE task_id=? AND box_id=? AND inspected_at IS NULL",
+              [at, by, id, box_id]
+            );
+          }
         }
         await tx.run("DELETE FROM box_active_task WHERE task_id=?", [id]);
         for (const { box_id } of ids) {
@@ -495,6 +508,9 @@ export class ReportPolicy {
       );
       if (!link) throw new Error("这台箱子不在这张任务单里");
       if (link.inspected_at) throw new Error("这台箱子已经开始检测了");
+      // 开箱超过任务上限的箱子样品作废（强制签收也一样），不检测；整张单结束时一起释放
+      const voided = await voidBoxIds(tx, taskId, JSON.parse(task.body));
+      if (voided.has(boxId)) throw new Error("这台箱子开箱次数超过上限，样品已作废，不能开始检测");
       const now = new Date().toISOString();
       const by = String(actor.name || "").slice(0, 64);
       await tx.run(
@@ -516,30 +532,40 @@ export class ReportPolicy {
         note: box?.name || boxId,
         at: now,
       });
-      const left = Number(
-        (
-          await tx.get(
-            "SELECT COUNT(*) AS n FROM sample_task_box WHERE task_id=? AND inspected_at IS NULL",
-            [taskId]
-          )
-        ).n
+      const waiting = await tx.all(
+        "SELECT box_id FROM sample_task_box WHERE task_id=? AND inspected_at IS NULL",
+        [taskId]
       );
+      const left = waiting.filter((row) => !voided.has(row.box_id)).length;
+      const released = [boxId];
       if (left === 0) {
         await tx.run("DELETE FROM box_active_task WHERE task_id=?", [taskId]);
         await tx.run("UPDATE sample_task SET status='已检测' WHERE id=? AND status='待检测'", [
           taskId,
         ]);
+        // 作废的箱子不检测，整张单结束时一起回到「未使用」
+        for (const { box_id } of waiting) {
+          await tx.run(
+            `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
+              AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.status NOT IN (${ENDED_SQL}) AND m.inspected_at IS NULL)`,
+            [box_id, box_id, box_id]
+          );
+          released.push(box_id);
+        }
+        const note = waiting.length
+          ? `其余箱子已开始检测，${waiting.length} 台开箱超限作废、不检测`
+          : "全部箱子已开始检测";
         // 晚 1 毫秒，流转记录按时间排时一定在最后一台「开始检测」之后
         await addTaskLog(tx, {
           taskId,
           status: "已检测",
           action: "检测完成",
           actor,
-          note: "全部箱子已开始检测",
+          note,
           at: new Date(Date.parse(now) + 1).toISOString(),
         });
       }
-      await this.refresh([boxId], tx);
+      await this.refresh(released, tx);
       result = { done: left === 0, left };
     });
     this.onPolicyChanged?.([boxId]);

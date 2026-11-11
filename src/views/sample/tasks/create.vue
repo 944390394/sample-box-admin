@@ -196,7 +196,7 @@
                 }}
               </p>
             </el-form-item>
-            <el-form-item label="计划地点">
+            <el-form-item label="计划地点" required :error="errors.placeAt">
               <PlaceField
                 :key="form.orgId || 'none'"
                 v-model="form.placeAt"
@@ -258,10 +258,10 @@
                 </template>
               </div>
               <p class="tip">
-                从任务开始到结束，按箱子上报的开箱次数计算；超过上限会在任务列表和详情里标红。{{
+                从任务开始到结束，按箱子上报的开箱次数计算；超过上限的箱子标红、样品作废：签收时只能拒收或强制签收，强制签收后也不能开始检测。{{
                   form.kind === "调拨"
                     ? "调拨途中一般不该开箱，可设为 0。"
-                    : "采样一般开一次装样、一次封箱，可按流程设置。"
+                    : "采样默认每台最多 2 次（开一次装样、一次封箱）。"
                 }}
               </p>
             </el-form-item>
@@ -505,6 +505,7 @@ import API, {
 } from "@/api/sample/report-policy";
 import type { SampleBox } from "../data";
 import PolicyFields from "../boxes/PolicyFields.vue";
+import { telemetryState } from "../boxes/telemetry";
 import PlaceField from "./PlaceField.vue";
 import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
@@ -610,12 +611,19 @@ const editOpen = ref(false),
   editId = ref(""),
   editPolicy = ref<Policy>({ ...policy.value });
 const arriveRadius = ref(2000);
-const limitOpens = ref(false),
-  maxOpens = ref(0);
-// 调拨途中一般不该开箱，打开限制时调拨默认 0 次、采样默认 2 次
+// 采样单默认限制每台 2 次，超过即样品作废；调拨默认不限，打开时默认 0 次（途中一般不该开箱）
+const limitOpens = ref(form.kind === "采样"),
+  maxOpens = ref(form.kind === "采样" ? 2 : 0);
 watch(limitOpens, (on) => {
   if (on) maxOpens.value = form.kind === "调拨" ? 0 : 2;
 });
+watch(
+  () => form.kind,
+  (kind) => {
+    limitOpens.value = kind === "采样";
+    maxOpens.value = kind === "采样" ? 2 : 0;
+  }
+);
 const orgs = ref<TaskOrg[]>([]),
   fromUsers = ref<Person[]>([]),
   toUsers = ref<Person[]>([]);
@@ -705,10 +713,46 @@ function checkStep(key: StepKey) {
   if (key === "sample" && form.trip && !form.orgId) errors.orgId = "寄送采样箱要选择采样单位";
   if (key === "sample" && form.trip && form.orgId && form.orgId === form.fromOrgId)
     errors.orgId = "采样单位不能和寄出单位相同";
+  // 没有计划地点就没法判断箱子是不是在采样点开的箱，开箱录像也不会按地点触发
+  if (
+    key === "sample" &&
+    form.kind === "采样" &&
+    !form.placeAt?.address?.trim() &&
+    form.placeAt?.lng == null
+  )
+    errors.placeAt = "请填写计划地点：用来核对开箱地点，开箱录像也按它判断";
   return !Object.keys(errors).length;
 }
-function next() {
+/** 选中的箱子里离线或电量低的：建单前提醒，免得到现场才发现开关箱记不下来。 */
+function riskyBoxes() {
+  const now = Date.now();
+  return chosenBoxes.value
+    .filter((box) => form.boxIds.includes(box.id))
+    .map((box) => {
+      const why: string[] = [];
+      if (!telemetryState(box.last, box.reportPeriodSec, now).online) why.push("离线");
+      if (box.batteryUsable != null && box.batteryUsable < 20)
+        why.push(`可用电量 ${box.batteryUsable}%`);
+      return why.length ? `${box.name || box.id}（${why.join("、")}）` : "";
+    })
+    .filter(Boolean);
+}
+async function next() {
   if (!checkStep(current.value)) return;
+  if (current.value === "boxes") {
+    const risky = riskyBoxes();
+    if (risky.length) {
+      try {
+        await ElMessageBox.confirm(
+          `${risky.join("、")}。离线或电量低的箱子开关箱可能记不下来、补不回来，建议换一台。`,
+          "这些箱子状态不好",
+          { type: "warning", confirmButtonText: "仍然使用", cancelButtonText: "回去换箱子" }
+        );
+      } catch {
+        return;
+      }
+    }
+  }
   if (current.value === "boxes" && (form.kind === "调拨" || form.trip) && !form.fromOrgId)
     form.fromOrgId = suggestedFrom();
   step.value = Math.min(step.value + 1, steps.value.length - 1);

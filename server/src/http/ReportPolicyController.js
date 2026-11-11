@@ -39,6 +39,7 @@ import {
   openCounts,
   overOpenLimit,
   radiusOf,
+  sealOpenCounts,
   targetOf,
 } from "../settings/taskPlaces.js";
 
@@ -425,10 +426,11 @@ export class ReportPolicyController {
       `SELECT t.status, COUNT(*) AS n FROM sample_task t ${base} GROUP BY t.status`,
       params
     );
-    const counts = { 全部: 0, 进行中: 0, 已结束: 0 };
+    const counts = { 全部: 0, 进行中: 0, 已结束: 0, 签收: 0 };
     for (const row of grouped) {
       const n = Number(row.n);
       counts[row.status] = n;
+      if (SIGN_STEPS.includes(row.status)) counts.签收 += n;
       counts.全部 += n;
       counts[ENDED.includes(row.status) ? "已结束" : "进行中"] += n;
     }
@@ -437,8 +439,9 @@ export class ReportPolicyController {
       `SELECT t.* FROM sample_task t ${base ? `${base} AND` : "WHERE"} t.status NOT IN (${ENDED_SQL}) ORDER BY created_at DESC LIMIT 500`,
       params
     );
+    // 只能取消的不算「待我处理」：和工作台、顶栏铃铛用同一个口径
     const mineRows = activeRows.filter((row) =>
-      Object.values(this.#abilities(ctx, JSON.parse(row.body), row.status)).some(Boolean)
+      actionable(this.#abilities(ctx, JSON.parse(row.body), row.status))
     );
     counts.mine = mineRows.length;
 
@@ -446,6 +449,9 @@ export class ReportPolicyController {
       statusParams = [...params];
     if (ctx.query.status === "进行中") statusClauses.push(`t.status NOT IN (${ENDED_SQL})`);
     else if (ctx.query.status === "已结束") statusClauses.push(`t.status IN (${ENDED_SQL})`);
+    // 「签收」：调拨的待签收和采样的待核验都是签收核验那一步，列在一起
+    else if (ctx.query.status === "签收")
+      statusClauses.push(`t.status IN (${SIGN_STEPS.map((s) => `'${s}'`).join(",")})`);
     else if (
       typeof ctx.query.status === "string" &&
       ctx.query.status &&
@@ -572,6 +578,9 @@ export class ReportPolicyController {
     const target = targetOf(task, row.status);
     const withPosition = ctx.access.perms.has(BOX.location);
     const counts = await openCounts(this.db, row.id);
+    // 开箱超限的箱子样品作废：强制签收后也不能开始检测
+    const voided = new Set(overOpenLimit(task, counts));
+    const afterSeal = await sealOpenCounts(this.db, row.id);
     const perms0 = ctx.access.perms;
     // 工况按字段给：电量、充电、箱盖、信号各要各的权限；一项都没有时 status 为空
     const statusOf = (state) => {
@@ -611,6 +620,8 @@ export class ReportPolicyController {
       boxes.push({
         ...box,
         opensDuring: counts.get(box.id) ?? null,
+        opensAfterSeal: afterSeal.get(box.id) ?? null,
+        voided: voided.has(box.id),
         owner: state?.owner || "",
         inspectedAt: inspected.get(box.id)?.inspected_at || "",
         inspectedBy: inspected.get(box.id)?.inspected_by || "",
@@ -800,7 +811,9 @@ export class ReportPolicyController {
       `SELECT t.* FROM sample_task t WHERE t.status NOT IN (${ENDED_SQL})${visible.sql ? ` AND ${visible.sql}` : ""} ORDER BY created_at DESC LIMIT 500`,
       visible.params
     );
+    // todo：我现在能推进的任务（去重），工作台标题、顶栏铃铛、任务单「待我处理」都用这个数
     const groups = {
+      todo: [],
       send: [],
       arrive: [],
       sign: [],
@@ -826,6 +839,7 @@ export class ReportPolicyController {
         to: task.kind === "调拨" ? task.toOrg || "" : task.org || "",
         boxes: (task.boxIds || []).length,
       };
+      if (actionable(can)) groups.todo.push(brief);
       if (can["运送中"]) groups.send.push(brief);
       if (can["待签收"] || (row.status === "运送中" && can["待采样"])) groups.arrive.push(brief);
       if (can["已签收"] || can["待检测"] || can[FORCE_SIGN]) groups.sign.push(brief);
@@ -1217,6 +1231,14 @@ export class ReportPolicyController {
       ip: ctx.ip || "",
     });
   }
+}
+
+/** 签收核验那一步：调拨叫「待签收」，采样寄回叫「待核验」。任务单列表的「待签收」标签两种都列。 */
+const SIGN_STEPS = ["待签收", "待核验"];
+
+/** 有取消以外的动作可做：算「待我处理」。只能取消的（比如管理员看别人的单）不算。 */
+function actionable(can) {
+  return Object.entries(can).some(([to, ok]) => ok && to !== "已取消");
 }
 
 /** 任务要记进出的地点：调拨看寄出、收货地址，采样看计划地点（双向再加寄出地址）。没坐标的跳过。 */

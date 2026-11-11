@@ -27,7 +27,6 @@
             <el-radio-button value="">全部</el-radio-button>
             <el-radio-button value="在途">{{ lifeLabel("在途") }}</el-radio-button>
             <el-radio-button value="未使用">{{ lifeLabel("未使用") }}</el-radio-button>
-            <el-radio-button value="alert">异常</el-radio-button>
           </el-radio-group>
         </div>
         <div class="text-muted count">
@@ -135,7 +134,6 @@ const shown = computed(() => {
   return boxes.value.filter((box) => {
     if (text && !box.id.includes(text) && !(box.name || "").toLowerCase().includes(text))
       return false;
-    if (life.value === "alert") return Boolean(box.alert);
     return !life.value || box.life === life.value;
   });
 });
@@ -150,11 +148,6 @@ const kpis = computed(() => {
       label: `台${lifeLabel("在途")}`,
       value: list.filter((b) => b.life === "在途").length,
       tone: "",
-    },
-    {
-      label: "台告警",
-      value: list.filter((b) => b.alert).length,
-      tone: list.some((b) => b.alert) ? "bad" : "",
     },
   ];
 });

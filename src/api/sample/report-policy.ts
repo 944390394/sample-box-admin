@@ -112,6 +112,10 @@ export interface TaskBox {
   near: boolean | null;
   /** 任务开始以来开了几次箱；任务还没开始为 null。 */
   opensDuring?: number | null;
+  /** 开箱超过任务上限，样品作废：强制签收后也不能开始检测。 */
+  voided?: boolean;
+  /** 封箱以后又开了几次箱；还没封箱（或调拨单）为 null。 */
+  opensAfterSeal?: number | null;
   owner?: string;
   /** 没有状态权限为 null。 */
   status?: {
@@ -134,6 +138,7 @@ export interface ReceiveBox {
   name: string;
   missing: boolean;
   opensDuring: number | null;
+  opensAfterSeal?: number | null;
   over: boolean;
   near: boolean | null;
   distanceM: number | null;

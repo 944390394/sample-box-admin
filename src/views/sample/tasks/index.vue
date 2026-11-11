@@ -225,7 +225,12 @@ const tabs = computed(() => [
   { key: "进行中", label: "进行中", count: counts.value.进行中 },
   { key: "待寄出", label: "待寄出", count: counts.value["待寄出"] ?? 0 },
   { key: "运送中", label: "运送中", count: counts.value["运送中"] ?? 0 },
-  { key: "待签收", label: "待签收", count: counts.value["待签收"] ?? 0 },
+  // 调拨的「待签收」和采样寄回的「待核验」都是签收核验，列在一起
+  {
+    key: "签收",
+    label: "待签收",
+    count: counts.value["签收"] ?? (counts.value["待签收"] ?? 0) + (counts.value["待核验"] ?? 0),
+  },
   { key: "待采样", label: "待采样", count: counts.value["待采样"] ?? 0 },
   { key: "采样中", label: "采样中", count: counts.value["采样中"] ?? 0 },
   { key: "已结束", label: "已结束", count: counts.value.已结束 },

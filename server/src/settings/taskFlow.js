@@ -51,7 +51,7 @@ export function initialOf(task) {
 
 /**
  * 从 status 能推进到哪些状态：流程里的下一步，加上签收那一步的拒收和任何时候的取消。
- * 拒收：调拨单在待签收时（可以选退回寄出单位）；送检测站的采样单在待核验时。
+ * 拒收：调拨单在待签收时（可以选退回寄出单位）；采样单在待核验时（拒收即样品作废，比如开箱超限）。
  */
 export function nextOf(task, status) {
   if (ENDED.includes(status)) return [];
@@ -61,7 +61,7 @@ export function nextOf(task, status) {
   const next = [steps[index + 1]];
   if (
     (task.kind === "调拨" && status === "待签收") ||
-    (task.inspect && task.kind === "采样" && status === "待核验")
+    (task.kind === "采样" && status === "待核验")
   )
     next.push("已拒收");
   if (task.kind === "调拨" && status === "待签收") next.push("退回中");

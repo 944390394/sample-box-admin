@@ -84,13 +84,31 @@
     </el-table-column>
     <el-table-column
       :label="maxOpens != null ? `开箱（上限 ${maxOpens}）` : '任务期间开箱'"
-      width="120"
+      width="150"
     >
       <template #default="{ row }">
         <span v-if="row.opensDuring == null" class="muted">未开始</span>
         <template v-else>
           <span :class="{ danger: over(row as Row) }">{{ row.opensDuring }} 次</span>
-          <el-tag v-if="over(row as Row)" type="danger" size="small" class="tag">超限</el-tag>
+          <el-tag
+            v-if="over(row as Row)"
+            type="danger"
+            size="small"
+            class="tag"
+            effect="dark"
+            title="开箱次数超过任务上限，样品作废"
+          >
+            超限 · 作废
+          </el-tag>
+          <el-tag
+            v-if="row.opensAfterSeal"
+            type="danger"
+            size="small"
+            class="tag"
+            title="封箱以后又打开过"
+          >
+            封箱后开 {{ row.opensAfterSeal }} 次
+          </el-tag>
         </template>
       </template>
     </el-table-column>
@@ -118,6 +136,14 @@
             {{ ago(row.inspectedAt) }}{{ row.inspectedBy ? ` · ${row.inspectedBy}` : "" }}
           </div>
         </template>
+        <el-tag
+          v-else-if="row.voided || over(row as Row)"
+          type="danger"
+          size="small"
+          title="开箱次数超过任务上限，样品作废，不检测"
+        >
+          作废，不检测
+        </el-tag>
         <el-button
           v-else-if="canInspect && !row.missing"
           size="small"
@@ -168,7 +194,10 @@ const rows = computed<Row[]>(() =>
 const hasStatus = computed(() => props.boxes.some((b) => b.status));
 
 function over(row: Row) {
-  return props.maxOpens != null && row.opensDuring != null && row.opensDuring > props.maxOpens;
+  return (
+    Boolean(row.voided) ||
+    (props.maxOpens != null && row.opensDuring != null && row.opensDuring > props.maxOpens)
+  );
 }
 function batteryColor(p: number) {
   return p < 20 ? "#dc2626" : p < 50 ? "#ea580c" : "#16a34a";

@@ -104,10 +104,37 @@ export async function openCounts(db, taskId) {
   );
 }
 
+/**
+ * 封箱以后各箱又开了几次箱：没封过箱（调拨、还没到封箱）返回 null。
+ * 结束了用结束时的次数，没结束用当前次数；设备抹除后算出负数时按 0。
+ */
+export async function sealOpenCounts(db, taskId) {
+  const rows = await db.all(
+    "SELECT m.box_id, m.opens_seal, m.opens_end, b.opens FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=?",
+    [taskId]
+  );
+  return new Map(
+    rows.map((row) => {
+      if (row.opens_seal == null) return [row.box_id, null];
+      const until = row.opens_end ?? row.opens ?? row.opens_seal;
+      return [row.box_id, Math.max(0, Number(until) - Number(row.opens_seal))];
+    })
+  );
+}
+
 /** 开箱次数超过任务上限的箱号。 */
 export function overOpenLimit(task, counts) {
   if (!Number.isInteger(task.maxOpens)) return [];
   return [...counts.entries()].filter(([, n]) => n != null && n > task.maxOpens).map(([id]) => id);
+}
+
+/**
+ * 样品作废的箱子：任务期间开箱次数超过上限。次数只会变多，超了就一直算作废，
+ * 强制签收也不改变——作废的箱子不能「开始检测」。没设上限的任务没有作废。
+ */
+export async function voidBoxIds(db, taskId, task) {
+  if (!Number.isInteger(task?.maxOpens)) return new Set();
+  return new Set(overOpenLimit(task, await openCounts(db, taskId)));
 }
 
 /** 目标地址自己设了误差范围就用它，否则用系统设置的到达半径。 */

@@ -313,12 +313,6 @@ const tiles = computed<StatTile[]>(() => {
     },
     { key: "life:停用", label: lifeLabel("停用"), value: counts.value["停用"] ?? 0, tone: "info" },
     {
-      key: "flag:alert",
-      label: "告警",
-      value: flags.value.alert ?? 0,
-      tone: flags.value.alert ? "danger" : "default",
-    },
-    {
       key: "flag:offline",
       label: "离线",
       value: flags.value.offline ?? 0,

@@ -200,6 +200,55 @@ test("寄送采样单：寄出单位寄出，采样单位确认到达和采样�
     );
     // 采样单不改箱子归属
     assert.equal((await boxes.findById(box.id)).orgId, "2");
+
+    // 封箱后又开箱：签收核验列为异常，不能直接签收；可以拒收（样品作废）
+    const three = (await call(c.createTask.bind(c), { ...admin, body: { ...base, trip: "双向" } }))
+      .id;
+    for (const [who, status] of [
+      [admin, "运送中"],
+      [sampler, "待采样"],
+      [sampler, "采样中"],
+    ]) {
+      await call(c.transition.bind(c), { ...who, params: { id: three }, body: { status } });
+    }
+    await ingest.accept(
+      packet({ uart: "why=pad,opens=1,seq=2", gpsfix: 1, lng: 114.3, lat: 22.8 })
+    );
+    await call(c.transition.bind(c), {
+      ...sampler,
+      params: { id: three },
+      body: { status: "已封箱" },
+    });
+    detail = await call(c.taskDetail.bind(c), { ...admin, params: { id: three } });
+    assert.equal(detail.boxes[0].opensDuring, 1);
+    assert.equal(detail.boxes[0].opensAfterSeal, 0);
+    await ingest.accept(
+      packet({ uart: "why=pad,opens=2,seq=3", gpsfix: 1, lng: 114.3, lat: 22.8 })
+    );
+    for (const [who, status] of [
+      [sampler, "在途"],
+      [admin, "待核验"],
+    ]) {
+      await call(c.transition.bind(c), { ...who, params: { id: three }, body: { status } });
+    }
+    detail = await call(c.taskDetail.bind(c), { ...admin, params: { id: three } });
+    assert.equal(detail.boxes[0].opensAfterSeal, 1);
+    // 这里的管理员没有「查看开箱次数」，只说开过、不给次数
+    assert.match(detail.check.problems.map((p) => p.text).join("；"), /封箱后又开过箱/);
+    await assert.rejects(
+      call(c.transition.bind(c), { ...admin, params: { id: three }, body: { status: "已签收" } }),
+      /封箱后又开过箱/
+    );
+    await call(c.transition.bind(c), {
+      ...admin,
+      params: { id: three },
+      body: { status: "已拒收", note: "封箱后被打开，样品作废" },
+    });
+    assert.equal(
+      (await db.get("SELECT status FROM sample_task WHERE id=?", [three])).status,
+      "已拒收"
+    );
+    assert.equal((await boxes.findById(box.id)).life, "未使用");
   } finally {
     await boxes.flush();
     await db.close();

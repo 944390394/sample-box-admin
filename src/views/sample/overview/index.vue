@@ -122,7 +122,6 @@ const COLS: { key: ColKey; label: string; tone: string }[] = [
   { key: "pending", label: lifeLabel("待激活"), tone: "warning" },
   { key: "offline", label: "离线", tone: "warning" },
   { key: "low", label: "低电量", tone: "danger" },
-  { key: "alert", label: "告警", tone: "danger" },
   { key: "inbound", label: "来站在途", tone: "primary" },
   { key: "arrived", label: "待检测", tone: "warning" },
   { key: "inspected", label: "今日已检测", tone: "success" },
@@ -171,12 +170,6 @@ const tiles = computed<StatTile[]>(() => {
       label: "低电量",
       value: s.flags.low ?? 0,
       tone: s.flags.low ? "danger" : "default",
-    },
-    {
-      key: "flag:alert",
-      label: "告警",
-      value: s.flags.alert ?? 0,
-      tone: s.flags.alert ? "danger" : "default",
     },
   ];
 });
