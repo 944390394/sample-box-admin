@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { depts, flattenDepts, roles, users } from "../shared/org.js";
 import { hashPassword } from "./auth.js";
+import { ensureSchema } from "./src/store/schema.js";
 import { SqliteExecutor } from "./src/store/SqliteExecutor.js";
 
 const MIGRATION_TABLE = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -21,6 +22,9 @@ export async function openDatabase(config, projectRoot) {
       user: config.user,
       password: config.password,
       database: config.database,
+      charset: "utf8mb4",
+      timezone: "+08:00",
+      dateStrings: true,
       multipleStatements: true,
     });
     return {
@@ -81,6 +85,7 @@ export async function migrate(db) {
       new Date().toISOString(),
     ]);
   }
+  await ensureSchema(db);
 }
 
 export async function seedOrg(db) {
@@ -150,14 +155,25 @@ export async function seedOrg(db) {
   };
   if (typeof db.transaction === "function") {
     await db.transaction(insertAll);
+    await forceFirstChange(db);
     return;
   }
   await db.exec("BEGIN");
   try {
     await insertAll(db);
     await db.exec("COMMIT");
+    await forceFirstChange(db);
   } catch (error) {
     await db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+/** 初始账号用的是公开的默认密码，首次登录必须改掉。旧库没有这一列时跳过。 */
+async function forceFirstChange(db) {
+  try {
+    await db.run("UPDATE sys_user SET must_change_password = 1");
+  } catch {
+    /* 迁移 030 之前的库没有这一列 */
   }
 }

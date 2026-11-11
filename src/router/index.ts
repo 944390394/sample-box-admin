@@ -24,6 +24,20 @@ export const constantRoutes: RouteRecordRaw[] = [
   },
 
   {
+    path: "/force-password",
+    component: () => import("@/views/login/ForcePassword.vue"),
+    meta: { hidden: true },
+  },
+
+  // 旧页面并进了新页面：上报记录、调试记录都在采样箱详情的「上报记录」里
+  { path: "/monitor/reports", redirect: "/device/boxes", meta: { hidden: true } },
+  {
+    path: "/device/boxes/:id/debug",
+    redirect: (to) => ({ path: `/device/boxes/${String(to.params.id)}`, query: { tab: "log" } }),
+    meta: { hidden: true },
+  },
+
+  {
     path: "/setup",
     component: () => import("@/views/setup/index.vue"),
     meta: { hidden: true },
@@ -33,21 +47,9 @@ export const constantRoutes: RouteRecordRaw[] = [
     path: "/",
     name: "/",
     component: Layout,
-    redirect: "/dashboard",
+    // 进系统直接到工作台
+    redirect: "/monitor/home",
     children: [
-      {
-        path: "dashboard",
-        component: () => import("@/views/dashboard/index.vue"),
-        // 用于 keep-alive 功能，需要与 SFC 中自动推导或显式声明的组件名称一致
-        // 参考文档: https://cn.vuejs.org/guide/built-ins/keep-alive.html#include-exclude
-        name: "Dashboard",
-        meta: {
-          title: "dashboard",
-          icon: "homepage",
-          affix: true,
-          keepAlive: true,
-        },
-      },
       {
         path: "401",
         component: () => import("@/views/error/401.vue"),
@@ -63,18 +65,6 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "Profile",
         component: () => import("@/views/profile/index.vue"),
         meta: { title: "个人中心", icon: "user", hidden: true },
-      },
-      {
-        path: "profile/notice",
-        name: "MyNotice",
-        component: () => import("@/views/profile/notice/index.vue"),
-        meta: { title: "我的通知", icon: "user", hidden: true },
-      },
-      {
-        path: "/detail/:id(\\d+)",
-        name: "DemoDetail",
-        component: () => import("@/views/demo/detail.vue"),
-        meta: { title: "详情页缓存", icon: "user", hidden: true, keepAlive: true },
       },
     ],
   },

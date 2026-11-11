@@ -97,14 +97,46 @@ test("连接池事务在同一条连接上提交", async () => {
   ]);
 });
 
+test("带页码的清单只返回当前页，状态计数仍是全部", async () => {
+  const boxes = new MemoryBoxStore();
+  await boxes.save(sampleBox());
+  const pending = sampleBox();
+  pending.id = "BOX-002";
+  pending.imei = "864317080992518";
+  pending.life = "待激活";
+  await boxes.save(pending);
+  const controller = new SampleController(boxes);
+  const listed = {
+    query: { page: "1", pageSize: "1", life: "待激活" },
+    data: null,
+    ok(data) {
+      this.data = data;
+    },
+  };
+  await controller.list(listed);
+  assert.equal(listed.data.total, 1);
+  assert.equal(listed.data.list.length, 1);
+  assert.equal(listed.data.list[0].id, "BOX-002");
+  assert.equal(listed.data.counts["在途"], 1);
+  assert.equal(listed.data.counts["待激活"], 1);
+});
+
 test("查询接口按箱号返回日志", async () => {
   const boxes = new MemoryBoxStore();
   const box = sampleBox();
   await boxes.save(box);
   await boxes.appendLog({
+    id: "1",
     boxId: box.id,
+    raw: '{"imei":"864317080992517"}',
     toJSON() {
-      return { time: box.last, text: "定时上报", by: "设备", raw: '{"imei":"864317080992517"}' };
+      return {
+        id: "1",
+        time: box.last,
+        text: "定时上报",
+        by: "设备",
+        raw: this.raw,
+      };
     },
   });
   const controller = new SampleController(boxes);
@@ -128,14 +160,26 @@ test("查询接口按箱号返回日志", async () => {
   assert.equal(missing.status, 404);
   const logs = {
     params: { id: "BOX-001" },
+    query: { from: "2026-09-22", to: "2026-09-29" },
     data: null,
     ok(data) {
       this.data = data;
     },
   };
   await controller.logs(logs);
-  assert.match(logs.data[0].raw, /864317080992517/);
-  assert.equal(logs.data[0].time, "2026-09-28 17:11:27.128");
+  assert.equal(logs.data.list[0].raw, undefined);
+  assert.equal(logs.data.list[0].time, "2026-09-28 17:11:27.128");
+  const raw = {
+    params: { id: "BOX-001", logId: "1" },
+    query: { receivedAt: logs.data.list[0].time },
+    data: null,
+    ok(data) {
+      this.data = data;
+    },
+    fail() {},
+  };
+  await controller.raw(raw);
+  assert.match(raw.data.raw, /864317080992517/);
 });
 
 test("WebSocket 在令牌有效时收到箱子状态", async () => {
@@ -162,11 +206,25 @@ test("WebSocket 在令牌有效时收到箱子状态", async () => {
       client.once("message", (data) => resolve(JSON.parse(String(data))));
       client.once("error", reject);
     });
-    hub.publish(sampleBox());
+    hub.publish(sampleBox(), {
+      toListJSON() {
+        return {
+          id: "",
+          box: "BOX-001",
+          time: "2026-09-28 17:11:27.128",
+          text: "定时上报",
+          kind: "timer",
+          raw: '{"secret":true}',
+        };
+      },
+    });
     const message = await incoming;
     assert.equal(message.type, "box");
     assert.equal(message.box.imei, "864317080992517");
     assert.equal(message.box.gps, "未定位");
+    assert.equal(message.uplink.kind, "timer");
+    assert.equal(message.uplink.text, "定时上报");
+    assert.equal(Object.hasOwn(message.uplink, "raw"), false);
     client.close();
   } finally {
     await sockets.close();

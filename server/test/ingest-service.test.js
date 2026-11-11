@@ -34,7 +34,9 @@ test("未知设备上电后成为待激活箱子，日志带服务器时间戳�
     iccid: "898608911026D0280105",
   });
   const { box, record } = await ingest.accept(raw);
-  assert.equal(box.id, "BOX-001");
+  // 编号就是 IMEI，名称按序号默认生成
+  assert.equal(box.id, "864317081000105");
+  assert.equal(box.name, "采样箱_00000001");
   assert.equal(box.life, "待激活");
   assert.equal(box.org, "总公司");
   assert.equal(box.activateStep, "等待激活");
@@ -42,9 +44,9 @@ test("未知设备上电后成为待激活箱子，日志带服务器时间戳�
   assert.match(record.receivedAt, /\.128$/);
   assert.equal(record.raw, raw);
   assert.equal(record.deviceTime, "2026-09-28 17:11:27");
-  assert.deepEqual(seen, ["BOX-001"]);
-  assert.equal((await cache.get("BOX-001")).imei, "864317081000105");
-  assert.equal((await boxes.listLogs("BOX-001"))[0].raw, raw);
+  assert.deepEqual(seen, ["864317081000105"]);
+  assert.equal((await cache.get("864317081000105")).imei, "864317081000105");
+  assert.equal((await boxes.listLogs("864317081000105"))[0].raw, raw);
 });
 
 test("没有 GPS 时保留上一次的 GPS，基站仍单独更新", async () => {
@@ -100,4 +102,25 @@ test("并发上电不会分配到重复箱号", async () => {
   );
   const ids = (await boxes.list()).map((box) => box.id);
   assert.equal(new Set(ids).size, 20);
+});
+
+test("插着充电器时充电中和已充满来回跳记成充电状态，插上、拔掉才是充电事件", async () => {
+  const { ingest } = createIngest();
+  const imei = "864317080992517";
+  const send = async (uart) => (await ingest.accept(packet({ imei, uart }))).record;
+  await send("why=timer,lid=0,chg=0,bat=4100,seq=10");
+  const plugIn = await send("why=chg,lid=0,chg=1,bat=4150,seq=11");
+  assert.equal(plugIn.kind, "chg");
+  const full = await send("why=chg,lid=0,chg=2,bat=4180,seq=12");
+  assert.equal(full.kind, "chgs");
+  assert.match(full.summary, /^充电状态 · seq 12/);
+  const again = await send("why=chg,lid=0,chg=1,bat=4170,seq=13");
+  assert.equal(again.kind, "chgs");
+  await send("why=timer,lid=0,chg=1,bat=4170,seq=14");
+  const unplug = await send("why=chg,lid=0,chg=0,bat=4120,seq=15");
+  assert.equal(unplug.kind, "chg");
+  assert.match(unplug.summary, /^充电上报/);
+  // 中间漏了序号，不知道前一个状态：照常算事件
+  const gap = await send("why=chg,lid=0,chg=0,bat=4120,seq=18");
+  assert.equal(gap.kind, "chg");
 });

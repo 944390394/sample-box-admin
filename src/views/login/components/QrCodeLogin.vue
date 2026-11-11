@@ -10,8 +10,8 @@
       </div>
 
       <div v-else-if="state === 'scanned'" class="qr-login__mask qr-login__mask--info">
-        <el-avatar :size="56" :src="avatar || undefined">
-          <el-icon><User /></el-icon>
+        <el-avatar :size="56">
+          {{ userAvatarText({ nickname }) }}
         </el-avatar>
         <span class="qr-login__mask-text">{{ nickname }} 已扫码</span>
         <span class="qr-login__mask-hint">请在手机上确认登录</span>
@@ -42,7 +42,8 @@
 </template>
 
 <script setup lang="ts">
-import { ArrowLeft, CircleClose, Loading, User } from "@element-plus/icons-vue";
+import { ArrowLeft, CircleClose, Loading } from "@element-plus/icons-vue";
+import { userAvatarText } from "@/utils/user-avatar";
 import QRCode from "qrcode";
 import AuthAPI, { type QrCodeStatusResult } from "@/api/auth";
 import { useUserStore } from "@/stores";
@@ -63,9 +64,8 @@ const route = useRoute();
 const canvasRef = ref<HTMLCanvasElement>();
 // 当前界面状态，驱动模板中遮罩层的显隐
 const state = ref<State>("loading");
-// 扫码用户脱敏昵称与头像，scanned 状态展示
+// 扫码用户脱敏昵称，scanned 状态使用文字头像。
 const nickname = ref("");
-const avatar = ref("");
 
 // 当前票据，轮询与登录换令牌都依赖它
 let ticket = "";
@@ -80,7 +80,6 @@ async function start() {
   stopPolling();
   state.value = "loading";
   nickname.value = "";
-  avatar.value = "";
   try {
     const res = await AuthAPI.qrGenerate();
     ticket = res.ticket;
@@ -129,7 +128,6 @@ function handleStatus(res: QrCodeStatusResult) {
     case "SCANNED":
       state.value = "scanned";
       nickname.value = res.nickname || "";
-      avatar.value = res.avatar || "";
       startPolling();
       break;
     case "CONFIRMED":

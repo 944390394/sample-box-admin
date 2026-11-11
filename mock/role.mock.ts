@@ -83,7 +83,7 @@ export default defineMock([
     body: ({ params }) => {
       const full = ["9101", "9102", "9103", "9104", "9105", "9106"];
       const read = ["9101", "9102", "9104"];
-      const byRole = {
+      const byRole: Record<string, string[]> = {
         "2": full,
         "8": full,
         "9": read,

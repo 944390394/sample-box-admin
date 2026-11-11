@@ -7,7 +7,7 @@
     :text-color="menuThemeProps.textColor"
     :active-text-color="menuThemeProps.activeTextColor"
     :popper-effect="theme"
-    :unique-opened="false"
+    :unique-opened="true"
     :collapse-transition="false"
     :mode="menuMode"
     @open="onMenuOpen"

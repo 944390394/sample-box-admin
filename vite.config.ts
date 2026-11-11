@@ -47,6 +47,8 @@ export default defineConfig(({ mode }: ConfigEnv): UserConfig => {
         [env.VITE_APP_BASE_API]: {
           changeOrigin: true,
           target: env.VITE_APP_API_URL,
+          // 采样箱详情的调试列表靠 /api/v1/sample/stream 追加新报文
+          ws: true,
           rewrite: (path: string) => path.replace(new RegExp(`^${env.VITE_APP_BASE_API}`), ""),
         },
       },

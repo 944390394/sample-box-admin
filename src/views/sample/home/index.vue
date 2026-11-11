@@ -1,1206 +1,589 @@
 <template>
-  <div v-loading="!ready" class="page-container">
-    <div v-if="ready && canSwitch" class="switcher">
-      <span>视角</span>
-      <button
-        v-for="item in HOME_VIEWS"
-        :key="item.id"
-        type="button"
-        :class="{ on: home === item.id }"
-        @click="choose(item.id)"
-      >
-        {{ item.label }}
-      </button>
-    </div>
-    <template v-if="ready && failed && !boxRows.length && home !== 'field'">
-      <section class="panel">
-        <div class="empty">
-          <b>采样箱暂时没有取到</b>
-          <p>稍后再打开这一页，或重新读取。</p>
-          <button class="btn" type="button" @click="loadBoxes">重新读取</button>
-        </div>
-      </section>
-    </template>
-
-    <template v-else-if="ready">
-      <div v-if="home !== 'field'" class="bar">
-        <component
-          :is="canOpenLife(life) ? 'button' : 'div'"
-          v-for="life in LIFE_ORDER"
-          :key="life"
-          class="seg"
-          :class="{
-            warn: life === '待激活' && counts[life] > 0 && !plainPending,
-            focus: life === '在途' && focusTransit && counts[life] > 0,
-          }"
-          :type="canOpenLife(life) ? 'button' : undefined"
-          @click="canOpenLife(life) && openLife(life)"
+  <div class="page-container page-flow">
+    <PageHeader
+      :title="`${greeting}，${userStore.userInfo.nickname || userStore.userInfo.username || ''}`"
+      :subtitle="subtitle"
+    >
+      <template #actions>
+        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <el-button
+          v-if="can(BOX_PERM.overview)"
+          :icon="DataBoard"
+          @click="router.push('/monitor/overview')"
         >
-          <span>{{ life }}</span>
-          <strong>{{ counts[life] }}</strong>
-        </component>
-        <div v-if="home === 'dispatch'" class="meta">
-          <span>待激活和停用由资产管理员处理</span>
-          <span>·</span>
-          <template v-if="scopeFresh.short">
-            <span>最近一包</span>
-            <b :title="scopeFresh.full">{{ scopeFresh.short }}</b>
-          </template>
-          <span v-else>本范围还没有上报</span>
-        </div>
-        <div v-else-if="home === 'leader'" class="meta">
-          <b>{{ boxRows.length }}</b>
-          <span>台，</span>
-          <b>{{ alertCount }}</b>
-          <span>台有异常，</span>
-          <b>{{ counts.待激活 }}</b>
-          <span>台待激活</span>
-          <span>·</span>
-          <template v-if="fleetFresh.short">
-            <span>最近一包</span>
-            <b :title="fleetFresh.full">{{ fleetFresh.short }}</b>
-          </template>
-          <span v-else>还没有上报</span>
-        </div>
-        <div v-else class="meta">
-          <span>共</span>
-          <b>{{ boxRows.length }}</b>
-          <span>台</span>
-          <span>·</span>
-          <template v-if="fleetFresh.short">
-            <span>最近一包</span>
-            <b :title="fleetFresh.full">{{ fleetFresh.short }}</b>
-          </template>
-          <span v-else>还没有上报</span>
-        </div>
-      </div>
-
-      <template v-if="home === 'asset'">
-        <section class="panel">
-          <div class="hd">
-            <span>
-              采样箱
-              <em>{{ boxRows.length }}</em>
-            </span>
-          </div>
-          <div v-if="!ordered.length" class="empty">
-            <b>还没有采样箱</b>
-            <p>设备上电之后会出现在这里，待激活的可以去处理。</p>
-          </div>
-          <div v-else class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>箱号</th>
-                  <th>状态</th>
-                  <th>工况</th>
-                  <th>最后上报</th>
-                  <th>位置</th>
-                  <th>异常</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="box in ordered" :key="box.id" :class="{ hot: box.life === '待激活' }">
-                  <td class="box">{{ box.id }}</td>
-                  <td>
-                    <span class="tag" :class="lifeClass(box.life)">{{ box.life }}</span>
-                  </td>
-                  <td class="cond">{{ conditionText(box) }}</td>
-                  <td class="when" :title="box.last">{{ shortStamp(box.last) }}</td>
-                  <td class="where" :title="placeTitle(box)">{{ placeShort(box) }}</td>
-                  <td>
-                    <span v-if="box.alert" class="tag warning">{{ box.alert }}</span>
-                  </td>
-                  <td>
-                    <button class="link" type="button" @click="openBox(box.id)">
-                      {{ rowAction(box, "asset") }}
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <FeedPanel :rows="feed" @open-reports="openReports" />
+          总览
+        </el-button>
+        <el-button
+          v-if="can(BOX_PERM.list)"
+          :icon="MapLocation"
+          @click="router.push('/monitor/screen')"
+        >
+          实时地图
+        </el-button>
+        <el-button
+          v-if="TASK_CREATE.some((perm) => can(perm))"
+          type="primary"
+          :icon="Plus"
+          @click="router.push('/task/create')"
+        >
+          创建任务单
+        </el-button>
       </template>
+    </PageHeader>
 
-      <div v-else-if="home === 'duty'" class="cols">
-        <section class="panel grow">
-          <div class="hd">
-            <span>
-              待处理
-              <em>{{ duty.pending.length }}</em>
-            </span>
-          </div>
-          <div v-if="!duty.pending.length" class="empty">
-            <b>没有待处理的采样箱</b>
-            <p>新上报来了会显示在这里。</p>
-          </div>
-          <button
-            v-for="box in duty.pending"
-            :key="box.id"
-            class="item"
-            :class="{ hot: box.life === '待激活' }"
-            type="button"
-            @click="openBox(box.id)"
-          >
-            <span class="box">{{ box.id }}</span>
-            <span class="tags">
-              <span class="tag" :class="lifeClass(box.life)">{{ box.life }}</span>
-              <span v-if="box.alert" class="tag warning">{{ box.alert }}</span>
-            </span>
-            <span class="cond">{{ conditionText(box) }}</span>
-            <span class="where" :title="placeTitle(box)">{{ placeShort(box) }}</span>
-            <span class="link">{{ rowAction(box, "duty") }}</span>
-          </button>
-          <div class="group">其余采样箱</div>
-          <div v-if="!duty.rest.length" class="empty"><b>没有其他采样箱</b></div>
-          <button
-            v-for="box in duty.rest"
-            :key="box.id"
-            class="item"
-            type="button"
-            @click="openBox(box.id)"
-          >
-            <span class="box">{{ box.id }}</span>
-            <span class="tags">
-              <span class="tag" :class="lifeClass(box.life)">{{ box.life }}</span>
-              <span v-if="box.alert" class="tag warning">{{ box.alert }}</span>
-            </span>
-            <span class="cond">{{ conditionText(box) }}</span>
-            <span class="where" :title="placeTitle(box)">{{ placeShort(box) }}</span>
-            <span class="link">查看</span>
-          </button>
-        </section>
-        <FeedPanel class="side" :rows="feed" @open-reports="openReports" />
-      </div>
+    <el-skeleton v-if="!data && loading" :rows="6" animated />
+    <template v-else-if="data">
+      <StatTiles v-if="tiles.length" :items="tiles" :max="6" @update:model-value="openTile" />
 
-      <template v-else-if="home === 'dispatch'">
-        <section v-if="dispatchQuiet" class="panel">
-          <div class="empty">
-            <b>没有在途采样箱</b>
-            <p>本范围也没有可安排的未使用采样箱。</p>
-            <button class="btn" type="button" @click="openCreate">创建任务单</button>
-          </div>
-        </section>
-        <div v-else class="cols">
-          <section class="panel grow">
-            <div class="hd">
-              <span>
-                在途
-                <em>{{ dispatchView.trips.length }}</em>
+      <el-row :gutter="12">
+        <el-col :lg="16" :span="24">
+          <section class="block">
+            <div class="card-head section-head">
+              <span class="card-head__title">待我处理</span>
+              <span class="text-muted">
+                {{ todoTotal ? `共 ${todoTotal} 件` : "暂时没有要你处理的事" }}
               </span>
             </div>
-            <div v-if="!dispatchView.trips.length" class="empty">
-              <b>没有在途采样箱</b>
-              <p>本范围没有正在执行的采样。</p>
-            </div>
-            <div v-for="trip in dispatchView.trips" :key="trip.box" class="trip">
-              <div class="trip-1">
-                <span class="box">{{ trip.box }}</span>
-                <span class="tag primary">在途</span>
-                <span v-if="trip.alert" class="tag warning">{{ trip.alert }}</span>
-                <span v-if="trip.task" class="name">{{ trip.task }}</span>
-                <button class="link" type="button" @click="openBox(trip.box)">查看</button>
-              </div>
-              <div class="trip-2">
-                <span v-if="trip.person">{{ trip.person }}</span>
-                <span v-if="trip.plan">{{ trip.plan }}</span>
-                <span>{{ trip.cond }}</span>
-                <span :title="trip.whereTitle">{{ trip.where }}</span>
-              </div>
-            </div>
-            <div class="group">可安排</div>
-            <div v-if="dispatchView.unused.length">
-              <div v-for="box in dispatchView.unused" :key="box.id" class="item">
-                <span class="box">{{ box.id }}</span>
-                <span class="tags">
-                  <span class="tag" :class="lifeClass(box.life)">{{ box.life }}</span>
-                </span>
-                <span class="cond">{{ conditionText(box) }}</span>
-                <span class="where">未绑定</span>
-                <button class="link" type="button" @click="openCreate">创建任务单</button>
-              </div>
-            </div>
-            <div v-else class="assign">
-              <span>没有可安排的未使用采样箱</span>
-              <button class="btn" type="button" @click="openCreate">创建任务单</button>
-            </div>
-          </section>
-          <div class="stack">
-            <section class="panel">
-              <div class="hd">
-                <span>
-                  这趟异常
-                  <em>{{ dispatchView.alerts.length }}</em>
-                </span>
-              </div>
-              <div v-if="!dispatchView.alerts.length" class="empty">
-                <b>没有异常</b>
-                <p>在途采样箱没有开箱或偏离。</p>
-              </div>
-              <div
-                v-for="item in dispatchView.alerts"
-                :key="item.box + item.rule"
-                class="alert"
-                :class="{ bare: !item.level }"
-              >
-                <span
-                  v-if="item.level"
-                  class="tag"
-                  :class="item.level === '高' ? 'danger' : 'warning'"
+            <div v-if="activeCards.length" class="cards">
+              <template v-for="card in activeCards" :key="card.key">
+                <TodoCard
+                  v-if="card.tasks"
+                  :title="card.title"
+                  :hint="card.hint"
+                  :tone="card.tone"
+                  :bucket="card.tasks"
+                  more
+                  @open="(id) => router.push(`/task/detail/${id}`)"
+                  @more="router.push(card.more)"
                 >
-                  {{ item.level }}
-                </span>
-                <div>
-                  <b>{{ item.rule }}</b>
-                  <span>
-                    {{ item.box }}
-                    <template v-if="item.detail">· {{ item.detail }}</template>
-                  </span>
-                </div>
-              </div>
-            </section>
-            <FeedPanel :rows="scopeFeed" @open-reports="openReports" />
-          </div>
-        </div>
-      </template>
-
-      <template v-else-if="home === 'verify'">
-        <section v-if="!verifyItems.length" class="panel">
-          <div class="hd">
-            <span>
-              待核验
-              <em>0</em>
-            </span>
-          </div>
-          <div class="empty">
-            <b>没有待核验的采样箱</b>
-            <p>采样中如果出现开箱或地点异常，也会列在这里。</p>
-          </div>
-        </section>
-        <div v-else class="cols">
-          <section class="panel grow">
-            <div class="hd"><span>核验目录</span></div>
-            <template v-for="group in verifyGroups" :key="group.title">
-              <template v-if="group.items.length || group.title === '待核验'">
-                <div class="group">{{ group.title }}</div>
-                <div v-if="!group.items.length" class="empty"><b>没有待核验的采样箱</b></div>
-                <button
-                  v-for="item in group.items"
-                  :key="item.id"
-                  class="dir"
-                  :class="{ on: selected?.id === item.id, hot: item.queue === '待核验' }"
-                  type="button"
-                  @click="picked = item.id"
+                  <template #default="{ item }">
+                    <div class="line">
+                      <b>{{ item.name }}</b>
+                      <el-tag size="small" :type="taskTone(item.status)">{{ item.status }}</el-tag>
+                    </div>
+                    <div class="text-muted">
+                      {{ routeOf(item) }} · {{ item.boxes }} 台 ·
+                      <TimeText :value="item.createdAt" />
+                    </div>
+                  </template>
+                </TodoCard>
+                <TodoCard
+                  v-else-if="card.boxes"
+                  :title="card.title"
+                  :hint="card.hint"
+                  :tone="card.tone"
+                  :bucket="card.boxes"
+                  more
+                  @open="(id) => router.push(`/device/boxes/${id}`)"
+                  @more="router.push(card.more)"
                 >
-                  <span class="box">{{ item.box }}</span>
-                  <span class="tags">
-                    <span v-if="item.queue === '待核验'" class="tag warning">待核验</span>
-                    <span v-else-if="item.alert" class="tag warning">{{ item.alert }}</span>
-                    <span v-else class="tag primary">在途</span>
-                  </span>
-                  <span class="where">{{ item.task }}</span>
-                </button>
+                  <template #default="{ item }">
+                    <div class="line">
+                      <b>{{ item.name }}</b>
+                      <span class="text-muted">{{ item.org || "总公司" }}</span>
+                    </div>
+                    <div class="text-muted">{{ boxLine(item, card.key) }}</div>
+                  </template>
+                </TodoCard>
               </template>
-            </template>
+            </div>
+            <el-empty v-else :image-size="64" description="都处理完了" />
+            <p v-if="quietCards.length" class="text-muted quiet">
+              没有待办：{{ quietCards.map((c) => c.title).join("、") }}
+            </p>
           </section>
-          <aside v-if="selected" class="panel side">
-            <div class="hd">
-              <span>核验单</span>
-              <button
-                v-if="selected.queue === '待核验'"
-                class="btn"
-                type="button"
-                @click="openReceive"
+
+          <section v-if="showField" class="block">
+            <div class="card-head section-head">
+              <span class="card-head__title">我手上的</span>
+            </div>
+            <div class="cards two">
+              <TodoCard
+                v-if="data.myBoxes"
+                title="我保管的箱子"
+                :bucket="data.myBoxes"
+                tone="success"
+                @open="(id) => router.push(`/device/boxes/${id}`)"
               >
-                去核验
-              </button>
-              <button v-else class="link" type="button" @click="openBox(selected.box)">
-                查看采样箱
-              </button>
+                <template #default="{ item }">
+                  <div class="line">
+                    <b>{{ item.name }}</b>
+                    <el-tag size="small" :type="lifeTone(item.life)">
+                      {{ lifeLabel(item.life) }}
+                    </el-tag>
+                  </div>
+                  <div class="text-muted">{{ boxLine(item, "mine") }}</div>
+                </template>
+              </TodoCard>
+              <TodoCard
+                v-if="data.taskTodo?.mine"
+                title="我经手的任务"
+                :bucket="data.taskTodo.mine"
+                tone="primary"
+                @open="(id) => router.push(`/task/detail/${id}`)"
+              >
+                <template #default="{ item }">
+                  <div class="line">
+                    <b>{{ item.name }}</b>
+                    <el-tag size="small" :type="taskTone(item.status)">{{ item.status }}</el-tag>
+                  </div>
+                  <div class="text-muted">{{ routeOf(item) }}</div>
+                </template>
+              </TodoCard>
             </div>
-            <dl class="facts">
-              <dt>异常原因</dt>
-              <dd>{{ selected.alert || "无" }}</dd>
-              <dt>任务</dt>
-              <dd>{{ selected.task }}</dd>
-              <dt>采样箱</dt>
-              <dd>{{ selected.box }}</dd>
-              <dt>开箱次数</dt>
-              <dd>{{ selected.opens }}</dd>
-              <dt>计划地点</dt>
-              <dd>{{ selected.plan }}</dd>
-              <dt>实际位置</dt>
-              <dd :title="selected.actualTitle">{{ selected.actual }}</dd>
-            </dl>
-          </aside>
-        </div>
-      </template>
+          </section>
+        </el-col>
 
-      <section v-else-if="home === 'leader'" class="panel">
-        <div class="hd"><span>全部采样箱</span></div>
-        <div v-if="!ordered.length" class="empty">
-          <b>还没有采样箱</b>
-          <p>设备上电之后会出现在这里。</p>
-        </div>
-        <div v-else class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>箱号</th>
-                <th>状态</th>
-                <th>工况</th>
-                <th>最后上报</th>
-                <th>位置</th>
-                <th>异常</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="box in ordered" :key="box.id" :class="{ hot: box.life === '待激活' }">
-                <td class="box">{{ box.id }}</td>
-                <td>
-                  <span class="tag" :class="lifeClass(box.life)">{{ box.life }}</span>
-                </td>
-                <td class="cond">{{ conditionText(box) }}</td>
-                <td class="when" :title="box.last">{{ shortStamp(box.last) }}</td>
-                <td class="where" :title="placeTitle(box)">{{ placeShort(box) }}</td>
-                <td>
-                  <span v-if="box.alert" class="tag warning">{{ box.alert }}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <template v-else>
-        <section class="panel">
-          <div class="who">
-            <b>{{ nickname }}</b>
-            <span>{{ whoLine }}</span>
-          </div>
-          <div v-if="!field.task" class="empty">
-            <b>还没有分配给你的任务</b>
-            <p>调度员派单之后，采样环节和采样箱状态会出现在这里。</p>
-          </div>
-          <ol v-else class="steps">
-            <li
-              v-for="(name, index) in FIELD_STEPS"
-              :key="name"
-              :class="{ done: index < field.index, on: index === field.index }"
-            >
-              <i></i>
-              {{ name }}
-            </li>
-          </ol>
-        </section>
-        <section v-if="field.task" class="panel">
-          <div class="hd">
-            <span>
-              我的任务
-              <em>1</em>
-            </span>
-          </div>
-          <div class="grid">
-            <div>
-              <span>单号</span>
-              <b>{{ field.task.no }}</b>
-            </div>
-            <div>
-              <span>采样箱</span>
-              <b>{{ field.task.box }}</b>
-            </div>
-            <div>
-              <span>计划地点</span>
-              <b>{{ field.task.place }}</b>
-            </div>
-            <div>
-              <span>状态</span>
-              <b>{{ field.task.status }}</b>
-            </div>
-            <div>
-              <span>上报间隔</span>
-              <b>{{ field.task.interval }}</b>
-            </div>
-            <div>
-              <span>分公司</span>
-              <b>{{ field.task.org }}</b>
-            </div>
-          </div>
-          <div class="boxline">
-            <b>{{ field.task.box }}</b>
-            <span v-if="field.task.cond">{{ field.task.cond }}</span>
-            <span v-if="field.task.reported" :title="field.task.reportedFull">
-              最近上报 {{ field.task.reported }}
-            </span>
-            <span :title="field.task.whereTitle">{{ field.task.where }}</span>
-          </div>
-        </section>
-        <section v-if="field.task && field.history" class="panel">
-          <div class="hd"><span>已结束</span></div>
-          <div class="done-row">
-            <b>{{ field.history.name }}</b>
-            <span>{{ field.history.no }}</span>
-            <span>{{ field.history.box }}</span>
-            <span>{{ field.history.place }}</span>
-            <span class="tag success">{{ field.history.status }}</span>
-          </div>
-        </section>
-      </template>
+        <el-col :lg="8" :span="24">
+          <el-card shadow="never" class="feed-card">
+            <template #header>
+              <div class="card-head">
+                <span class="card-head__title">最近动态</span>
+                <span class="text-muted">任务流转和开关箱</span>
+              </div>
+            </template>
+            <ul v-if="feed.length" class="feed">
+              <li v-for="(item, index) in feed" :key="index" @click="openFeed(item)">
+                <span class="icon" :class="item.type === 'task' ? 'is-task' : `is-${item.kind}`">
+                  <el-icon>
+                    <component
+                      :is="
+                        item.type === 'task'
+                          ? Promotion
+                          : item.kind === 'pad'
+                            ? Unlock
+                            : item.kind === 'shut'
+                              ? Lock
+                              : SwitchButton
+                      "
+                    />
+                  </el-icon>
+                </span>
+                <div class="body">
+                  <div class="line">
+                    <b v-if="item.type === 'task'">{{ item.action }} · {{ item.taskName }}</b>
+                    <b v-else>{{ item.boxName }} {{ item.action }}</b>
+                    <TimeText class="time" :value="item.time" />
+                  </div>
+                  <div v-if="item.type === 'task'" class="text-muted">
+                    {{ item.by }}
+                    <template v-if="item.note">· {{ item.note }}</template>
+                  </div>
+                  <div v-else-if="(item.count || 1) > 1 && item.since" class="text-muted">
+                    最早
+                    <TimeText :value="item.since" />
+                    · 点开看全部事件
+                  </div>
+                </div>
+              </li>
+            </ul>
+            <el-empty v-else :image-size="56" description="最近没有动态" />
+          </el-card>
+        </el-col>
+      </el-row>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import SampleBoxAPI from "@/api/sample/box";
-import UserAPI, { type UserProfileDetail } from "@/api/system/user";
+defineOptions({ name: "SampleHome" });
+
+import {
+  DataBoard,
+  Lock,
+  MapLocation,
+  Plus,
+  Promotion,
+  Refresh,
+  SwitchButton,
+  Unlock,
+} from "@element-plus/icons-vue";
+import WorkbenchAPI, {
+  type BoxBrief,
+  type Bucket,
+  type FeedItem,
+  type TaskBrief,
+  type Workbench,
+} from "@/api/sample/workbench";
+import PageHeader from "@/components/biz/PageHeader.vue";
+import StatTiles, { type StatTile } from "@/components/biz/StatTiles.vue";
+import TimeText from "@/components/biz/TimeText.vue";
+import { usePerm } from "@/composables/usePerm";
 import { useUserStore } from "@/stores/user";
-import { boxSession } from "../box-state";
-import {
-  compareBoxes,
-  conditionText,
-  placeShort,
-  placeTitle,
-  shortStamp,
-  type BoxLife,
-  type SampleBox,
-} from "../data";
-import FeedPanel from "./FeedPanel.vue";
-import {
-  LIFE_ORDER,
-  buildDispatch,
-  buildFeed,
-  buildVerify,
-  demoReportRows,
-  dispatchBranch,
-  fieldModel,
-  FIELD_STEPS,
-  freshOf,
-  HOME_VIEWS,
-  lifeClass,
-  lifeCounts,
-  pickHome,
-  rowAction,
-  canSwitchHome,
-  serverReportRows,
-  splitDuty,
-  type HomeRole,
-} from "./model";
+import { lifeLabel } from "@/utils/labels";
+import { ago, toDate } from "@/utils/time";
+import { lifeTone, taskTone } from "@/utils/tone";
+import { BOX_PERM, TASK_CREATE } from "../data";
+import TodoCard from "./TodoCard.vue";
 
-const userStore = useUserStore();
+/**
+ * 工作台：一页看「要我处理什么」。
+ * 每张卡片单独授权（角色页「工作台」模块），勾了且有看里面内容的权限才显示；
+ * 有数量的卡片在前，没有待办的折成一行。30 秒刷新一次。
+ */
 const router = useRouter();
-const serverMode = import.meta.env.VITE_MOCK_DEV_SERVER !== "true";
-const remoteBoxes = ref<SampleBox[]>([]);
-const remoteReports = ref<Awaited<ReturnType<typeof SampleBoxAPI.reports>>>([]);
-const profile = ref<UserProfileDetail | null>(null);
-const ready = ref(false);
-const failed = ref(false);
-const picked = ref("");
-let poll = 0;
+const can = usePerm();
+const userStore = useUserStore();
+const data = ref<Workbench | null>(null);
+const loading = ref(false);
+const updatedAt = ref<Date | null>(null);
 
-const naturalHome = computed(() =>
-  pickHome(userStore.userInfo.roles || [], userStore.userInfo.perms || [])
-);
-const canSwitch = computed(() =>
-  canSwitchHome(userStore.userInfo.roles || [], userStore.userInfo.perms || [])
-);
-const chosen = ref<HomeRole | "">("");
-const home = computed(() => (canSwitch.value && chosen.value ? chosen.value : naturalHome.value));
-const nickname = computed(() => userStore.userInfo.nickname || userStore.userInfo.username || "");
-const whoLine = computed(() =>
-  [profile.value?.deptName, profile.value?.roleNames].filter(Boolean).join(" · ")
-);
-const boxRows = computed(() => (serverMode ? remoteBoxes.value : boxSession.boxes));
-const ordered = computed(() => [...boxRows.value].sort(compareBoxes));
-const counts = computed(() =>
-  lifeCounts(home.value === "dispatch" ? dispatchView.value.scope : boxRows.value)
-);
-const alertCount = computed(() => boxRows.value.filter((box) => box.alert).length);
-const plainPending = computed(
-  () => home.value === "dispatch" || home.value === "verify" || home.value === "leader"
-);
-const focusTransit = computed(() => home.value === "dispatch");
-const duty = computed(() => splitDuty(boxRows.value));
-const allFeed = computed(() =>
-  buildFeed(
-    serverMode ? serverReportRows(remoteReports.value) : demoReportRows(boxSession.logs),
-    serverMode ? boxRows.value : boxSession.boxes
-  )
-);
-const feed = computed(() => allFeed.value.slice(0, 8));
-const fleetFresh = computed(() => freshOf(allFeed.value));
-const dispatchView = computed(() =>
-  buildDispatch(
-    boxRows.value,
-    serverMode,
-    serverMode ? "" : dispatchBranch(userStore.userInfo.username || "")
-  )
-);
-const scopeIds = computed(() => new Set(dispatchView.value.scope.map((box) => box.id)));
-const scopeFeed = computed(() =>
-  allFeed.value.filter((row) => scopeIds.value.has(row.box)).slice(0, 8)
-);
-const scopeFresh = computed(() => freshOf(scopeFeed.value));
-const dispatchQuiet = computed(
-  () =>
-    !dispatchView.value.trips.length &&
-    !dispatchView.value.unused.length &&
-    !dispatchView.value.alerts.length
-);
-const verifyView = computed(() => buildVerify(boxRows.value, serverMode));
-const verifyGroups = computed(() => [
-  { title: "待核验", items: verifyView.value.pending },
-  { title: "采样中有异常", items: verifyView.value.watching },
-  { title: "其他在途，无异常", items: verifyView.value.calm },
-]);
-const verifyItems = computed(() => verifyGroups.value.flatMap((group) => group.items));
-const selected = computed(
-  () => verifyItems.value.find((item) => item.id === picked.value) || verifyItems.value[0] || null
-);
-const field = computed(() =>
-  fieldModel(
-    userStore.userInfo.roles || [],
-    nickname.value,
-    profile.value?.deptName || "",
-    boxRows.value,
-    serverMode
-  )
+const greeting = computed(() => {
+  const hour = new Date().getHours();
+  return hour < 6
+    ? "夜深了"
+    : hour < 11
+      ? "早上好"
+      : hour < 13
+        ? "中午好"
+        : hour < 18
+          ? "下午好"
+          : "晚上好";
+});
+const subtitle = computed(() =>
+  updatedAt.value
+    ? `数据更新于 ${updatedAt.value.toTimeString().slice(0, 5)}，每 30 秒自动刷新`
+    : "正在读取…"
 );
 
-function choiceKey() {
-  return `sample-home-view:${userStore.userInfo.userId || "0"}`;
+const tiles = computed<StatTile[]>(() => {
+  const stats = data.value?.stats;
+  const tasks = data.value?.taskTodo;
+  if (!stats) return [];
+  const list: StatTile[] = [
+    {
+      key: "life:在途",
+      label: lifeLabel("在途"),
+      value: stats.counts["在途"] ?? 0,
+      tone: "primary",
+    },
+    {
+      key: "life:未使用",
+      label: lifeLabel("未使用"),
+      value: stats.counts["未使用"] ?? 0,
+      tone: "success",
+    },
+    {
+      key: "flag:offline",
+      label: "离线",
+      value: stats.flags.offline ?? 0,
+      tone: stats.flags.offline ? "warning" : "default",
+    },
+  ];
+  if (stats.flags.low != null)
+    list.push({
+      key: "flag:low",
+      label: "低电量",
+      value: stats.flags.low ?? 0,
+      tone: stats.flags.low ? "danger" : "default",
+    });
+  list.push({
+    key: "flag:alert",
+    label: "告警",
+    value: stats.flags.alert ?? 0,
+    tone: stats.flags.alert ? "danger" : "default",
+  });
+  if (tasks?.moving)
+    list.push({
+      key: "task:moving",
+      label: "运送中的任务",
+      value: tasks.moving.total,
+      tone: "primary",
+    });
+  return list;
+});
+function openTile(key: string) {
+  if (!key) return;
+  if (key === "task:moving") void router.push({ path: "/task/tasks", query: { status: "进行中" } });
+  else void router.push({ path: "/device/boxes", query: { tile: key } });
 }
 
-function restoreChoice() {
-  if (!canSwitch.value) {
-    chosen.value = "";
-    return;
+interface Card {
+  key: string;
+  title: string;
+  hint?: string;
+  tone: "primary" | "warning" | "danger" | "success";
+  tasks?: Bucket<TaskBrief>;
+  boxes?: Bucket<BoxBrief>;
+  more: string | { path: string; query?: Record<string, string> };
+}
+/**
+ * 卡片：每张单独授权（monitor:card:*）。服务端只给勾了的卡片数据，这里按固定顺序排：
+ * 先任务流转（寄出 → 到达 → 签收 → 接收退回 → 采样 → 检测 → 超限），再箱子（待激活、告警、离线、低电、开盖）。
+ */
+const cards = computed<Card[]>(() => {
+  const d = data.value;
+  if (!d) return [];
+  const list: Card[] = [];
+  const t = d.taskTodo;
+  const mine = { path: "/task/tasks", query: { mine: "1" } };
+  const push = (
+    card: Omit<Card, "tasks" | "boxes">,
+    bucket?: Bucket<TaskBrief> | Bucket<BoxBrief>,
+    boxes = false
+  ) => {
+    if (bucket)
+      list.push(
+        boxes
+          ? { ...card, boxes: bucket as Bucket<BoxBrief> }
+          : { ...card, tasks: bucket as Bucket<TaskBrief> }
+      );
+  };
+  if (t) {
+    push(
+      {
+        key: "send",
+        title: "待寄出",
+        hint: "箱子装好后点「确认寄出」",
+        tone: "primary",
+        more: mine,
+      },
+      t.send
+    );
+    push(
+      {
+        key: "arrive",
+        title: "待确认到达",
+        hint: "箱子到了收货地址后确认",
+        tone: "primary",
+        more: mine,
+      },
+      t.arrive
+    );
+    push(
+      { key: "sign", title: "待签收", hint: "扫箱码做签收核验", tone: "warning", more: mine },
+      t.sign
+    );
+    push(
+      {
+        key: "returning",
+        title: "待接收退回",
+        hint: "被拒收、正退回本单位的箱子，到了以后扫码接收",
+        tone: "warning",
+        more: mine,
+      },
+      t.returning
+    );
+    push(
+      {
+        key: "sampling",
+        title: "采样待推进",
+        hint: "开始采样、封箱、寄回",
+        tone: "primary",
+        more: mine,
+      },
+      t.sampling
+    );
+    push(
+      {
+        key: "inspect",
+        title: "待检测",
+        hint: "开箱检测时扫箱码点「开始检测」",
+        tone: "warning",
+        more: { path: "/task/tasks", query: { status: "待检测" } },
+      },
+      t.inspect
+    );
+    push(
+      {
+        key: "overLimit",
+        title: "开箱超限",
+        hint: "任务期间开箱次数超过上限",
+        tone: "danger",
+        more: { path: "/task/tasks", query: { status: "进行中" } },
+      },
+      t.overLimit
+    );
   }
-  const raw = sessionStorage.getItem(choiceKey());
-  chosen.value = HOME_VIEWS.some((item) => item.id === raw) ? (raw as HomeRole) : "";
+  const b = d.boxTodo;
+  push(
+    {
+      key: "pending",
+      title: "待激活",
+      hint: "新设备上电后自动建档，核对 IMEI 后激活",
+      tone: "warning",
+      more: { path: "/device/boxes", query: { tile: "life:待激活" } },
+    },
+    b.pending,
+    true
+  );
+  push(
+    {
+      key: "alert",
+      title: "告警",
+      tone: "danger",
+      more: { path: "/device/boxes", query: { tile: "flag:alert" } },
+    },
+    b.alert,
+    true
+  );
+  push(
+    {
+      key: "offline",
+      title: "在途但离线",
+      hint: "超过 3 个上报周期没上报",
+      tone: "warning",
+      more: { path: "/device/boxes", query: { tile: "flag:offline" } },
+    },
+    b.offline,
+    true
+  );
+  push(
+    {
+      key: "low",
+      title: "低电量",
+      hint: "可用电量低于 20%",
+      tone: "danger",
+      more: { path: "/device/boxes", query: { tile: "flag:low" } },
+    },
+    b.low,
+    true
+  );
+  push(
+    {
+      key: "lid",
+      title: "开着盖",
+      tone: "warning",
+      more: { path: "/device/boxes", query: { tile: "flag:lid" } },
+    },
+    b.lid,
+    true
+  );
+  return list;
+});
+const totalOf = (card: Card) => card.tasks?.total ?? card.boxes?.total ?? 0;
+const activeCards = computed(() => cards.value.filter((card) => totalOf(card) > 0));
+const quietCards = computed(() => cards.value.filter((card) => totalOf(card) === 0));
+const todoTotal = computed(() => activeCards.value.reduce((n, card) => n + totalOf(card), 0));
+const showField = computed(() => {
+  const d = data.value;
+  if (!d) return false;
+  // 只在手上真有箱子或任务时显示，空的不占地方
+  return Boolean(d.myBoxes?.total) || Boolean(d.taskTodo?.mine?.total);
+});
+
+const feed = computed<FeedItem[]>(() =>
+  [...(data.value?.feed || [])]
+    .sort((a, b) => (toDate(b.time)?.getTime() ?? 0) - (toDate(a.time)?.getTime() ?? 0))
+    .slice(0, 20)
+);
+
+function routeOf(task: TaskBrief) {
+  return task.kind === "调拨"
+    ? `${task.from || "—"} → ${task.to || "—"}`
+    : `采样 · ${task.to || "—"}`;
+}
+function boxLine(box: BoxBrief, key: string) {
+  if (key === "alert") return box.alert;
+  if (key === "low") return `可用电量 ${box.batteryUsable ?? "—"}%`;
+  if (key === "offline") return `最后上报 ${box.last ? ago(box.last) : "从未上报"}`;
+  if (key === "pending") return box.last ? `最近上报 ${ago(box.last)}` : "等待上报";
+  return [box.address, box.last ? `${ago(box.last)}上报` : ""].filter(Boolean).join(" · ");
+}
+function openFeed(item: FeedItem) {
+  if (item.type === "task" && item.taskId) void router.push(`/task/detail/${item.taskId}`);
+  else if (item.boxId)
+    void router.push({ path: `/device/boxes/${item.boxId}`, query: { tab: "event" } });
 }
 
-function choose(id: HomeRole) {
-  if (!canSwitch.value || id === home.value) return;
-  chosen.value = id;
-  sessionStorage.setItem(choiceKey(), id);
-  stop();
-  start();
-}
-
-function canOpenLife(life: BoxLife) {
-  if (home.value === "dispatch") return life === "在途" || life === "未使用";
-  return true;
-}
-
-function openLife(life: BoxLife) {
-  router.push({ path: "/device/boxes", query: { life } });
-}
-
-function openBox(id: string) {
-  router.push(`/device/boxes/${id}`);
-}
-
-function openCreate() {
-  router.push("/task/create");
-}
-
-function openReceive() {
-  router.push("/task/receive");
-}
-
-function openReports() {
-  router.push("/monitor/reports");
-}
-
-async function loadBoxes() {
-  if (!serverMode || home.value === "field") {
-    ready.value = true;
-    return;
-  }
+async function load() {
+  loading.value = true;
   try {
-    const [list, rows] = await Promise.all([SampleBoxAPI.list(), SampleBoxAPI.reports()]);
-    remoteBoxes.value = list;
-    remoteReports.value = rows;
-    failed.value = false;
-  } catch {
-    failed.value = true;
+    data.value = await WorkbenchAPI.get();
+    updatedAt.value = new Date();
   } finally {
-    ready.value = true;
+    loading.value = false;
   }
 }
-
-async function loadProfile() {
-  if (home.value !== "field") return;
-  try {
-    profile.value = await UserAPI.getProfile();
-  } catch {
-    profile.value = null;
-  }
-}
-
-function start() {
-  void loadBoxes();
-  void loadProfile();
-  if (!serverMode || home.value === "field" || poll) return;
-  poll = window.setInterval(() => void loadBoxes(), 3000);
-}
-
-function stop() {
-  window.clearInterval(poll);
-  poll = 0;
-}
-
+let poll = 0;
 onMounted(() => {
-  restoreChoice();
-  start();
+  void load();
+  poll = window.setInterval(() => void load(), 30000);
 });
-onActivated(() => {
-  restoreChoice();
-  start();
-});
-onDeactivated(stop);
-onUnmounted(stop);
-</script>
-
-<script lang="ts">
-export default { name: "SampleHome" };
+onActivated(() => void load());
+onBeforeUnmount(() => window.clearInterval(poll));
 </script>
 
 <style scoped>
-.switcher {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  justify-content: flex-end;
+.block + .block {
+  margin-top: 16px;
 }
-.switcher span {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
+.section-head {
+  margin-bottom: 10px;
 }
-.switcher button {
-  height: 28px;
-  padding: 0 10px;
-  margin: 0;
-  font: inherit;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-  cursor: pointer;
-  background: var(--content-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 6px;
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
 }
-.switcher button.on {
-  color: #fff;
-  background: var(--el-color-primary);
-  border-color: var(--el-color-primary);
+.cards.two {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 }
-.bar,
-.panel {
-  background: var(--content-bg);
-  border: 1px solid var(--card-border);
-  border-radius: var(--card-radius);
-  box-shadow: var(--card-shadow);
-}
-.bar {
-  display: flex;
-  align-items: stretch;
-  min-height: 52px;
-  overflow: hidden;
-}
-.seg {
+.line {
   display: flex;
   gap: 8px;
-  align-items: baseline;
-  padding: 0 18px;
-  margin: 0;
-  font: inherit;
-  font-size: 14px;
-  color: var(--el-text-color-regular);
-  white-space: nowrap;
-  background: transparent;
-  border: 0;
-  border-right: 1px solid var(--el-border-color-lighter);
-}
-button.seg {
-  cursor: pointer;
-}
-.seg strong {
-  font-size: 20px;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-primary);
-}
-.seg.warn {
-  color: var(--el-color-warning);
-  background: var(--el-color-warning-light-9);
-}
-.seg.warn strong {
-  color: var(--el-color-warning);
-}
-.seg.focus {
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-.seg.focus strong {
-  color: var(--el-color-primary);
-}
-.meta {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  padding: 0 16px;
-  margin-left: auto;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  white-space: nowrap;
-}
-.meta b {
-  font-weight: 650;
-  color: var(--el-text-color-primary);
-}
-.cols {
-  display: flex;
-  gap: 12px;
-  align-items: stretch;
-}
-.grow {
-  flex: 1;
-  min-width: 0;
-}
-.side {
-  flex: 0 0 420px;
-}
-.stack {
-  display: flex;
-  flex: 0 0 380px;
-  flex-direction: column;
-  gap: 12px;
-}
-.panel {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.hd {
-  display: flex;
-  gap: 12px;
   align-items: center;
   justify-content: space-between;
-  height: 44px;
-  padding: 0 16px;
-  font-size: 14px;
-  font-weight: 650;
-  border-bottom: 1px solid var(--card-border);
 }
-.hd em {
-  margin-left: 8px;
-  font-style: normal;
-  font-weight: 500;
-  color: var(--el-text-color-secondary);
-}
-.group {
-  display: flex;
-  align-items: center;
-  height: 32px;
-  padding: 0 16px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-  border-top: 1px solid var(--el-border-color-lighter);
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.item,
-.dir {
-  display: grid;
-  gap: 8px 12px;
-  align-items: center;
-  width: 100%;
-  min-height: 48px;
-  padding: 8px 16px;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.item {
-  grid-template-columns: 88px minmax(0, 1fr) auto auto auto;
-}
-.dir {
-  grid-template-columns: 88px minmax(0, 1fr) auto;
-  cursor: pointer;
-}
-button.item:hover {
-  background: var(--el-fill-color-light);
-}
-button.item.hot:hover {
-  background: var(--el-color-warning-light-9);
-}
-button.dir:hover {
-  background: var(--el-fill-color-light);
-}
-button.dir.on:hover {
-  background: var(--el-color-primary-light-8);
-}
-button.dir.hot.on:hover {
-  background: var(--el-color-warning-light-8);
-}
-.item.hot,
-tr.hot td {
-  background: var(--el-color-warning-light-9);
-}
-.item.hot {
-  box-shadow: inset 3px 0 0 var(--el-color-warning);
-}
-tr.hot td:first-child {
-  box-shadow: inset 3px 0 0 var(--el-color-warning);
-}
-.dir.on {
-  background: var(--el-color-primary-light-9);
-  box-shadow: inset 3px 0 0 var(--el-color-primary);
-}
-.dir.hot.on {
-  background: var(--el-color-warning-light-9);
-  box-shadow: inset 3px 0 0 var(--el-color-warning);
-}
-.box {
-  font-weight: 650;
-}
-.tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-.tag {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 8px;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--el-text-color-regular);
-  white-space: nowrap;
-  background: var(--el-fill-color);
-  border-radius: 4px;
-}
-.tag.primary {
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-.tag.warning {
-  color: var(--el-color-warning);
-  background: var(--el-color-warning-light-9);
-}
-.tag.success {
-  color: var(--el-color-success);
-  background: var(--el-color-success-light-9);
-}
-.tag.info {
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color);
-}
-.tag.danger {
-  color: var(--el-color-danger);
-  background: var(--el-color-danger-light-9);
-}
-.cond {
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-regular);
-  text-align: right;
+.line b {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.where,
-.when {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  white-space: nowrap;
+.quiet {
+  margin: 10px 0 0;
 }
-.where {
-  text-align: right;
+.feed-card {
+  height: 100%;
 }
-.item .where {
-  max-width: 16em;
-  line-height: 1.4;
-  white-space: normal;
+@media (max-width: 1199px) {
+  .feed-card {
+    margin-top: 16px;
+  }
 }
-.link {
+.feed {
   padding: 0;
   margin: 0;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--el-color-primary);
-  white-space: nowrap;
-  cursor: pointer;
-  background: none;
-  border: 0;
-}
-.btn {
-  display: inline-flex;
-  align-items: center;
-  height: 32px;
-  padding: 0 14px;
-  font: inherit;
-  font-size: 13px;
-  color: #fff;
-  cursor: pointer;
-  background: var(--el-color-primary);
-  border: 0;
-  border-radius: 6px;
-}
-.trip {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.trip-1,
-.trip-2 {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
-}
-.trip-1 {
-  margin-bottom: 8px;
-}
-.trip-1 .name {
-  font-weight: 650;
-}
-.trip-1 .link {
-  margin-left: auto;
-}
-.trip-2 {
-  gap: 0;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.trip-2 span + span::before {
-  margin: 0 8px;
-  color: var(--el-border-color);
-  content: "·";
-}
-.alert.bare {
-  grid-template-columns: minmax(0, 1fr);
-}
-.alert {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-height: 52px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.alert b {
-  display: block;
-  font-size: 13px;
-}
-.alert span {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.table-wrap {
-  overflow-x: auto;
-}
-table {
-  width: 100%;
-  font-size: 13px;
-  border-collapse: collapse;
-}
-th {
-  height: 36px;
-  padding: 0 14px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--el-text-color-secondary);
-  text-align: left;
-  white-space: nowrap;
-  background: var(--el-fill-color-light);
-}
-td {
-  height: 46px;
-  padding: 0 14px;
-  white-space: nowrap;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-td.cond,
-td.when {
-  text-align: left;
-}
-td.where {
-  text-align: left;
-  white-space: nowrap;
-}
-.facts {
-  display: grid;
-  grid-template-columns: 88px 1fr;
-  margin: 0;
-}
-.facts dt,
-.facts dd {
-  display: flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 0 16px;
-  margin: 0;
-  font-size: 13px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.facts dt {
-  color: var(--el-text-color-secondary);
-}
-.facts dd:last-of-type,
-.facts dt:last-of-type {
-  border-bottom: 0;
-}
-.empty {
-  padding: 22px 16px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--el-text-color-secondary);
-}
-.empty b {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 14px;
-  color: var(--el-text-color-primary);
-}
-.empty p {
-  margin: 0;
-}
-.empty .btn {
-  margin-top: 12px;
-}
-.assign {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 56px;
-  padding: 10px 16px;
-  margin-top: auto;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-}
-.who {
-  padding: 16px 16px 4px;
-}
-.who b {
-  font-size: 18px;
-}
-.who span {
-  display: block;
-  margin-top: 4px;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
-.steps {
-  display: flex;
-  padding: 0;
-  margin: 8px 8px 16px;
   list-style: none;
 }
-.steps li {
-  position: relative;
-  flex: 1;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  text-align: center;
-}
-.steps li::before {
-  position: absolute;
-  top: 4px;
-  left: -50%;
-  width: 100%;
-  height: 2px;
-  content: "";
-  background: var(--el-border-color);
-}
-.steps li:first-child::before {
-  display: none;
-}
-.steps i {
-  position: relative;
-  z-index: 1;
-  display: block;
-  width: 10px;
-  height: 10px;
-  margin: 0 auto 8px;
-  background: var(--el-border-color);
-  border-radius: 50%;
-}
-.steps .done {
-  color: var(--el-color-success);
-}
-.steps .done i,
-.steps .done::before,
-.steps .on::before {
-  background: var(--el-color-success);
-}
-.steps .on {
-  font-weight: 650;
-  color: var(--el-color-primary);
-}
-.steps .on i {
-  background: var(--el-color-primary);
-  box-shadow: 0 0 0 4px var(--el-color-primary-light-9);
-}
-.grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px 24px;
-  padding: 16px;
-}
-.grid span {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.grid b {
-  font-size: 14px;
-  font-weight: 650;
-}
-.boxline {
+.feed li {
   display: flex;
-  gap: 8px;
-  align-items: center;
-  min-height: 44px;
-  padding: 0 12px;
-  margin: 0 16px 16px;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-  background: var(--el-fill-color-light);
+  gap: 10px;
+  padding: 8px 6px;
+  cursor: pointer;
   border-radius: 6px;
 }
-.done-row {
+.feed li:hover {
+  background: var(--el-fill-color-lighter);
+}
+.icon {
   display: flex;
-  gap: 16px;
+  flex-shrink: 0;
   align-items: center;
-  min-height: 48px;
-  padding: 0 16px;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #fff;
+  background: var(--el-color-info);
+  border-radius: 50%;
+}
+.icon.is-task {
+  background: var(--el-color-primary);
+}
+.icon.is-pad {
+  background: var(--el-color-danger);
+}
+.icon.is-shut {
+  background: var(--el-color-success);
+}
+.body {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
 }
-.done-row span {
+.time {
+  flex-shrink: 0;
+  font-size: 12px;
   color: var(--el-text-color-secondary);
-}
-@media (max-width: 1100px) {
-  .cols,
-  .stack {
-    flex-direction: column;
-  }
-  .side,
-  .stack {
-    flex-basis: auto;
-    width: 100%;
-  }
 }
 </style>

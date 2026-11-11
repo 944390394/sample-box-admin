@@ -13,13 +13,13 @@
  * ```ts
  * formatGrowthRate(0.1234);  // "12.34%"
  * formatGrowthRate(0.1000);  // "10%"
- * formatGrowthRate(0);       // "-"
+ * formatGrowthRate(0);       // "0%"
  * formatGrowthRate(-0.05);   // "5%"（取绝对值）
  * ```
  */
 export function formatGrowthRate(growthRate: number): string {
   if (growthRate === 0) {
-    return "-";
+    return "0%";
   }
 
   const formattedRate = Math.abs(growthRate * 100)

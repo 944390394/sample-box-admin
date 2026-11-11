@@ -19,7 +19,13 @@ import * as echarts from "echarts/core";
 // 引入柱状、折线和饼图常用图表
 import { BarChart, LineChart, PieChart } from "echarts/charts";
 // 引入标题，提示框，直角坐标系，数据集，内置数据转换器组件，
-import { GridComponent, TooltipComponent, LegendComponent } from "echarts/components";
+// MarkArea：电量曲线用它画充电时段的底色，不注册的话 markArea 会被悄悄忽略
+import {
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  MarkAreaComponent,
+} from "echarts/components";
 // 引入 Canvas 渲染器，注意引入 CanvasRenderer 或者 SVGRenderer 是必须的一步
 import { CanvasRenderer } from "echarts/renderers";
 
@@ -33,6 +39,7 @@ echarts.use([
   PieChart,
   GridComponent,
   TooltipComponent,
+  MarkAreaComponent,
   LegendComponent,
 ]);
 
