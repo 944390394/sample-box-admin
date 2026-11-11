@@ -1,10 +1,80 @@
 import request from "@/utils/request";
 import type { RoleQueryParams, RoleItem, RoleForm } from "./types";
-import type { OptionItem, PageResult } from "@/api/common";
+import type { PageResult } from "@/api/common";
 
 const ROLE_BASE_URL = "/api/v1/roles";
 
+/**
+ * 一项权限：label 是名称，hint 是白话说明。
+ * tier：enter 能进这页、see 能看到什么、do 能做什么。needs 是前置，列出的任意一项有了这一项才用得上；
+ * 勾选时自动补上第一项，取消前置时连带取消依赖它的项。
+ */
+export interface PermItem {
+  code: string;
+  label: string;
+  hint?: string;
+  module?: string;
+  tier?: "enter" | "see" | "do";
+  needs?: string[];
+}
+/** 一个模块（和菜单对应），items 按 能进这页 → 能看到什么 → 能做什么 排好。 */
+export interface PermGroup {
+  key: string;
+  label: string;
+  hint: string;
+  items: PermItem[];
+}
+/** 常用模板：一键套用后再改。 */
+export interface RoleTemplate {
+  key: string;
+  label: string;
+  hint: string;
+  codes: string[];
+}
+export interface PermCatalog {
+  groups: PermGroup[];
+  tiers: Record<string, string>;
+  templates: RoleTemplate[];
+  passwordRule: string;
+}
+/** 人员表单里的角色选项；当前用户不能分配的 disabled 为真，reason 说明原因；cut 是在目标部门会被上限挡住的项数。 */
+export interface RoleOption {
+  value: number;
+  label: string;
+  disabled?: boolean;
+  reason?: string;
+  cut?: number;
+}
+
 const RoleAPI = {
+  permCatalog() {
+    return request<unknown, PermCatalog>({ url: `${ROLE_BASE_URL}/perm-catalog`, method: "get" });
+  },
+  /**
+   * fixed 为真表示系统管理员，固定拥有全部权限。
+   * codes 拥有的权限，grantOption 其中开了「可转授」的；assignable 是当前用户能勾、能取消、能改可转授的权限码
+   *（自己可转授的）：null 表示全部（系统管理员），空数组表示没有「给角色分配权限」。
+   */
+  getPerms(roleId: string) {
+    return request<
+      unknown,
+      {
+        codes: string[];
+        grantOption: string[];
+        fixed: boolean;
+        assignable: string[] | null;
+        reasons: Record<string, string>;
+      }
+    >({ url: `${ROLE_BASE_URL}/${roleId}/perms`, method: "get" });
+  },
+  /** codes 是拥有的权限，grantOption 是其中开「可转授」的。 */
+  savePerms(roleId: string, codes: string[], grantOption: string[]) {
+    return request({
+      url: `${ROLE_BASE_URL}/${roleId}/perms`,
+      method: "put",
+      data: { codes, grantOption },
+    });
+  },
   /** 获取角色分页数据 */
   getPage(queryParams?: RoleQueryParams) {
     return request<unknown, PageResult<RoleItem>>({
@@ -13,20 +83,13 @@ const RoleAPI = {
       params: queryParams,
     });
   },
-  /** 获取角色下拉数据源 */
-  getOptions() {
-    return request<unknown, OptionItem[]>({ url: `${ROLE_BASE_URL}/options`, method: "get" });
-  },
-  /** 获取角色的菜单ID集合 */
-  getRoleMenuIds(roleId: string) {
-    return request<unknown, string[]>({
-      url: `${ROLE_BASE_URL}/${roleId}/menu-ids`,
+  /** 角色下拉选项，带当前用户能不能分配 */
+  getOptions(deptId = "") {
+    return request<unknown, RoleOption[]>({
+      url: `${ROLE_BASE_URL}/options`,
       method: "get",
+      params: deptId ? { deptId } : undefined,
     });
-  },
-  /** 分配菜单权限 */
-  updateRoleMenus(roleId: string, data: number[]) {
-    return request({ url: `${ROLE_BASE_URL}/${roleId}/menus`, method: "put", data });
   },
   /** 获取角色表单数据 */
   getFormData(id: string) {

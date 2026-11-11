@@ -155,12 +155,15 @@ test("空库自动建出操作日志和按月分区的上报流水", async () =>
       parser: new UplinkParser(),
     });
     await ingest.accept(raw);
-    const page = await boxes.listLogs("BOX-001", {
+    const page = await boxes.listLogs("864317080992517", {
       from: "2026-10-14 00:00:00.000",
       to: "2026-10-14 23:59:59.999",
     });
     assert.equal(page.list.length, 1);
-    assert.equal(await boxes.readRaw("BOX-001", page.list[0].id, page.list[0].receivedAt), raw);
+    assert.equal(
+      await boxes.readRaw("864317080992517", page.list[0].id, page.list[0].receivedAt),
+      raw
+    );
     const calls = [];
     const probe = new SqlBoxStore({
       dialect: "sqlite",
@@ -220,21 +223,24 @@ test("旧库只补缺的结构，原有箱子和明文上报都还在", async ()
     );
     await migrate(db);
     await migrate(db);
-    const box = await db.get("SELECT id, imei, org, life, iccid FROM sample_box WHERE id = ?", [
-      "BOX-009",
-    ]);
+    // 迁移 026：编号改成 IMEI，原编号留作名称，上报流水跟着改
+    const box = await db.get(
+      "SELECT id, name, imei, org, life, iccid FROM sample_box WHERE id = ?",
+      ["864317080900009"]
+    );
+    assert.equal(box.name, "BOX-009");
     assert.equal(box.imei, "864317080900009");
     assert.equal(box.org, "华南分公司");
     assert.equal(box.life, "在途");
     assert.equal(box.iccid, "");
     const oldRow = await db.get("SELECT id, raw, raw_gz FROM sample_uplink WHERE box_id = ?", [
-      "BOX-009",
+      "864317080900009",
     ]);
     assert.equal(oldRow.raw, '{"keep":1}');
     assert.equal(oldRow.raw_gz, null);
     const boxes = new SqlBoxStore(db);
     assert.equal(
-      await boxes.readRaw("BOX-009", oldRow.id, "2026-08-01 08:00:00.000"),
+      await boxes.readRaw("864317080900009", oldRow.id, "2026-08-01 08:00:00.000"),
       '{"keep":1}'
     );
     const logTable = await db.get(

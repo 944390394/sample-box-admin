@@ -20,6 +20,10 @@ export interface UserInfo {
   roles: string[];
   /** 权限集合 */
   perms: string[];
+  /** 须先改密：required 管理员要求（新建、重置、强制），expired 超过更换周期。null 不需要。 */
+  passwordChange?: "required" | "expired" | null;
+  /** 当前密码规则说明。 */
+  passwordRule?: string;
 }
 
 /** 用户分页查询参数 */
@@ -58,6 +62,26 @@ export interface UserItem {
   status?: number;
   /** 用户名 */
   username?: string;
+  deptId?: string;
+  /** 管理员要求或新建、重置后，下次登录必须改密。 */
+  mustChangePassword?: boolean;
+  /** 连续输错被锁定，还剩几分钟；0 为未锁定。 */
+  lockedMinutes?: number;
+  /** 超过密码策略里的更换周期。 */
+  passwordExpired?: boolean;
+  /** 在小程序里绑定了微信。 */
+  wechatBound?: boolean;
+  /** 绑定的微信昵称（用户在小程序里填的，可能为空）。 */
+  wechatNickname?: string;
+}
+
+/** 我绑定的微信：昵称、头像是用户在小程序里填的。 */
+export interface MyWechat {
+  bound: boolean;
+  nickname?: string;
+  avatar?: string;
+  boundAt?: string;
+  lastLoginAt?: string;
 }
 
 /** 用户表单对象 */
@@ -82,6 +106,8 @@ export interface UserForm {
   status?: number;
   /** 用户名 */
   username?: string;
+  /** 新建时的初始密码；不填由服务端随机生成。 */
+  password?: string;
 }
 
 /** 个人中心用户信息 */

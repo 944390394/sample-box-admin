@@ -1,814 +1,396 @@
 <template>
-  <div v-loading="!ready" class="page-container">
-    <el-empty v-if="ready && !box" description="没有这台采样箱">
-      <el-button @click="router.push('/device/boxes')">返回采样箱</el-button>
-    </el-empty>
-    <el-empty v-else-if="!allow(BOX_PERM.detail)" description="当前角色不能查看采样箱详情">
-      <el-button @click="router.push('/device/boxes')">返回采样箱</el-button>
+  <div class="page-container page-flow">
+    <el-skeleton v-if="!box && loading" :rows="8" animated />
+    <el-empty v-else-if="!box" :description="error || '采样箱不存在'">
+      <el-button @click="router.push('/device/boxes')">回采样箱列表</el-button>
     </el-empty>
 
-    <template v-else-if="box">
-      <el-card shadow="never">
-        <template #header>
-          <div class="head">
-            <div class="head-title">
-              <el-button @click="router.push('/device/boxes')">返回</el-button>
-              <strong>{{ box.id }}</strong>
-              <el-tag :type="lifeTag(box.life)" size="small">{{ box.life }}</el-tag>
-              <el-tag v-if="box.alert" type="warning" size="small">{{ box.alert }}</el-tag>
-              <span class="org">{{ box.org }}</span>
-            </div>
-            <div class="ops">
-              <el-button
-                v-if="
-                  !serverMode &&
-                  box.life === '待激活' &&
-                  box.activateStep === '等待激活' &&
-                  allow(BOX_PERM.activate)
-                "
-                type="primary"
-                @click="activateOpen = true"
-              >
-                激活
-              </el-button>
-              <el-button
-                v-if="!serverMode && box.activateStep === '待设备确认' && allow(BOX_PERM.activate)"
-                type="primary"
-                plain
-                @click="simulate"
-              >
-                模拟箱子确认
-              </el-button>
-              <el-button
-                v-if="!serverMode && box.life === '未使用' && allow(BOX_PERM.disable)"
-                type="danger"
-                plain
-                @click="stop"
-              >
-                停用
-              </el-button>
-              <el-button
-                v-if="!serverMode && box.life === '停用' && allow(BOX_PERM.disable)"
-                type="primary"
-                plain
-                @click="resume"
-              >
-                恢复
-              </el-button>
-            </div>
-          </div>
+    <template v-else>
+      <PageHeader :title="box.name || box.id" back="/device/boxes">
+        <template #tags>
+          <el-tag :type="lifeTone(box.life)">{{ lifeLabel(box.life) }}</el-tag>
+          <el-tag v-if="box.wipe" type="danger" effect="dark" :title="wipeTitle(box.wipe)">
+            抹除中
+          </el-tag>
+          <el-tag :type="online ? 'success' : 'info'" effect="plain">
+            <span class="dot" :class="online ? 'on' : 'off'" />
+            {{ online ? "在线" : "离线" }}
+          </el-tag>
         </template>
+        <template #meta>
+          <span class="mono">IMEI {{ box.id }}</span>
+          · {{ box.org || "总公司" }} ·
+          {{ box.owner && box.owner !== "—" ? `${box.owner} 保管` : "无保管人" }}
+        </template>
+        <template #actions>
+          <el-button
+            v-if="box.life === '待激活' && can(BOX_PERM.activate)"
+            type="primary"
+            @click="openActivate"
+          >
+            激活
+          </el-button>
+          <el-button
+            v-if="box.life === '未使用' && TASK_CREATE.some((perm) => can(perm))"
+            type="primary"
+            plain
+            @click="router.push({ path: '/task/create', query: { boxIds: box.id } })"
+          >
+            创建任务单
+          </el-button>
+          <el-button
+            v-if="can(BOX_PERM.assignOrg) || can(BOX_PERM.assignOwner)"
+            @click="assignOpen = true"
+          >
+            分配
+          </el-button>
+          <el-button v-if="can(policyPerm.read)" @click="policyOpen = true">上报策略</el-button>
+          <el-button @click="qrOpen = true">二维码</el-button>
+          <el-dropdown v-if="more.length" trigger="click" @command="onMore">
+            <el-button>
+              更多
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="item in more"
+                  :key="item.cmd"
+                  :command="item.cmd"
+                  :divided="item.danger"
+                  :class="{ 'is-danger': item.danger }"
+                >
+                  {{ item.label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
+      </PageHeader>
 
-        <div class="facts">
-          <div v-for="item in facts" :key="item.label" class="fact" :class="{ wide: item.wide }">
-            <span>{{ item.label }}</span>
-            <b>{{ item.value }}</b>
-          </div>
-        </div>
+      <BoxSummary v-if="box.life !== '待激活'" :box="box" />
 
-        <div class="progress">
-          <div class="progress-head">激活进度 · {{ stepText }}</div>
-          <el-steps :active="stepIndex" finish-status="success" class="steps">
-            <el-step title="上电上报" />
-            <el-step title="等待激活" />
-            <el-step title="密钥已下发" />
-            <el-step title="箱子已确认" />
-          </el-steps>
-        </div>
+      <el-alert v-if="box.alert" type="error" :closable="false" show-icon :title="box.alert" />
+      <el-alert
+        v-if="box.masked?.length"
+        type="info"
+        :closable="false"
+        :title="`按你的权限，${maskedText}不显示`"
+      />
+
+      <el-card v-if="box.life === '待激活'" shadow="never">
+        <el-steps :active="activationStep" finish-status="success" align-center>
+          <el-step title="设备上电上报" />
+          <el-step title="等待激活" />
+          <el-step title="密钥已下发" />
+          <el-step title="箱子已确认" />
+        </el-steps>
+        <p class="text-muted center">
+          核对箱体上的 IMEI 后点「激活」。激活后箱子下次上线会收到密钥，确认后即可使用。
+        </p>
       </el-card>
 
-      <div class="split">
-        <el-card v-if="allow(BOX_PERM.event)" shadow="never" header="事件">
-          <ul v-if="events.length" class="feed">
-            <li v-for="(item, index) in events" :key="item.time + item.name + index">
-              <time>{{ item.time }}</time>
-              <div>
-                <b>{{ item.name }}</b>
-                <span>{{ item.detail }}</span>
-              </div>
-            </li>
-          </ul>
-          <el-empty v-else description="暂无事件" :image-size="56" />
-        </el-card>
-
-        <el-card v-if="allow(BOX_PERM.log)" shadow="never">
-          <template #header>
-            <div class="debug-head">
-              <span>{{ serverMode ? "调试" : "日志（最近 7 天）" }}</span>
-              <em v-if="serverMode">{{ streamState }} · 最近 7 天</em>
-            </div>
-          </template>
-          <ul v-if="logs.length" class="feed">
-            <li
-              v-for="(item, index) in logs"
-              :key="(item.id || item.time) + item.text + index"
-              :class="{ pick: serverMode }"
-              @click="openRaw(item)"
-            >
-              <time>{{ item.time }}</time>
-              <div>
-                <template v-if="serverMode">
-                  <b>{{ uplinkType(item) }}</b>
-                  <span>{{ uplinkSummary(item) }}</span>
-                </template>
-                <template v-else>
-                  <span>{{ item.text }}</span>
-                  <em>{{ item.by }}</em>
-                </template>
-                <el-button v-if="serverMode" link type="primary" @click.stop="openRaw(item)">
-                  {{ shownRaw(item) ? "收起" : "原文" }}
+      <el-card shadow="never" class="tabs-card">
+        <el-tabs v-model="tab" @tab-change="onTab">
+          <el-tab-pane label="概览" name="overview">
+            <BoxOverview :box="box" @tab="(name) => (tab = name)" />
+          </el-tab-pane>
+          <el-tab-pane
+            v-if="can(BOX_PERM.track) || (can(BOX_PERM.task) && can(BOX_PERM.location))"
+            label="轨迹"
+            name="track"
+            lazy
+          >
+            <BoxTrack :box="box" />
+          </el-tab-pane>
+          <el-tab-pane v-if="EVENT_PERMS.some((perm) => can(perm))" label="事件" name="event" lazy>
+            <UplinkLog :load="loadLogs" events-only />
+          </el-tab-pane>
+          <el-tab-pane v-if="can(BOX_PERM.task)" label="任务" name="task" lazy>
+            <BoxTasks :box-id="box.id" />
+          </el-tab-pane>
+          <el-tab-pane v-if="can(BOX_PERM.log)" label="上报记录" name="log" lazy>
+            <UplinkLog :load="loadLogs" :load-raw="loadRaw">
+              <template #actions>
+                <el-button
+                  v-if="can(BOX_PERM.logExport) || can(BOX_PERM.dump)"
+                  size="small"
+                  @click="exportOpen = true"
+                >
+                  导出
                 </el-button>
-                <code v-if="shownRaw(item)" @click.stop>{{ formatRaw(shownRaw(item)) }}</code>
-              </div>
-            </li>
-          </ul>
-          <el-empty v-else :description="serverMode ? '暂无报文' : '暂无日志'" :image-size="56" />
-        </el-card>
-      </div>
-
-      <el-card v-if="allow(BOX_PERM.task)" shadow="never" class="block" header="关联任务">
-        <div v-if="linkedTasks.length" class="tasks">
-          <div v-for="row in linkedTasks" :key="row.no" class="task">
-            <div class="task-main">
-              <b>{{ row.no }}</b>
-              <span>{{ row.name }}</span>
-              <el-tag :type="row.relation === '当前' ? 'primary' : 'info'" size="small">
-                {{ row.relation }}
-              </el-tag>
-            </div>
-            <div class="task-meta">
-              {{ row.org }} · {{ row.place }} · {{ row.people }} · {{ row.status }}
-            </div>
-            <el-button link type="primary" @click="openTask(row)">查看任务单</el-button>
-          </div>
-        </div>
-        <el-empty v-else description="没有关联任务" :image-size="56" />
+              </template>
+            </UplinkLog>
+          </el-tab-pane>
+          <el-tab-pane label="设备" name="info" lazy>
+            <BoxInfo :box="box" />
+          </el-tab-pane>
+        </el-tabs>
       </el-card>
     </template>
 
-    <el-dialog v-model="activateOpen" title="激活采样箱" width="480px">
-      <p v-if="box">{{ box.id }} · IMEI {{ box.imei }}</p>
-      <p>核对身份后确认激活。设备密钥会在这台箱子下次上线时下发，所属固定为总公司。</p>
+    <el-dialog v-model="activate.open" title="激活采样箱" width="460px" style="max-width: 94vw">
+      <p v-if="box" class="lead">IMEI {{ box.id }}</p>
+      <p class="text-muted">
+        核对箱体上贴的 IMEI 后确认。激活后状态变为{{ lifeLabel("未使用") }}，所属总公司。
+      </p>
+      <el-input
+        v-if="can(BOX_PERM.rename)"
+        v-model="activate.name"
+        maxlength="32"
+        show-word-limit
+        :placeholder="`名称（选填），不填用：${box?.name || ''}`"
+        @keyup.enter="doActivate"
+      />
       <template #footer>
-        <el-button @click="activateOpen = false">取消</el-button>
-        <el-button type="primary" @click="doActivate">确认激活</el-button>
+        <el-button @click="activate.open = false">取消</el-button>
+        <el-button type="primary" :loading="activate.busy" @click="doActivate">确认激活</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="taskOpen" title="任务单" width="520px">
-      <el-descriptions v-if="currentTask" :column="1" border>
-        <el-descriptions-item label="任务单">{{ currentTask.no }}</el-descriptions-item>
-        <el-descriptions-item label="名称">{{ currentTask.name }}</el-descriptions-item>
-        <el-descriptions-item label="分公司">{{ currentTask.org }}</el-descriptions-item>
-        <el-descriptions-item label="计划地点">{{ currentTask.place }}</el-descriptions-item>
-        <el-descriptions-item label="授权人员">{{ currentTask.people }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ currentTask.status }}</el-descriptions-item>
-      </el-descriptions>
-    </el-dialog>
+    <AssignDialog v-if="box" v-model="assignOpen" :box="box" @saved="load" />
+    <ReportPolicyDialog
+      v-if="box"
+      v-model="policyOpen"
+      :box-id="box.id"
+      :box-name="box.name"
+      @saved="load"
+    />
+    <LogExportDialog
+      v-if="box"
+      v-model="exportOpen"
+      :box-id="box.id"
+      :remote="Boolean(box.remote)"
+    />
+    <BoxQrDialog v-if="box" v-model="qrOpen" :box="box" />
   </div>
 </template>
 
 <script setup lang="ts">
+defineOptions({ name: "SampleBoxDetail" });
+
+import { ArrowDown } from "@element-plus/icons-vue";
 import SampleBoxAPI, { type BoxLogItem } from "@/api/sample/box";
-import { useUserStore } from "@/stores/user";
-import { AuthStorage } from "@/utils/auth";
-import {
-  alerts,
-  BOX_PERM,
-  boxTaskHistory,
-  gpsText,
-  lbsText,
-  reports,
-  tasks,
-  type BoxLife,
-  type SampleBox,
-} from "../data";
-import {
-  boxSession,
-  confirmDevice,
-  disableBox,
-  findBox,
-  requestActivate,
-  restoreBox,
-} from "../box-state";
+import { policyPerm } from "@/api/sample/report-policy";
+import PageHeader from "@/components/biz/PageHeader.vue";
+import UplinkLog, { type UplinkLoadParams } from "@/components/biz/UplinkLog.vue";
+import { usePerm } from "@/composables/usePerm";
+import { lifeLabel } from "@/utils/labels";
+import { clock } from "@/utils/time";
+import { lifeTone } from "@/utils/tone";
+import AssignDialog from "./AssignDialog.vue";
+import BoxInfo from "./BoxInfo.vue";
+import BoxOverview from "./BoxOverview.vue";
+import BoxTasks from "./BoxTasks.vue";
+import BoxTrack from "./BoxTrack.vue";
+import LogExportDialog from "./LogExportDialog.vue";
+import BoxQrDialog from "./BoxQrDialog.vue";
+import BoxSummary from "./BoxSummary.vue";
+import ReportPolicyDialog from "./ReportPolicyDialog.vue";
+import { deleteArchive, wipeTitle } from "./management";
+import { telemetryState } from "./telemetry";
+import { BOX_PERM, EVENT_PERMS, TASK_CREATE, type SampleBox } from "../data";
 
-interface LinkedTask {
-  no: string;
-  name: string;
-  org: string;
-  place: string;
-  people: string;
-  status: string;
-  relation: "当前" | "历史";
-}
-
+/**
+ * 采样箱详情：页头放名称、状态和常用操作，下面一条状态条（电量、箱盖、信号、最近上报、位置）切换标签也一直在；
+ * 内容分标签页——概览、轨迹、事件、任务、上报记录（原文，要权限）、设备。
+ * 标签页写在地址栏 ?tab=，旧的调试记录页会跳到「上报记录」。10 秒刷新一次。
+ */
 const route = useRoute();
 const router = useRouter();
-const userStore = useUserStore();
-const activateOpen = ref(false);
-const taskOpen = ref(false);
-const currentTask = ref<LinkedTask | null>(null);
+const can = usePerm();
+const box = ref<SampleBox | null>(null);
+const loading = ref(false);
+const error = ref("");
+// 在线状态跟全站时钟走：超过 3 个上报周期没报，到点就变离线，不等下次刷新
+const now = clock;
+const tab = ref(String(route.query.tab || "overview"));
+const assignOpen = ref(false);
+const policyOpen = ref(false);
+const exportOpen = ref(false);
+const qrOpen = ref(false);
 
-const DEBUG_LIMIT = 100;
-const DAY_MS = 24 * 60 * 60 * 1000;
-const POLL_MS = 3000;
-const STREAM_RETRY_MS = 5000;
-
-const serverMode = import.meta.env.VITE_MOCK_DEV_SERVER !== "true";
-const remoteBox = ref<SampleBox | null>(null);
-const remoteLogs = ref<BoxLogItem[]>([]);
-const rawById = ref<Record<string, string>>({});
-const ready = ref(!serverMode);
-const streamLive = ref(false);
-const polling = ref(false);
-const boxId = computed(() => String(route.params.id || ""));
-const box = computed(() => (serverMode ? remoteBox.value : findBox(boxId.value)));
-const streamState = computed(() => {
-  if (streamLive.value) return "实时";
-  if (polling.value) return "轮询";
-  return "连接中";
-});
-
-let debugTicket = 0;
-let reconcileTimer = 0;
-let pollTimer = 0;
-let retryTimer = 0;
-let connectTimer = 0;
-let socket: WebSocket | null = null;
-let streamStopped = false;
-
-function padStamp(value: number, width = 2) {
-  return String(value).padStart(width, "0");
-}
-
-function formatStamp(date: Date) {
-  return `${date.getFullYear()}-${padStamp(date.getMonth() + 1)}-${padStamp(date.getDate())} ${padStamp(date.getHours())}:${padStamp(date.getMinutes())}:${padStamp(date.getSeconds())}.${padStamp(date.getMilliseconds(), 3)}`;
-}
-
-/** 结束时间多留一天，避免浏览器时区和服务器不一致时把刚到的报文排除。不按上报间隔抽稀。 */
-function debugQuery() {
-  const now = Date.now();
-  return {
-    from: formatStamp(new Date(now - 7 * DAY_MS)),
-    to: formatStamp(new Date(now + DAY_MS)),
-    limit: DEBUG_LIMIT,
-  };
-}
-
-function stripRaw(item: BoxLogItem): BoxLogItem {
-  const next = { ...item };
-  delete next.raw;
-  return next;
-}
-
-function sortLogs(rows: BoxLogItem[]) {
-  return [...rows].sort((left, right) => {
-    if (left.time !== right.time) return left.time < right.time ? 1 : -1;
-    return (Number(right.id) || 0) - (Number(left.id) || 0);
-  });
-}
-
-function sameUplink(left: BoxLogItem, right: BoxLogItem) {
-  if (left.id && right.id) return left.id === right.id;
-  return left.time === right.time && left.kind === right.kind && left.text === right.text;
-}
-
-async function loadDebug() {
-  const ticket = ++debugTicket;
-  const id = boxId.value;
-  const page = await SampleBoxAPI.logs(id, debugQuery());
-  if (ticket !== debugTicket || id !== boxId.value) return;
-  remoteLogs.value = sortLogs(page.list.map(stripRaw)).slice(0, DEBUG_LIMIT);
-}
-
-function scheduleReconcile() {
-  window.clearTimeout(reconcileTimer);
-  reconcileTimer = window.setTimeout(() => {
-    loadDebug().catch(() => undefined);
-  }, 200);
-}
-
-function prependUplink(item: BoxLogItem) {
-  if (item.box && item.box !== boxId.value) return;
-  const next = stripRaw(item);
-  if (remoteLogs.value.some((row) => sameUplink(row, next))) return;
-  remoteLogs.value = sortLogs([next, ...remoteLogs.value]).slice(0, DEBUG_LIMIT);
-  scheduleReconcile();
-}
-
-async function loadRemote() {
-  if (!serverMode || !boxId.value) return;
-  const id = boxId.value;
-  try {
-    const next = await SampleBoxAPI.detail(id);
-    if (id === boxId.value) remoteBox.value = next;
-  } catch {
-    if (id === boxId.value) remoteBox.value = null;
-  }
-  try {
-    await loadDebug();
-  } catch {
-    // 初次失败保持空列表，轮询或下一条实时报文再补。
-  } finally {
-    if (id === boxId.value) ready.value = true;
-  }
-}
-
-async function refreshLive() {
-  const id = boxId.value;
-  try {
-    const next = await SampleBoxAPI.detail(id);
-    if (id === boxId.value) remoteBox.value = next;
-  } catch {
-    // 短轮询失败时留着已经打开的箱子。
-  }
-  try {
-    await loadDebug();
-  } catch {
-    // 留着已经列出的报文。
-  }
-}
-
-function startPoll() {
-  if (pollTimer || streamStopped) return;
-  polling.value = true;
-  void refreshLive();
-  pollTimer = window.setInterval(() => {
-    void refreshLive();
-  }, POLL_MS);
-}
-
-function stopPoll() {
-  window.clearInterval(pollTimer);
-  pollTimer = 0;
-  polling.value = false;
-}
-
-function streamUrl() {
-  const token = encodeURIComponent(AuthStorage.getAccessToken());
-  const base = String(import.meta.env.VITE_APP_BASE_API || "").replace(/\/$/, "");
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${base}/api/v1/sample/stream?token=${token}`;
-}
-
-function applyLiveBox(next: SampleBox) {
-  if (!remoteBox.value || next.id !== remoteBox.value.id) return;
-  remoteBox.value = {
-    ...remoteBox.value,
-    ...next,
-    status: next.life || remoteBox.value.status,
-  };
-}
-
-function onStreamMessage(raw: string) {
-  let message: { type?: string; box?: SampleBox; uplink?: BoxLogItem };
-  try {
-    message = JSON.parse(raw) as { type?: string; box?: SampleBox; uplink?: BoxLogItem };
-  } catch {
-    return;
-  }
-  const live = message.box;
-  if (message.type !== "box" || !live || live.id !== boxId.value) return;
-  applyLiveBox(live);
-  if (message.uplink) prependUplink(message.uplink);
-}
-
-function connectStream() {
-  if (!serverMode || streamStopped) return;
-  window.clearTimeout(retryTimer);
-  if (!AuthStorage.getAccessToken()) {
-    streamLive.value = false;
-    startPoll();
-    return;
-  }
-  const current = new WebSocket(streamUrl());
-  socket = current;
-  window.clearTimeout(connectTimer);
-  connectTimer = window.setTimeout(() => {
-    if (streamStopped || socket !== current) return;
-    if (current.readyState !== WebSocket.OPEN) startPoll();
-  }, POLL_MS);
-  current.onopen = () => {
-    if (socket !== current) return;
-    streamLive.value = true;
-    stopPoll();
-    // 连上之前漏掉的报文补一次，之后只靠这条通道追加。
-    loadDebug().catch(() => undefined);
-  };
-  current.onmessage = (event) => {
-    if (socket !== current) return;
-    onStreamMessage(String(event.data));
-  };
-  current.onclose = () => {
-    if (socket !== current) return;
-    socket = null;
-    streamLive.value = false;
-    if (streamStopped) return;
-    startPoll();
-    retryTimer = window.setTimeout(connectStream, STREAM_RETRY_MS);
-  };
-}
-
-function stopStream() {
-  streamStopped = true;
-  window.clearTimeout(retryTimer);
-  window.clearTimeout(connectTimer);
-  window.clearTimeout(reconcileTimer);
-  stopPoll();
-  const current = socket;
-  socket = null;
-  current?.close();
-}
-
-watch(
-  boxId,
-  () => {
-    if (!serverMode) return;
-    ready.value = false;
-    remoteBox.value = null;
-    remoteLogs.value = [];
-    rawById.value = {};
-    window.clearTimeout(reconcileTimer);
-    loadRemote();
-  },
-  { immediate: true }
+const online = computed(() =>
+  box.value ? telemetryState(box.value.last, box.value.reportPeriodSec, now.value).online : false
 );
-
-onMounted(() => {
-  if (!serverMode) return;
-  connectStream();
+const maskedText = computed(() => {
+  const names: Record<string, string> = {
+    status: "电量和箱盖",
+    location: "位置",
+    identity: "SIM 卡和固件信息",
+  };
+  return (box.value?.masked || []).map((key) => names[key] || key).join("、");
 });
-
-onUnmounted(() => {
-  stopStream();
-});
-
-const stepIndex = computed(() => {
-  if (!box.value || box.value.activateStep === "已确认") return 4;
-  if (box.value.activateStep === "待设备确认") return 2;
+const activationStep = computed(() => {
+  const step = box.value?.activateStep;
+  if (step === "已确认") return 4;
+  if (step === "待设备确认") return 2;
   return 1;
 });
 
-const stepText = computed(() => {
-  if (!box.value) return "";
-  if (box.value.activateStep === "已确认") return "箱子已确认";
-  return box.value.activateStep;
-});
-
-const facts = computed(() => {
-  if (!box.value) return [];
-  return [
-    { label: "IMEI", value: box.value.imei },
-    { label: "ICCID", value: box.value.iccid },
-    { label: "IMSI", value: box.value.imsi },
-    { label: "固件", value: box.value.firmware },
-    { label: "电压", value: box.value.battery },
-    { label: "信号", value: String(box.value.csq) },
-    { label: "上电时间", value: box.value.poweredAt, wide: true },
-    { label: "基站", value: lbsText(box.value), wide: true },
-    { label: "GPS", value: gpsText(box.value), wide: true },
-  ];
-});
-
-const events = computed(() => {
-  const id = boxId.value;
-  const rows = [
-    ...reports
-      .filter((item) => item.box === id)
-      .map((item) => ({
-        time: item.time,
-        name: item.event,
-        detail:
-          item.event === "心跳" ? `基站 ${item.lbs}` : `${item.person}，开箱 ${item.opens} 次`,
-      })),
-    ...alerts
-      .filter((item) => item.box === id)
-      .map((item) => ({
-        time: item.time,
-        name: item.rule,
-        detail: item.detail,
-      })),
-  ];
-  return rows.sort((a, b) => (a.time < b.time ? 1 : -1));
-});
-
-const logs = computed((): BoxLogItem[] => {
-  if (serverMode) return remoteLogs.value;
-  return boxSession.logs
-    .filter((item) => item.box === boxId.value)
-    .slice()
-    .sort((a, b) => (a.time < b.time ? 1 : -1))
-    .map((item) => ({
-      box: item.box,
-      time: item.time,
-      text: item.text,
-      by: item.by,
-      raw: item.raw,
-      lbsLng: null,
-      lbsLat: null,
-      gpsLng: null,
-      gpsLat: null,
-    }));
-});
-
-function uplinkType(item: BoxLogItem) {
-  if (item.kind === "boot") return "上电上报";
-  if (item.kind === "timer") return "定时上报";
-  if (item.kind === "pad") return "开箱上报";
-  if (item.text) return item.text;
-  return "设备上报";
+async function load() {
+  const id = String(route.params.id || "");
+  if (!id) return;
+  loading.value = !box.value;
+  try {
+    const next = await SampleBoxAPI.detail(encodeURIComponent(id));
+    box.value = next;
+    error.value = "";
+    // 旧链接按名称（BOX-004）打开的，换成编号地址
+    if (next.id !== id)
+      void router.replace({
+        path: `/device/boxes/${encodeURIComponent(next.id)}`,
+        query: route.query,
+      });
+  } catch (e) {
+    if (!box.value) error.value = e instanceof Error ? e.message : "";
+  } finally {
+    loading.value = false;
+  }
 }
 
-function uplinkSummary(item: BoxLogItem) {
-  const summary = item.text && item.text !== uplinkType(item) ? item.text : "";
-  const device = item.deviceTime ? `设备时间 ${item.deviceTime}` : "";
-  return [summary, device].filter(Boolean).join(" · ") || item.text || "—";
+function onTab(name: string | number) {
+  void router.replace({ query: { ...route.query, tab: String(name) } });
 }
 
-function shownRaw(item: BoxLogItem) {
-  if (serverMode) return item.id ? rawById.value[item.id] || "" : "";
-  return item.raw || "";
-}
+const loadLogs = (params: UplinkLoadParams) => SampleBoxAPI.logs(box.value!.id, params);
+const loadRaw = async (item: BoxLogItem) =>
+  (await SampleBoxAPI.raw(box.value!.id, item.id || "", item.time)).raw;
 
-function hideRaw(id: string) {
-  if (!rawById.value[id]) return false;
-  const next = { ...rawById.value };
-  delete next[id];
-  rawById.value = next;
-  return true;
+interface MoreItem {
+  cmd: string;
+  label: string;
+  danger?: boolean;
 }
-
-async function openRaw(item: BoxLogItem) {
-  if (!serverMode) return;
-  let target = item;
-  if (!target.id) {
+const more = computed<MoreItem[]>(() => {
+  const b = box.value;
+  if (!b) return [];
+  const list: MoreItem[] = [];
+  if (can(BOX_PERM.rename)) list.push({ cmd: "rename", label: "改名称" });
+  if (b.life === "未使用" && can(BOX_PERM.disable)) list.push({ cmd: "disable", label: "停用" });
+  if (b.life === "停用" && can(BOX_PERM.enable)) list.push({ cmd: "restore", label: "恢复使用" });
+  if (["未使用", "停用"].includes(b.life) && can(BOX_PERM.delete))
+    list.push({ cmd: "delete", label: "删除档案", danger: true });
+  return list;
+});
+async function onMore(cmd: string) {
+  const b = box.value;
+  if (!b) return;
+  if (cmd === "rename") {
     try {
-      await loadDebug();
+      const { value } = await ElMessageBox.prompt("1–32 个字，不能和别的采样箱重名", "改名称", {
+        inputValue: b.name,
+        inputValidator: (text: string) =>
+          (text.trim().length >= 1 && text.trim().length <= 32) || "名称要 1–32 个字",
+        confirmButtonText: "保存",
+        cancelButtonText: "取消",
+      });
+      box.value = await SampleBoxAPI.rename(b.id, value.trim());
+      ElMessage.success("已改名");
+    } catch {
+      /* 取消 */
+    }
+  } else if (cmd === "disable" || cmd === "restore") {
+    const verb = cmd === "disable" ? "停用" : "恢复使用";
+    try {
+      await ElMessageBox.confirm(
+        cmd === "disable"
+          ? "停用后不能被任务选中，可以随时恢复。"
+          : `恢复后回到${lifeLabel("未使用")}状态。`,
+        `${verb}采样箱`,
+        { type: "warning", confirmButtonText: verb, cancelButtonText: "取消" }
+      );
     } catch {
       return;
     }
-    target = remoteLogs.value.find((row) => row.id && sameUplink(row, item)) || item;
+    box.value = await (cmd === "disable" ? SampleBoxAPI.disable(b.id) : SampleBoxAPI.restore(b.id));
+    ElMessage.success(`已${verb}`);
+  } else if (cmd === "delete") {
+    if (
+      await deleteArchive(
+        b.id,
+        Boolean(b.remote) && can(BOX_PERM.wipe),
+        Boolean(b.wipe),
+        b.name || b.id
+      )
+    ) {
+      if (b.firmware && b.wipe == null) void router.push("/device/boxes");
+      else await load();
+    }
   }
-  if (!target.id) return;
-  if (hideRaw(target.id)) return;
-  const data = await SampleBoxAPI.raw(boxId.value, target.id, target.time);
-  rawById.value = { ...rawById.value, [target.id]: data.raw };
 }
 
-function formatRaw(raw: string) {
+const activate = reactive({ open: false, busy: false, name: "" });
+function openActivate() {
+  Object.assign(activate, { open: true, busy: false, name: "" });
+}
+async function doActivate() {
+  if (!box.value) return;
+  activate.busy = true;
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
+    box.value = await SampleBoxAPI.activate(box.value.id, activate.name.trim());
+    ElMessage.success("已激活");
+    activate.open = false;
+  } finally {
+    activate.busy = false;
   }
 }
 
-const linkedTasks = computed<LinkedTask[]>(() => {
-  const id = boxId.value;
-  const current = tasks
-    .filter((item) => item.box === id)
-    .map((item) => ({ ...item, relation: "当前" as const }));
-  const past = boxTaskHistory
-    .filter((item) => item.box === id)
-    .map((item) => ({ ...item, relation: "历史" as const }));
-  return [...current, ...past];
+let poll = 0;
+watch(
+  () => route.params.id,
+  (id) => {
+    if (id && route.path.startsWith("/device/boxes/")) {
+      box.value = null;
+      void load();
+    }
+  }
+);
+onMounted(() => {
+  void load();
+  poll = window.setInterval(() => void load(), 10000);
 });
-
-function allow(perm: string) {
-  return userStore.userInfo.perms?.includes(perm) ?? false;
-}
-
-function lifeTag(life: BoxLife) {
-  if (life === "在途") return "primary";
-  if (life === "未使用") return "success";
-  if (life === "待激活") return "warning";
-  return "info";
-}
-
-function doActivate() {
-  if (!box.value) return;
-  if (requestActivate(box.value)) ElMessage.success(`${box.value.id} 已等待设备确认`);
-  activateOpen.value = false;
-}
-
-async function simulate() {
-  if (!box.value) return;
-  try {
-    await ElMessageBox.confirm(
-      "模拟这台箱子下次上线，并确认已经保存设备密钥。确认后状态变为未使用，所属仍是总公司。",
-      "模拟箱子确认",
-      { type: "warning", confirmButtonText: "确认", cancelButtonText: "取消" }
-    );
-  } catch {
-    return;
-  }
-  if (confirmDevice(box.value)) ElMessage.success(`${box.value.id} 已变为未使用`);
-}
-
-async function stop() {
-  if (!box.value) return;
-  try {
-    await ElMessageBox.confirm(`${box.value.id} 停用后不能再绑定新任务。`, "停用采样箱", {
-      type: "warning",
-      confirmButtonText: "停用",
-      cancelButtonText: "取消",
-    });
-  } catch {
-    return;
-  }
-  if (disableBox(box.value)) ElMessage.success(`${box.value.id} 已停用`);
-}
-
-async function resume() {
-  if (!box.value) return;
-  try {
-    await ElMessageBox.confirm(`恢复 ${box.value.id} 后，状态变为未使用。`, "恢复采样箱", {
-      type: "warning",
-      confirmButtonText: "恢复",
-      cancelButtonText: "取消",
-    });
-  } catch {
-    return;
-  }
-  if (restoreBox(box.value)) ElMessage.success(`${box.value.id} 已恢复为未使用`);
-}
-
-function openTask(row: LinkedTask) {
-  if (!allow(BOX_PERM.task)) return;
-  currentTask.value = row;
-  taskOpen.value = true;
-}
+onBeforeUnmount(() => window.clearInterval(poll));
 </script>
 
 <style scoped>
-.head {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  vertical-align: 1px;
+  border-radius: 50%;
 }
-.head-title {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
+.dot.on {
+  background: var(--el-color-success);
 }
-.head-title strong {
-  font-size: 18px;
+.dot.off {
+  background: var(--el-text-color-placeholder);
 }
-.org {
-  color: var(--el-text-color-secondary);
+.center {
+  margin: 12px 0 0;
+  text-align: center;
 }
-.ops {
-  display: flex;
-  flex-shrink: 0;
-  gap: 8px;
+.lead {
+  margin: 0 0 6px;
+  font-weight: 600;
 }
-.facts {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px;
-  overflow: hidden;
-  background: var(--el-border-color-lighter);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+.tabs-card :deep(.el-card__body) {
+  padding: 4px 16px 16px;
 }
-.fact {
-  min-width: 0;
-  padding: 10px 14px;
-  background: var(--el-bg-color);
+.tabs-card :deep(.el-tabs__header) {
+  margin-bottom: 16px;
 }
-.fact.wide {
-  grid-column: span 2;
+.tabs-card :deep(.el-tabs__item) {
+  height: 44px;
+  font-size: 14px;
 }
-.fact span {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
 }
-.fact b {
-  display: block;
-  font-weight: 500;
-  word-break: break-all;
-}
-.progress {
-  padding-top: 14px;
-  margin-top: 16px;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-.progress-head {
-  margin-bottom: 8px;
-  color: var(--el-text-color-regular);
-}
-.steps {
-  max-width: 640px;
-}
-.split {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
-.block {
-  margin-top: 12px;
-}
-.feed {
-  padding: 0;
-  margin: 0;
-  list-style: none;
-}
-.feed li {
-  display: grid;
-  grid-template-columns: 168px minmax(0, 1fr);
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.feed li:last-child {
-  padding-bottom: 0;
-  border-bottom: 0;
-}
-.feed time {
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-secondary);
-}
-.feed b {
-  margin-right: 8px;
-}
-.feed em {
-  margin-left: 8px;
-  font-style: normal;
-  color: var(--el-text-color-secondary);
-}
-.feed li.pick {
-  cursor: pointer;
-}
-.feed li > div {
-  min-width: 0;
-}
-.debug-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.debug-head em {
-  font-size: 12px;
-  font-style: normal;
-  color: var(--el-text-color-secondary);
-}
-.feed code {
-  display: block;
-  padding: 8px 10px;
-  margin-top: 6px;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--el-text-color-regular);
-  word-break: break-all;
-  white-space: pre-wrap;
-  background: var(--el-fill-color-light);
-  border-radius: 6px;
-}
-.tasks {
-  display: flex;
-  flex-direction: column;
-}
-.task {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.task:last-child {
-  padding-bottom: 0;
-  border-bottom: 0;
-}
-.task-main {
-  display: flex;
-  flex-shrink: 0;
-  gap: 8px;
-  align-items: center;
-  width: 320px;
-}
-.task-meta {
-  flex: 1;
-  min-width: 0;
-  color: var(--el-text-color-secondary);
-}
-@media (max-width: 1100px) {
-  .facts {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .head,
-  .task {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .task-main {
-    width: auto;
-  }
+:deep(.is-danger) {
+  color: var(--el-color-danger);
 }
 </style>

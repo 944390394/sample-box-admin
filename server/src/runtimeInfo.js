@@ -45,6 +45,11 @@ export function readServingCertExpiry(options = {}) {
 /** 当前部署目录的提交号。不是 git 仓库时返回空字符串。 */
 export function readDeployedCommit(root) {
   try {
+    const releasePath = resolve(root, "release.json");
+    if (existsSync(releasePath)) {
+      const release = JSON.parse(readFileSync(releasePath, "utf8"));
+      if (typeof release.version === "string") return release.version;
+    }
     const gitPath = resolve(root, ".git");
     if (!existsSync(gitPath)) return "";
     const gitDir = resolveGitDir(gitPath);

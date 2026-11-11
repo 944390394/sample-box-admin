@@ -155,14 +155,25 @@ export async function seedOrg(db) {
   };
   if (typeof db.transaction === "function") {
     await db.transaction(insertAll);
+    await forceFirstChange(db);
     return;
   }
   await db.exec("BEGIN");
   try {
     await insertAll(db);
     await db.exec("COMMIT");
+    await forceFirstChange(db);
   } catch (error) {
     await db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+/** 初始账号用的是公开的默认密码，首次登录必须改掉。旧库没有这一列时跳过。 */
+async function forceFirstChange(db) {
+  try {
+    await db.run("UPDATE sys_user SET must_change_password = 1");
+  } catch {
+    /* 迁移 030 之前的库没有这一列 */
   }
 }

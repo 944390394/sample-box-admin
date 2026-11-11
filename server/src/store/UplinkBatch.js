@@ -1,3 +1,4 @@
+import { logSystem } from "../log/systemLog.js";
 import { compressRaw } from "./rawCodec.js";
 import { rawStorage } from "./schema.js";
 
@@ -28,7 +29,7 @@ export class UplinkBatch {
     this.#clearTimer();
     const rows = this.queue.splice(0, this.queue.length);
     if (!rows.length) return this.chain;
-    const run = this.chain.then(() => this.#insert(rows));
+    const run = this.chain.then(() => this.insert(rows));
     this.chain = run.then(
       () => undefined,
       () => undefined
@@ -36,8 +37,8 @@ export class UplinkBatch {
     return run;
   }
 
-  async #insert(rows) {
-    const mode = await this.#mode();
+  async insert(rows, db = this.executor) {
+    const mode = await this.#mode(db);
     const columns = [
       "box_id",
       "imei",
@@ -68,11 +69,17 @@ export class UplinkBatch {
       params.push(record.lbsLng, record.lbsLat, record.gpsLng, record.gpsLat);
     }
     try {
-      await this.executor.run(
+      await db.run(
         `INSERT INTO sample_uplink (${columns.join(", ")}) VALUES ${rows.map(() => marks).join(", ")}`,
         params
       );
     } catch (error) {
+      logSystem({
+        source: "database",
+        kind: "uplink_write",
+        message: `上报批量写入失败 ${rows.length} 条`,
+        error,
+      });
       console.error(
         `上报批量写入失败 ${rows.length} 条`,
         error instanceof Error ? error.message : "未知错误"
@@ -81,9 +88,9 @@ export class UplinkBatch {
     }
   }
 
-  async #mode() {
+  async #mode(db) {
     if (this.fixedMode) return this.fixedMode;
-    if (!this.mode) this.mode = await rawStorage(this.executor);
+    if (!this.mode) this.mode = await rawStorage(db);
     return this.mode;
   }
 

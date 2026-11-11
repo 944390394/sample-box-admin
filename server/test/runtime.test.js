@@ -97,6 +97,30 @@ test("连接池事务在同一条连接上提交", async () => {
   ]);
 });
 
+test("带页码的清单只返回当前页，状态计数仍是全部", async () => {
+  const boxes = new MemoryBoxStore();
+  await boxes.save(sampleBox());
+  const pending = sampleBox();
+  pending.id = "BOX-002";
+  pending.imei = "864317080992518";
+  pending.life = "待激活";
+  await boxes.save(pending);
+  const controller = new SampleController(boxes);
+  const listed = {
+    query: { page: "1", pageSize: "1", life: "待激活" },
+    data: null,
+    ok(data) {
+      this.data = data;
+    },
+  };
+  await controller.list(listed);
+  assert.equal(listed.data.total, 1);
+  assert.equal(listed.data.list.length, 1);
+  assert.equal(listed.data.list[0].id, "BOX-002");
+  assert.equal(listed.data.counts["在途"], 1);
+  assert.equal(listed.data.counts["待激活"], 1);
+});
+
 test("查询接口按箱号返回日志", async () => {
   const boxes = new MemoryBoxStore();
   const box = sampleBox();

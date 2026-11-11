@@ -20,14 +20,15 @@ export class UplinkRecord {
     this.gpsLat = fields.gpsLat;
   }
 
-  static capture(box, uplink, receivedAt) {
+  /** kind 由 BoxState.kindOf 在更新状态前算好；不传时按报文里的 why。 */
+  static capture(box, uplink, receivedAt, kind = uplink.why) {
     return new UplinkRecord({
       boxId: box.id,
       imei: uplink.imei,
       receivedAt: formatTimestamp(receivedAt),
       deviceTime: uplink.deviceTime,
-      kind: uplink.why,
-      summary: uplink.label,
+      kind,
+      summary: kind === "chgs" ? uplink.digestAs("充电状态") : uplink.digest || uplink.label,
       raw: uplink.raw,
       lbsLng: uplink.hasLbs() ? uplink.lbsLng : null,
       lbsLat: uplink.hasLbs() ? uplink.lbsLat : null,

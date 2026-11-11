@@ -217,3 +217,44 @@
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* 文档式页面：整页滚动，卡片保持自己的高度，不被定高的纵向 flex 压扁。 */
+.page-container {
+  overflow-y: auto;
+}
+
+.page-flow > * {
+  flex-shrink: 0;
+}
+
+/* 卡片标题行：左边标题，右边操作或说明。 */
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card-head__title {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.text-muted {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+/* 筛选行：搜索、下拉、快捷筛选一行排开，窄屏自动换行。 */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.filter-bar__spacer {
+  flex: 1;
+}

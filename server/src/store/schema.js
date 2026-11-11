@@ -1,5 +1,6 @@
 import { statements as orgStatements } from "../../migrations/001_org.js";
 import { mysqlStatements, sqliteStatements } from "../../migrations/002_sample.js";
+import { ROLE_PERM_DDL } from "../../migrations/012_box_access.js";
 
 /**
  * 空库按当前结构建表。已经有的表不重建、不删数据，只补缺的列和索引。
@@ -8,6 +9,9 @@ import { mysqlStatements, sqliteStatements } from "../../migrations/002_sample.j
 
 const BOX_COLUMNS = {
   sqlite: {
+    name: "TEXT NOT NULL DEFAULT ''",
+    policy_period_sec: "INTEGER",
+    policy_charge_only: "INTEGER",
     iccid: "TEXT NOT NULL DEFAULT ''",
     imsi: "TEXT NOT NULL DEFAULT ''",
     firmware: "TEXT NOT NULL DEFAULT ''",
@@ -23,9 +27,26 @@ const BOX_COLUMNS = {
     gps_lng: "REAL",
     gps_lat: "REAL",
     opens: "INTEGER NOT NULL DEFAULT 0",
+    device_opens: "INTEGER",
+    lid: "INTEGER",
+    charge: "INTEGER",
+    last_open: "TEXT NOT NULL DEFAULT ''",
+    last_power_off: "TEXT NOT NULL DEFAULT ''",
+    booted_at: "TEXT NOT NULL DEFAULT ''",
+    report_seq: "INTEGER NOT NULL DEFAULT 0",
+    lbs_address: "TEXT NOT NULL DEFAULT ''",
+    gps_address: "TEXT NOT NULL DEFAULT ''",
+    storage_free: "INTEGER",
+    battery_mv: "INTEGER",
+    battery_model: "TEXT NOT NULL DEFAULT ''",
     powered_at: "TEXT NOT NULL DEFAULT ''",
+    org_id: "TEXT NOT NULL DEFAULT ''",
+    owner_id: "TEXT NOT NULL DEFAULT ''",
   },
   mysql: {
+    name: "VARCHAR(64) NOT NULL DEFAULT ''",
+    policy_period_sec: "INT NULL",
+    policy_charge_only: "INT NULL",
     iccid: "VARCHAR(32) NOT NULL DEFAULT ''",
     imsi: "VARCHAR(32) NOT NULL DEFAULT ''",
     firmware: "VARCHAR(32) NOT NULL DEFAULT ''",
@@ -41,7 +62,21 @@ const BOX_COLUMNS = {
     gps_lng: "DOUBLE NULL",
     gps_lat: "DOUBLE NULL",
     opens: "INT NOT NULL DEFAULT 0",
+    device_opens: "INT NULL",
+    lid: "INT NULL",
+    charge: "INT NULL",
+    last_open: "VARCHAR(32) NOT NULL DEFAULT ''",
+    last_power_off: "VARCHAR(32) NOT NULL DEFAULT ''",
+    booted_at: "VARCHAR(32) NOT NULL DEFAULT ''",
+    report_seq: "INT NOT NULL DEFAULT 0",
+    lbs_address: "VARCHAR(255) NOT NULL DEFAULT ''",
+    gps_address: "VARCHAR(255) NOT NULL DEFAULT ''",
+    storage_free: "INT NULL",
+    battery_mv: "INT NULL",
+    battery_model: "TEXT NULL",
     powered_at: "VARCHAR(32) NOT NULL DEFAULT ''",
+    org_id: "VARCHAR(32) NOT NULL DEFAULT ''",
+    owner_id: "VARCHAR(32) NOT NULL DEFAULT ''",
   },
 };
 
@@ -95,6 +130,9 @@ const OPERATION_LOG_COLUMNS = {
 
 const INDEXES = [
   ["sample_box", "idx_box_org_last", ["org", "last_report_at"]],
+  ["sample_box", "idx_box_orgid_life_last", ["org_id", "life", "last_report_at"]],
+  ["sample_box", "idx_box_owner_last", ["owner_id", "last_report_at"]],
+  ["sample_box", "idx_box_last", ["last_report_at"]],
   ["sample_uplink", "idx_uplink_box", ["box_id", "received_at"]],
   ["sys_operation_log", "idx_op_org_time", ["org_id", "created_at", "id"]],
   ["sys_operation_log", "idx_op_actor_time", ["actor_id", "created_at", "id"]],
@@ -240,6 +278,7 @@ export async function ensureSchema(db) {
   const sample = db.dialect === "mysql" ? mysqlStatements : sqliteStatements;
   await applyStatements(db, orgStatements);
   await applyStatements(db, sample);
+  await applyStatements(db, [ROLE_PERM_DDL]);
   if (!(await tableExists(db, "sys_operation_log"))) {
     await db.exec(operationLogDdl(db.dialect));
   }

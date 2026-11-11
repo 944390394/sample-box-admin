@@ -2,13 +2,30 @@ export type BoxLife = "待激活" | "未使用" | "在途" | "停用";
 export type ActivateStep = "等待激活" | "待设备确认" | "已确认";
 
 export interface SampleBox {
+  /** 编号就是 IMEI。 */
   id: string;
+  /** 显示名称，激活时可改，默认「采样箱_00000001」。 */
+  name: string;
   imei: string;
   iccid: string;
   imsi: string;
   firmware: string;
+  /** 系统设置里的默认定时上报周期，秒。离线判断按它的 3 倍。 */
+  reportPeriodSec?: number;
+  reportOnlyWhenCharging?: boolean;
+  reportPolicyStatus?: string;
+  /** 已请求抹除、等设备确认的箱子；确认后档案才会删除。 */
+  wipe?: { mode: "quick" | "full"; requestedAt: string; issued: boolean } | null;
   org: string;
+  /** 所属部门编号。为空表示还没分配，归总公司。 */
+  orgId?: string;
   owner: string;
+  ownerId?: string;
+  /** 服务端按权限拿掉的几块：status 工况、location 位置、identity 设备标识。 */
+  /** 没有权限、服务端拿掉的字段组：power、lid、opens、signal、charging、powerLog、storage、location、iccid、imsi、firmware；全遮时另有 status、identity。 */
+  masked?: string[];
+  /** 设备固件支不支持远程抹除、读本机日志。不受「查看固件版本」影响。 */
+  remote?: boolean;
   life: BoxLife;
   /** 与 life 同步，供仍读取 status 的页面使用 */
   status: BoxLife;
@@ -26,6 +43,49 @@ export interface SampleBox {
   gpsLng: number | null;
   gpsLat: number | null;
   opens: number;
+  /** 1 开着，0 关着。设备还没报过时为空。 */
+  lid?: number | null;
+  /** 上一次开箱的设备时间。还没有开箱记录时为空。 */
+  lastOpen?: string;
+  /** 掉电前最后一次还在走的设备时间。还没有记录时为空。 */
+  lastPowerOff?: string;
+  /** 最近一次上电的设备时间。连续运行从这里重新计算。 */
+  bootedAt?: string;
+  /** 最近一次结束充电的服务器时间。再次充电后为空。 */
+  unchargedAt?: string;
+  /** 基站逆地理地址。 */
+  lbsAddress?: string;
+  /** 基站位置最近一次更新的时间。GPS 的定位时间在 gpsInfo.at。 */
+  lbsAt?: string;
+  /** GPS 逆地理地址。 */
+  gpsAddress?: string;
+  /** 最近一次定位时数据模板多带的信息，旧模板没有。 */
+  gpsInfo?: {
+    speed?: number | null;
+    course?: number | null;
+    alt?: number | null;
+    sats?: number | null;
+    hdop?: number | null;
+    time?: string;
+    at?: string;
+  } | null;
+  /** GD25Q32 剩余字节。还没上报时为空。 */
+  storageFree?: number | null;
+  /** 扣掉预留后的可用电量，0–100。 */
+  batteryUsable?: number | null;
+  /** 按电压曲线得到的总电量，0–100。 */
+  batterySoc?: number | null;
+  /** 预留电量百分比。底部这一段不计入可用。 */
+  batteryReserve?: number;
+  /** 已经记下来的完整充放电次数。 */
+  batteryCycles?: number;
+  batteryLearned?: boolean;
+  /** 学习曲线存在设备的离线闪存里，不在服务器上重算。 */
+  batteryDevice?: boolean;
+  /** rest 静置，learned 已按充放电对齐，charge 充电曲线，full 充满指示。 */
+  batteryBasis?: string;
+  /** TP4057：1 充电中，2 已充满，0 未充电。还没报过时为空。 */
+  charge?: number | null;
   activateStep: ActivateStep;
   poweredAt: string;
 }
@@ -33,6 +93,7 @@ export interface SampleBox {
 export const boxes: SampleBox[] = [
   {
     id: "BOX-001",
+    name: "BOX-001",
     imei: "864317080992517",
     iccid: "898608911026D0279998",
     imsi: "460130610629998",
@@ -57,6 +118,7 @@ export const boxes: SampleBox[] = [
   },
   {
     id: "BOX-002",
+    name: "BOX-002",
     imei: "864317080992208",
     iccid: "898608911026D0279208",
     imsi: "460130610629208",
@@ -81,6 +143,7 @@ export const boxes: SampleBox[] = [
   },
   {
     id: "BOX-003",
+    name: "BOX-003",
     imei: "864317080991774",
     iccid: "898608911026D0271774",
     imsi: "460130610621774",
@@ -105,6 +168,7 @@ export const boxes: SampleBox[] = [
   },
   {
     id: "BOX-004",
+    name: "BOX-004",
     imei: "864317080990331",
     iccid: "898608911026D0270331",
     imsi: "460130610620331",
@@ -129,6 +193,7 @@ export const boxes: SampleBox[] = [
   },
   {
     id: "BOX-005",
+    name: "BOX-005",
     imei: "864317081000105",
     iccid: "898608911026D0280105",
     imsi: "460130610630105",
@@ -153,6 +218,7 @@ export const boxes: SampleBox[] = [
   },
   {
     id: "BOX-006",
+    name: "BOX-006",
     imei: "864317081000206",
     iccid: "898608911026D0280206",
     imsi: "460130610630206",
@@ -262,10 +328,40 @@ export function shortStamp(value: string) {
   return value || "—";
 }
 
-export const tasks = [
+export type TaskType = "采样" | "调拨";
+
+export type TransferStatus = "待寄出" | "运送中" | "待签收" | "已签收" | "已取消" | "已拒收";
+
+export interface SampleTask {
+  no: string;
+  name: string;
+  /** 缺省按采样单处理，避免旧数据逐条补类型。 */
+  type?: TaskType;
+  org: string;
+  box: string;
+  place: string;
+  people: string;
+  interval: string;
+  status: string;
+  fromOrg?: string;
+  toOrg?: string;
+  sender?: string;
+  signer?: string;
+  note?: string;
+}
+
+export interface TransferLog {
+  time: string;
+  action: string;
+  by: string;
+  note: string;
+}
+
+export const tasks: SampleTask[] = [
   {
     no: "RW-202609-014",
     name: "华南水质复测",
+    type: "采样",
     org: "华南分公司",
     box: "BOX-001",
     place: "深圳南山水厂",
@@ -303,7 +399,83 @@ export const tasks = [
     interval: "5 分钟",
     status: "待采样",
   },
+  {
+    no: "DB-202610-021",
+    name: "南山水厂箱调往华东",
+    type: "调拨",
+    org: "华南分公司",
+    box: "BOX-004",
+    place: "",
+    people: "吴迪",
+    interval: "",
+    status: "运送中",
+    fromOrg: "华南分公司",
+    toOrg: "华东分公司",
+    sender: "陈可",
+    signer: "吴迪",
+    note: "空箱，供华东下周管网抽检",
+  },
+  {
+    no: "DB-202610-018",
+    name: "华东备用箱调往西南",
+    type: "调拨",
+    org: "华东分公司",
+    box: "BOX-006",
+    place: "",
+    people: "周宁",
+    interval: "",
+    status: "已签收",
+    fromOrg: "华东分公司",
+    toOrg: "西南分公司",
+    sender: "吴迪",
+    signer: "周宁",
+    note: "",
+  },
 ];
+
+/** 调拨单的操作记录。刷新页面后回到这里的初始内容。 */
+export const transferLogs: Record<string, TransferLog[]> = {
+  "DB-202610-021": [
+    {
+      time: "2026-10-21 09:12:00",
+      action: "创建调拨",
+      by: "陈可",
+      note: "空箱，供华东下周管网抽检",
+    },
+    {
+      time: "2026-10-21 09:40:00",
+      action: "确认寄出",
+      by: "陈可",
+      note: "已交承运，运往华东分公司",
+    },
+  ],
+  "DB-202610-018": [
+    {
+      time: "2026-10-18 10:05:00",
+      action: "创建调拨",
+      by: "吴迪",
+      note: "",
+    },
+    {
+      time: "2026-10-18 11:20:00",
+      action: "确认寄出",
+      by: "吴迪",
+      note: "",
+    },
+    {
+      time: "2026-10-19 15:06:00",
+      action: "确认到达",
+      by: "西南分公司",
+      note: "",
+    },
+    {
+      time: "2026-10-19 15:18:00",
+      action: "签收",
+      by: "周宁",
+      note: "箱体完好",
+    },
+  ],
+};
 
 /** 已经结束、不再出现在任务单列表里的历史绑定。 */
 export const boxTaskHistory = [
@@ -464,14 +636,46 @@ export const boxLogs: BoxLog[] = boxLogSeed.map((item) => {
   return item;
 });
 
+/** 采样箱相关的权限码，和服务端 permCatalog 一致：一项只管一件事。 */
 export const BOX_PERM = {
+  list: "device:box:list",
   detail: "device:box:detail",
-  event: "device:box:event",
+  power: "device:box:power",
+  lid: "device:box:lid",
+  opens: "device:box:opens",
+  signal: "device:box:signal",
+  charging: "device:box:charging",
+  powerLog: "device:box:power-log",
+  storage: "device:box:storage",
+  location: "device:box:location",
+  track: "device:box:track",
+  battery: "device:box:battery",
+  iccid: "device:box:iccid",
+  imsi: "device:box:imsi",
+  firmware: "device:box:firmware",
+  eventLid: "device:box:event-lid",
+  eventBoot: "device:box:event-boot",
+  eventCharge: "device:box:event-charge",
   log: "device:box:log",
+  raw: "device:box:raw",
   task: "device:box:task",
   activate: "device:box:activate",
+  rename: "device:box:rename",
+  assignOrg: "device:box:assign-org",
+  assignOwner: "device:box:assign-owner",
   disable: "device:box:disable",
+  enable: "device:box:enable",
+  delete: "device:box:delete",
+  wipe: "device:box:wipe",
+  export: "device:box:export",
+  logExport: "device:box:logExport",
+  dump: "device:box:dump",
+  overview: "monitor:overview",
 } as const;
+/** 开关箱、上电、充电记录：任意一项就能进「事件」。 */
+export const EVENT_PERMS = [BOX_PERM.eventLid, BOX_PERM.eventBoot, BOX_PERM.eventCharge];
+/** 新建任务：调拨、采样分开授权。 */
+export const TASK_CREATE = ["task:create:transfer", "task:create:sample"];
 
 export const reports = [
   {

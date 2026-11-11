@@ -12,17 +12,49 @@
   --menu-border: var(--card-border);
   --sidebar-logo-background: #fafafa;
   --sidebar-logo-text-color: #383853;
-  --page-bg: #f6f8fc;
+  /* 全站风格见 docs/ui-redesign.md：浅灰底白卡片，一个主色，其余颜色只表示状态 */
+  --page-bg: #f5f7fa;
   --content-bg: #ffffff;
-  --border-color: #e3eaf3;
-  --card-border: #dfe7f1;
-  --card-border-hover: #d5dfec;
-  --card-radius: 8px;
-  --card-shadow: 0 1px 2px rgb(15 23 42 / 3%);
-  --card-shadow-hover: 0 10px 24px rgb(15 23 42 / 6%), 0 2px 6px rgb(15 23 42 / 4%);
+  --border-color: #e5e6eb;
+  --card-border: #e5e6eb;
+  --card-border-hover: #c9cdd4;
+  --card-divider: #f0f1f3;
+  --card-radius: 10px;
+  --card-shadow: none;
+  --card-shadow-hover: 0 6px 16px rgb(29 33 41 / 8%);
   --custom-radius: 8px;
-  --page-padding: 10px;
-  --page-gap: 10px;
+  --page-padding: 16px;
+  --page-gap: 12px;
+
+  /* 状态色：只用在状态上 */
+  --status-ok: #00b42a;
+  --status-warn: #ff7d00;
+  --status-danger: #f53f3f;
+  --status-stale: #86909c;
+  --status-ok-bg: #e8ffea;
+  --status-warn-bg: #fff7e8;
+  --status-danger-bg: #ffece8;
+  --status-stale-bg: #f2f3f5;
+
+  /* 定位来源：GPS 蓝，基站橙（误差大） */
+  --loc-gps: #165dff;
+  --loc-gps-bg: #e8f3ff;
+  --loc-lbs: #d25f00;
+  --loc-lbs-bg: #fff3e8;
+}
+
+// 文字三级、线和填充。比 Element 自带的 :root 优先，深色模式不受影响
+html:not(.dark) {
+  --el-text-color-primary: #1d2129;
+  --el-text-color-regular: #4e5969;
+  --el-text-color-secondary: #86909c;
+  --el-text-color-placeholder: #a9aeb8;
+  --el-border-color: #dcdfe5;
+  --el-border-color-light: #e5e6eb;
+  --el-border-color-lighter: #e5e6eb;
+  --el-border-color-extra-light: #f0f1f3;
+  --el-fill-color-light: #f2f3f5;
+  --el-fill-color-lighter: #f7f8fa;
 }
 
 // 深蓝色侧边栏
@@ -52,8 +84,17 @@ html.dark {
   --border-color: rgb(255 255 255 / 10%);
   --card-border: rgb(255 255 255 / 10%);
   --card-border-hover: rgb(255 255 255 / 14%);
+  --card-divider: rgb(255 255 255 / 6%);
   --card-shadow: none;
   --card-shadow-hover: none;
+  --status-ok-bg: rgb(0 180 42 / 14%);
+  --status-warn-bg: rgb(255 125 0 / 14%);
+  --status-danger-bg: rgb(245 63 63 / 14%);
+  --status-stale-bg: rgb(255 255 255 / 6%);
+  --loc-gps: #5b8cff;
+  --loc-gps-bg: rgb(22 93 255 / 18%);
+  --loc-lbs: #ff9a3c;
+  --loc-lbs-bg: rgb(255 125 0 / 16%);
 }
 
 // 无障碍模式

@@ -14,4 +14,7 @@ export class MemoryStateCache extends StateCache {
   async get(id) {
     return this.rows.get(id) || null;
   }
+  async remove(id) {
+    this.rows.delete(id);
+  }
 }

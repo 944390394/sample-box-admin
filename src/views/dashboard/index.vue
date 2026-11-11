@@ -4,8 +4,7 @@
       <div class="card dash-header__card">
         <div class="dash-header__start">
           <div class="dash-avatar">
-            <img v-if="userStore.userInfo.avatar" :src="userStore.userInfo.avatar" alt="" />
-            <el-icon v-else :size="22"><User /></el-icon>
+            {{ userAvatarText(userStore.userInfo) }}
           </div>
           <div class="dash-header__text">
             <h1 class="dash-header__greeting">{{ greetings }}</h1>
@@ -256,6 +255,7 @@ import type { VisitOverviewDetail, VisitTrendDetail } from "@/api/system/log";
 import { useUserStore } from "@/stores/user";
 import { useSettingsStore } from "@/stores/settings";
 import { formatGrowthRate } from "@/utils";
+import { userAvatarText } from "@/utils/user-avatar";
 import { useTransition } from "@vueuse/core";
 import {
   User,
@@ -717,16 +717,12 @@ $pad: 10px;
   width: 40px;
   height: 40px;
   overflow: hidden;
+  font-size: 20px;
+  font-weight: 600;
   color: var(--el-color-primary);
   background: color-mix(in srgb, var(--el-color-primary) 14%, var(--el-bg-color-overlay));
   border: 1px solid color-mix(in srgb, var(--el-color-primary) 18%, transparent);
   border-radius: 50%;
-
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
 }
 
 // Quick links

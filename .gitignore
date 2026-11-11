@@ -43,3 +43,11 @@ server/node_modules/
 server/install.lock
 server/db.config.json
 server/data/
+
+.alignment/
+
+# 验收机器人的报告和截图
+reports/
+
+# 固件编译产物
+firmware/*/build/

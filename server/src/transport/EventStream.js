@@ -1,3 +1,4 @@
+import { logSystem } from "../log/systemLog.js";
 /**
  * 进程内事件流。
  * 监听器按订阅顺序执行，一个失败不会挡住后面的，也不会把已提交的写入再回滚。
@@ -19,6 +20,7 @@ export class EventStream {
       try {
         await listener(event);
       } catch (error) {
+        logSystem({ source: "service", kind: "event", error });
         console.error("事件处理失败", error instanceof Error ? error.message : error);
       }
     }

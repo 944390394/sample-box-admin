@@ -5,6 +5,7 @@ import SetupAPI from "@/api/setup";
 import { usePermissionStore, useUserStore } from "@/stores";
 import { useTenantStoreHook } from "@/stores/tenant";
 import { isTenantEnabled } from "@/utils/tenant";
+import { loadLabels } from "@/utils/labels";
 
 const mockOn = import.meta.env.VITE_MOCK_DEV_SERVER === "true";
 let setupInstalled: boolean | null = null;
@@ -31,10 +32,11 @@ export function setupPermissionGuard() {
           try {
             setupInstalled = (await SetupAPI.status()).installed;
           } catch {
-            setupInstalled = false;
+            // 请求失败不能判定为未安装，下次导航重新检查。
+            setupInstalled = null;
           }
         }
-        if (!setupInstalled && to.path !== "/setup") {
+        if (setupInstalled === false && to.path !== "/setup") {
           NProgress.done();
           return "/setup";
         }
@@ -63,11 +65,20 @@ export function setupPermissionGuard() {
       const permissionStore = usePermissionStore();
       const userStore = useUserStore();
 
+      // 须先改密的账号只能停在改密页
+      if (to.path === "/force-password") return;
+      if (!userStore.userInfo?.roles?.length) await userStore.getUserInfo();
+      if (userStore.userInfo?.passwordChange) {
+        NProgress.done();
+        return "/force-password";
+      }
+
       // 动态路由生成
       if (!permissionStore.isRouteGenerated) {
         if (!userStore.userInfo?.roles?.length) {
           await userStore.getUserInfo();
         }
+        void loadLabels();
 
         // 加载用户租户列表（VITE_APP_TENANT_ENABLED=true 时生效）
         await initTenantContext();

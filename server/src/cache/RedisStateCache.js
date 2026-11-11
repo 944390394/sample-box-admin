@@ -25,6 +25,9 @@ export class RedisStateCache extends StateCache {
   async close() {
     if (typeof this.client.quit === "function") await this.client.quit();
   }
+  async remove(id) {
+    await this.client.del(RedisStateCache.key(id));
+  }
 
   static key(id) {
     return `sample:box:${id}`;
