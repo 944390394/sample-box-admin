@@ -94,6 +94,77 @@ export class SampleController {
     ctx.ok({ total: rows.length, counts, flags: visibleFlags(flags, ctx.access?.perms) });
   }
 
+  /**
+   * 按编号或名称精确找出要选的箱子。建单时一次导入很多箱号用。
+   * 不在范围内的和库里没有的都算找不到，不告诉调用方箱子是否存在。
+   * 停用、已在任务中的单独列出来，不放进可选项。
+   */
+  async lookup(ctx) {
+    if (!allowed(ctx, BOX.list)) return;
+    const raw = ctx.body?.ids;
+    if (!Array.isArray(raw)) return ctx.fail("请提供箱子编号");
+    const keys = [];
+    const seen = new Set();
+    let truncated = false;
+    for (const item of raw) {
+      const key = String(item ?? "")
+        .trim()
+        .slice(0, 64);
+      if (!key || seen.has(key)) continue;
+      if (keys.length >= 100) {
+        truncated = true;
+        break;
+      }
+      seen.add(key);
+      keys.push(key);
+    }
+    const found =
+      keys.length && typeof this.boxes.findByIdsOrNames === "function"
+        ? await this.boxes.findByIdsOrNames(keys)
+        : (
+            await Promise.all(keys.map((id) => this.boxes.findById?.(id).catch?.(() => null)))
+          ).filter(Boolean);
+    const visible = found.filter((box) => canSee(ctx.access, box));
+    const byId = new Map(visible.map((box) => [box.id, box]));
+    const byName = new Map();
+    for (const box of visible) {
+      if (!box.name) continue;
+      byName.set(box.name, byName.has(box.name) ? null : box);
+    }
+    const list = [];
+    const missing = [];
+    const skipped = [];
+    const used = new Set();
+    for (const key of keys) {
+      let box = byId.get(key) || null;
+      if (!box) {
+        const named = byName.get(key);
+        if (named === null) {
+          skipped.push({ key, reason: "名称对应多台箱子，请改用编号" });
+          continue;
+        }
+        box = named || null;
+      }
+      if (!box) {
+        missing.push(key);
+        continue;
+      }
+      if (used.has(box.id)) continue;
+      used.add(box.id);
+      if (box.life === "停用" || box.life === "在途") {
+        skipped.push({
+          key,
+          id: box.id,
+          name: box.name || box.id,
+          reason: box.life === "停用" ? "已停用" : "已在其他任务中",
+        });
+        continue;
+      }
+      list.push(view(ctx, box));
+    }
+    ctx.ok({ list, missing, skipped, truncated });
+  }
+
   async detail(ctx) {
     const box = await this.#visible(ctx, BOX.detail);
     if (!box) return;

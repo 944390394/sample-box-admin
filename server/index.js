@@ -798,6 +798,12 @@ const routes = [
     handler: (ctx) => useSample(ctx, (api) => api.list(ctx)),
   },
   {
+    method: "POST",
+    path: "/api/v1/sample/boxes/lookup",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.lookup(ctx)),
+  },
+  {
     method: "GET",
     path: "/api/v1/sample/reports",
     auth: true,

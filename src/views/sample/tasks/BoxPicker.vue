@@ -5,7 +5,7 @@
       <el-tag v-for="box in chosen" :key="box.id" closable size="small" @close="remove(box.id)">
         {{ box.name || box.id }}
       </el-tag>
-      <span v-if="!chosen.length" class="muted">在下面的表格里勾选，最多 100 台</span>
+      <span v-if="!chosen.length" class="muted">勾选，或导入箱号。一张单最多 100 台</span>
       <el-button v-if="chosen.length" link type="danger" size="small" @click="clearAll">
         清空
       </el-button>
@@ -15,12 +15,13 @@
       <el-input
         v-model="query.q"
         :prefix-icon="Search"
-        placeholder="名称或 IMEI，回车搜索"
+        placeholder="名称或编号，回车搜索"
         clearable
         style="width: 260px"
         @keyup.enter="reload"
         @clear="reload"
       />
+      <el-button @click="importOpen = true">导入箱号</el-button>
       <el-radio-group v-model="query.life" @change="reload">
         <el-radio-button value="未使用">可用</el-radio-button>
         <el-radio-button value="在途">任务中</el-radio-button>
@@ -90,9 +91,43 @@
       small
       :page-size="query.pageSize"
       :total="total"
-      layout="prev, pager, next"
+      layout="prev, pager, next, total"
       @current-change="load"
     />
+
+    <el-dialog v-model="importOpen" title="导入箱号" width="520px" style="max-width: 94vw">
+      <p class="muted">
+        每行一个编号，也可以用空格或逗号分隔。csv
+        只读第一列。编号对不上时会再按名称精确匹配。一张单最多 100 台。
+      </p>
+      <el-input
+        v-model="importText"
+        type="textarea"
+        :rows="8"
+        placeholder="例如：&#10;860000000000001&#10;860000000000002"
+      />
+      <div class="file-row">
+        <el-button link type="primary" @click="fileRef?.click()">从 txt / csv 读取</el-button>
+        <input ref="fileRef" type="file" accept=".txt,.csv,text/plain" hidden @change="onFile" />
+      </div>
+      <div v-if="importReport" class="report">
+        <p>这次加入 {{ importReport.added }} 台，已选共 {{ chosen.length }} 台。</p>
+        <p v-if="importReport.missing.length">找不到：{{ importReport.missing.join("、") }}</p>
+        <p v-if="importReport.skipped.length">
+          未加入：{{
+            importReport.skipped
+              .map((item) => `${item.name || item.key}（${item.reason}）`)
+              .join("、")
+          }}
+        </p>
+        <p v-if="importReport.truncated">超过 100 个编号，只处理了前 100 个。</p>
+        <p v-if="importReport.capped">已经到 100 台上限，多出来的没有加入。</p>
+      </div>
+      <template #footer>
+        <el-button @click="importOpen = false">关闭</el-button>
+        <el-button type="primary" :loading="importing" @click="runImport">加入已选</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -114,10 +149,21 @@ const emit = defineEmits<{
 
 const MAX = 100;
 const tableRef = ref<TableInstance>();
+const fileRef = ref<HTMLInputElement>();
 const rows = ref<SampleBox[]>([]);
 const total = ref(0);
 const loading = ref(false);
-const query = reactive({ q: "", life: "未使用", page: 1, pageSize: 10 });
+const query = reactive({ q: "", life: "未使用", page: 1, pageSize: 20 });
+const importOpen = ref(false);
+const importText = ref("");
+const importing = ref(false);
+const importReport = ref<{
+  added: number;
+  missing: string[];
+  skipped: { key: string; name?: string; reason: string }[];
+  truncated: boolean;
+  capped: boolean;
+} | null>(null);
 /** 选中的箱子按勾选顺序存着；翻页后表格的勾选状态从这里恢复。 */
 const chosen = ref<SampleBox[]>([...props.boxes]);
 let seq = 0;
@@ -216,6 +262,73 @@ function reload() {
   void load();
 }
 
+/** 一行一个，或空格/逗号分隔。csv 只取第一列，表头「编号」丢掉。 */
+function parseBoxIds(text: string) {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const comma = /[,，;\t]/.test(line);
+    const parts = comma ? [line.split(/[,，;\t]/)[0] || ""] : line.split(/\s+/);
+    for (const raw of parts) {
+      const id = raw.trim().replace(/^["']|["']$/g, "");
+      if (!id || seen.has(id) || /^(id|imei|箱号|编号|名称)$/i.test(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+async function onFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (file.size > 256 * 1024) {
+    ElMessage.warning("文件太大，请只放箱号");
+    return;
+  }
+  importText.value = await file.text();
+}
+
+async function runImport() {
+  const all = parseBoxIds(importText.value);
+  if (!all.length) {
+    ElMessage.warning("没有读到箱号");
+    return;
+  }
+  const ids = all.slice(0, MAX);
+  importing.value = true;
+  try {
+    const result = await BoxAPI.lookup(ids);
+    let added = 0;
+    let capped = false;
+    for (const box of result.list) {
+      if (chosen.value.some((item) => item.id === box.id)) continue;
+      if (chosen.value.length >= MAX) {
+        capped = true;
+        break;
+      }
+      chosen.value.push(box);
+      added += 1;
+    }
+    importReport.value = {
+      added,
+      missing: result.missing,
+      skipped: result.skipped,
+      truncated: all.length > MAX || result.truncated,
+      capped,
+    };
+    if (added) {
+      sync();
+      await nextTick();
+      restore();
+    }
+  } finally {
+    importing.value = false;
+  }
+}
+
 onMounted(load);
 </script>
 
@@ -232,7 +345,9 @@ onMounted(load);
   gap: 6px;
   align-items: center;
   min-height: 40px;
+  max-height: 132px;
   padding: 8px 12px;
+  overflow: auto;
   background: var(--el-fill-color-lighter);
   border-radius: 6px;
 }
@@ -245,6 +360,17 @@ onMounted(load);
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+.file-row {
+  margin-top: 8px;
+}
+.report {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.report p {
+  margin: 0 0 4px;
 }
 .muted {
   font-size: 12px;

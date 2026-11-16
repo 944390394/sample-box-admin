@@ -27,6 +27,14 @@ export class MemoryBoxStore extends BoxStore {
     return [...this.byId.values()].find((box) => box.name === name) || null;
   }
 
+  async findByIdsOrNames(keys) {
+    const set = new Set((keys || []).map((key) => String(key || "").trim()).filter(Boolean));
+    if (!set.size) return [];
+    return [...this.byId.values()].filter(
+      (box) => set.has(box.id) || (box.name && set.has(box.name))
+    );
+  }
+
   async list() {
     return [...this.byId.values()].sort((a, b) => (a.last < b.last ? 1 : -1));
   }

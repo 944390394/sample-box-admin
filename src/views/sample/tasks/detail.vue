@@ -69,8 +69,25 @@
           </div>
         </div>
 
+        <!-- 直接调拨：只交接归属，没有地址和发货 -->
+        <div v-if="task.kind === '调拨' && task.direct" class="route">
+          <div class="party">
+            <span class="role from">调出</span>
+            <b>{{ task.fromOrg || "—" }}</b>
+            <span class="who">签收前箱子仍在该单位</span>
+          </div>
+          <div class="arrow">
+            <el-icon><Right /></el-icon>
+            <small>直接调拨</small>
+          </div>
+          <div class="party">
+            <span class="role to">调入</span>
+            <b>{{ task.toOrg || "—" }}</b>
+            <span class="who">签收后归该单位</span>
+          </div>
+        </div>
         <!-- 调拨、带寄送的采样单：寄出方 → 接收方（采样单位）；双向的箭头两头都有，表示采样后寄回 -->
-        <div v-if="task.kind === '调拨' || task.trip" class="route">
+        <div v-else-if="task.kind === '调拨' || task.trip" class="route">
           <div class="party">
             <span class="role from">寄出方</span>
             <b>{{ task.fromOrg || "—" }}</b>
