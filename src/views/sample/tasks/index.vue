@@ -2,7 +2,7 @@
   <div class="page-container page-flow">
     <PageHeader
       title="任务单"
-      subtitle="调拨：采样箱从一个单位送到另一个单位；采样：采样机构带箱子去计划地点采样再寄回。"
+      subtitle="调拨：把箱子调到另一个单位，签收后归属变更，不定位、不发货；采样：按寄送方式去计划地点采样。"
     >
       <template #actions>
         <el-button

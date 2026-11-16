@@ -80,6 +80,8 @@ export interface PolicyTask {
   arrival?: { role: string; near: number; total: number };
   /** 采样任务：采样机构开箱时请求视频平台录像。 */
   recordVideo?: boolean;
+  /** 调拨不定位、不发货：建单后直接待签收。旧的发货调拨没有这个标记。 */
+  direct?: boolean;
   /** 列表用：我现在能把它推进到哪些状态。 */
   actions?: string[];
 }

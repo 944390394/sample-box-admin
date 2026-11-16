@@ -3,25 +3,31 @@
     <PageHeader
       title="创建任务单"
       back="/task/tasks"
-      subtitle="分步填写，最后核对一遍再创建。离开页面前会提醒保存。"
+      subtitle="分步填写。调拨不用定位、不用发货，箱子多时可以导入编号。"
     />
     <el-empty v-if="!canManage" description="当前角色没有「新建调拨任务」或「新建采样任务」权限" />
-    <div v-else class="create-layout" :class="{ solo: !showSummary }">
+    <div v-else class="create-layout" :class="{ wide: !showSummary }">
       <el-card shadow="never" class="task-form">
-        <el-steps :active="step" finish-status="success" align-center class="steps">
-          <el-step
+        <nav class="stepper">
+          <button
             v-for="(item, index) in steps"
             :key="item.key"
-            :title="item.title"
-            :class="{ jump: index < step }"
+            type="button"
+            class="step"
+            :class="{ on: index === step, done: index < step }"
+            :disabled="index > step"
             @click="index < step && (step = index)"
-          />
-        </el-steps>
+          >
+            <span class="n">{{ index + 1 }}</span>
+            {{ item.title }}
+          </button>
+        </nav>
+        <p class="step-lead">{{ stepLead }}</p>
 
         <el-form
-          label-width="110px"
+          label-width="96px"
           class="body"
-          :class="{ wide: current === 'boxes' || current === 'review' }"
+          :label-position="current === 'boxes' || current === 'review' ? 'top' : 'right'"
         >
           <template v-if="current === 'basic'">
             <el-form-item label="任务类型">
@@ -32,7 +38,7 @@
               <p class="tip">
                 {{
                   form.kind === "调拨"
-                    ? "把采样箱从一个单位寄到另一个单位，由接收单位签收，签收后箱子归接收单位。"
+                    ? "把采样箱调到另一个单位。不填地址，也不安排发货。调入单位签收后，箱子归该单位。"
                     : "安排采样箱到采样单位采样。箱子的归属不变。"
                 }}
               </p>
@@ -117,50 +123,39 @@
           </template>
 
           <template v-else-if="current === 'to'">
-            <el-form-item label="接收单位" required :error="errors.toOrgId">
+            <el-form-item label="调入单位" required :error="errors.toOrgId">
               <el-select
                 v-model="form.toOrgId"
                 filterable
-                placeholder="选择接收单位"
+                placeholder="箱子签收后归这个单位"
                 style="width: 100%"
               >
-                <el-option
-                  v-for="o in orgs"
-                  :key="o.id"
-                  :value="o.id"
-                  :label="o.path"
-                  :disabled="o.id === form.fromOrgId"
-                />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="签收人" required :error="errors.signer">
-              <el-select
-                v-model="signerPick"
-                filterable
-                allow-create
-                default-first-option
-                placeholder="选择人员，或直接输入姓名"
-                style="width: 100%"
-                :disabled="!form.toOrgId"
-              >
-                <el-option v-for="u in toUsers" :key="u.id" :value="`u:${u.id}`" :label="u.name">
-                  <span>{{ u.name }}</span>
-                  <span class="dept">{{ u.dept }}</span>
-                </el-option>
+                <el-option v-for="o in orgs" :key="o.id" :value="o.id" :label="o.path" />
               </el-select>
               <p class="tip">
-                默认是接收单位的负责人。只有接收单位的人员能签收；签收后箱子改归接收单位，选了系统用户作签收人时由他保管。
+                不需要定位，也不用指定发货人和签收人。调入单位里有签收权限的人都可以签收。
               </p>
             </el-form-item>
-            <el-form-item label="收货地址">
-              <PlaceField
-                v-if="form.toOrgId"
-                v-model="form.toPlace"
-                :org="orgById(form.toOrgId)"
-                :default-radius="arriveRadius"
-              />
-              <span v-else class="tip">先选接收单位</span>
-            </el-form-item>
+            <el-table
+              v-if="transferGroups.length"
+              :data="transferGroups"
+              size="small"
+              class="group-table"
+              empty-text="还没有选择采样箱"
+            >
+              <el-table-column label="现在的单位" min-width="160" prop="orgName" />
+              <el-table-column label="台数" width="72">
+                <template #default="{ row }">{{ row.boxes.length }}</template>
+              </el-table-column>
+              <el-table-column label="这一单" min-width="200">
+                <template #default="{ row }">
+                  <span v-if="!row.orgId" class="warn">未分配单位，不能调拨</span>
+                  <span v-else-if="!row.inScope" class="warn">不在你的管理范围</span>
+                  <span v-else-if="row.sameAsDest">已在调入单位，跳过</span>
+                  <span v-else>调给 {{ orgById(form.toOrgId)?.name || "所选单位" }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
           </template>
 
           <template v-else-if="current === 'sample'">
@@ -231,11 +226,16 @@
               <BoxPicker v-model="form.boxIds" v-model:boxes="chosenBoxes" />
             </el-form-item>
             <el-alert
-              v-if="boxOrgs.length > 1"
+              v-if="form.kind === '调拨' && transferGroups.length > 1"
               type="info"
               :closable="false"
-              class="indent"
-              :title="`选中的箱子分属 ${boxOrgs.join('、')}，调拨单只能写一个寄出单位，请确认`"
+              :title="`箱子分属 ${transferGroups.map((g) => g.orgName).join('、')}，确认后按单位各建一张调拨单`"
+            />
+            <el-alert
+              v-if="form.kind === '调拨' && transferBlocked.length"
+              type="warning"
+              :closable="false"
+              :title="transferBlockedTitle"
             />
             <el-form-item label="开箱次数上限">
               <div class="limit">
@@ -260,7 +260,7 @@
               <p class="tip">
                 从任务开始到结束，按箱子上报的开箱次数计算；超过上限的箱子标红、样品作废：签收时只能拒收或强制签收，强制签收后也不能开始检测。{{
                   form.kind === "调拨"
-                    ? "调拨途中一般不该开箱，可设为 0。"
+                    ? "调拨不发货，途中一般不该开箱，可设为 0。"
                     : "采样默认每台最多 2 次（开一次装样、一次封箱）。"
                 }}
               </p>
@@ -292,40 +292,30 @@
               <template v-if="form.kind === '调拨'">
                 <section>
                   <header>
-                    <b>寄出方</b>
-                    <el-button link type="primary" @click="goto('from')">修改</el-button>
-                  </header>
-                  <dl>
-                    <dt>单位</dt>
-                    <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
-                    <dt>寄出人</dt>
-                    <dd>
-                      {{ form.sender }}
-                      <el-tag v-if="!form.senderId" size="small" type="info" class="tag">
-                        外部人员
-                      </el-tag>
-                    </dd>
-                    <dt>地址</dt>
-                    <dd>{{ placeText(form.fromPlace) }}</dd>
-                  </dl>
-                </section>
-                <section>
-                  <header>
-                    <b>接收方</b>
+                    <b>调拨</b>
                     <el-button link type="primary" @click="goto('to')">修改</el-button>
                   </header>
                   <dl>
-                    <dt>单位</dt>
-                    <dd>{{ orgById(form.toOrgId)?.path }}</dd>
-                    <dt>签收人</dt>
+                    <dt>调入</dt>
+                    <dd>{{ orgById(form.toOrgId)?.path || "—" }}</dd>
+                    <dt>方式</dt>
+                    <dd>不定位、不发货，调入单位签收后箱子归该单位</dd>
+                    <dt>建单</dt>
                     <dd>
-                      {{ form.signer }}
-                      <el-tag v-if="!form.signerId" size="small" type="info" class="tag">
-                        外部人员
-                      </el-tag>
+                      <template v-if="transferReady.length">
+                        {{ transferReady.length }} 张：{{
+                          transferReady.map((g) => `${g.orgName} ${g.boxes.length} 台`).join("、")
+                        }}
+                      </template>
+                      <span v-else>—</span>
+                      <div v-if="transferSkipped.length" class="warn">
+                        {{ transferSkipped.reduce((n, g) => n + g.boxes.length, 0) }}
+                        台已在调入单位，不会放入
+                      </div>
+                      <div v-if="transferBlocked.length" class="warn">
+                        {{ transferBlockedTitle }}
+                      </div>
                     </dd>
-                    <dt>地址</dt>
-                    <dd>{{ placeText(form.toPlace) }}</dd>
                   </dl>
                 </section>
               </template>
@@ -462,7 +452,13 @@
           <div class="grow"></div>
           <el-button v-if="step > 0" @click="step--">上一步</el-button>
           <el-button v-if="current !== 'review'" type="primary" @click="next">下一步</el-button>
-          <el-button v-else type="primary" :loading="saving" @click="submit">确认创建</el-button>
+          <el-button v-else type="primary" :loading="saving" @click="submit">
+            {{
+              form.kind === "调拨" && transferReady.length > 1
+                ? `创建 ${transferReady.length} 张调拨单`
+                : "确认创建"
+            }}
+          </el-button>
         </div>
       </el-card>
       <aside v-if="showSummary" class="summary">
@@ -518,6 +514,14 @@ import SectionCard from "@/components/biz/SectionCard.vue";
 
 type Person = { id: string; name: string; dept: string };
 type StepKey = "basic" | "boxes" | "from" | "to" | "sample" | "policy" | "review";
+interface TransferGroup {
+  key: string;
+  orgId: string;
+  orgName: string;
+  inScope: boolean;
+  sameAsDest: boolean;
+  boxes: SampleBox[];
+}
 const router = useRouter(),
   route = useRoute(),
   user = useUserStore();
@@ -538,10 +542,7 @@ const form = reactive({
   toOrgId: "",
   sender: "",
   senderId: "",
-  signer: "",
-  signerId: "",
   fromPlace: null as Place | null,
-  toPlace: null as Place | null,
   orgId: "",
   placeAt: null as Place | null,
   people: "",
@@ -625,24 +626,22 @@ watch(
   }
 );
 const orgs = ref<TaskOrg[]>([]),
-  fromUsers = ref<Person[]>([]),
-  toUsers = ref<Person[]>([]);
+  fromUsers = ref<Person[]>([]);
 // 采样单位不是采样机构时不能要求录像
 watch(isAgency, (on) => {
   if (!on) form.recordVideo = false;
 });
 
 /**
- * 分步填写。先选箱子，寄出单位就能按箱子的归属自动带出：
- * 调拨是 基本 → 采样箱 → 寄出方 → 接收方 → 确认；采样是 基本 → 采样箱 →（要寄送时）寄出方 → 采样安排 → 确认。
+ * 分步填写。调拨不定位、不发货：基本 → 采样箱 → 调入单位 → 核对。
+ * 采样是 基本 → 采样箱 →（要寄送时）寄出方 → 采样安排 → 核对。
  */
 const steps = computed<{ key: StepKey; title: string }[]>(() =>
   form.kind === "调拨"
     ? [
         { key: "basic", title: "基本信息" },
         { key: "boxes", title: "采样箱" },
-        { key: "from", title: "寄出方" },
-        { key: "to", title: "接收方" },
+        { key: "to", title: "调入单位" },
         { key: "review", title: "核对" },
       ]
     : form.trip
@@ -664,8 +663,61 @@ const step = ref(0);
 const current = computed(() => steps.value[step.value]?.key || "basic");
 /** 选箱子和核对这两步要整宽，不显示右边的摘要；核对页本身就是完整摘要。 */
 const showSummary = computed(() => current.value !== "boxes" && current.value !== "review");
+const stepLead = computed(() => {
+  if (current.value === "basic")
+    return form.kind === "调拨"
+      ? "调拨只改归属：不填定位，也不安排发货。调入单位签收后，箱子归过去。"
+      : "先定寄送方式。双向会寄回，单向留在采样单位，不寄送表示箱子已经在采样单位。";
+  if (current.value === "boxes")
+    return form.kind === "调拨"
+      ? "勾选或导入箱号，一张单最多 100 台。分属多个单位时，会按单位各建一张。"
+      : "勾选或导入箱号，一张单最多 100 台。停用和正在任务中的不能选。";
+  if (current.value === "to") return "选调入单位。下面按箱子现在的单位列出将要创建的调拨单。";
+  if (current.value === "from") return "填写寄出单位、寄出人和寄出地址。采样单位在下一步。";
+  if (current.value === "sample") return "采样地点用来核对开箱是不是发生在计划位置。";
+  return "核对无误后创建。调拨若拆成多张，会一次全部建好。";
+});
+/** 调拨按箱子现在的单位拆单。未分配、不在范围内的不能建，已经在调入单位的跳过。 */
+function buildTransferGroups(): TransferGroup[] {
+  const map = new Map<string, TransferGroup>();
+  for (const box of chosenBoxes.value) {
+    if (!form.boxIds.includes(box.id)) continue;
+    const orgId = String(box.orgId || "");
+    const org = orgId ? orgById(orgId) : null;
+    const key = orgId || "none";
+    let group = map.get(key);
+    if (!group) {
+      group = {
+        key,
+        orgId,
+        orgName: org?.name || (orgId ? box.org || orgId : "未分配单位"),
+        inScope: Boolean(org?.inScope),
+        sameAsDest: Boolean(form.toOrgId && orgId === form.toOrgId),
+        boxes: [],
+      };
+      map.set(key, group);
+    }
+    group.boxes.push(box);
+  }
+  return [...map.values()];
+}
+const transferGroups = computed(() => buildTransferGroups());
+const transferReady = computed(() =>
+  transferGroups.value.filter((group) => group.orgId && group.inScope && !group.sameAsDest)
+);
+const transferSkipped = computed(() =>
+  transferGroups.value.filter((group) => group.orgId && group.inScope && group.sameAsDest)
+);
+const transferBlocked = computed(() =>
+  transferGroups.value.filter((group) => !group.orgId || !group.inScope)
+);
+const transferBlockedTitle = computed(() => {
+  const names = transferBlocked.value.flatMap((group) =>
+    group.boxes.map((box) => box.name || box.id)
+  );
+  return `${names.join("、")} 未分配单位或不在你的管理范围内，不能放进调拨单`;
+});
 const summaryItems = computed<InfoItem[]>(() => {
-  const ship = form.kind === "调拨" || Boolean(form.trip);
   const list: InfoItem[] = [
     {
       label: "类型",
@@ -677,21 +729,23 @@ const summaryItems = computed<InfoItem[]>(() => {
       value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
     },
   ];
-  if (ship)
+  if (form.kind === "调拨") {
+    list.push({ label: "调入", value: orgById(form.toOrgId)?.name || "—" });
     list.push({
-      label: "寄出",
-      value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
+      label: "建单",
+      value: transferReady.value.length ? `${transferReady.value.length} 张` : "—",
     });
-  if (form.kind === "调拨")
-    list.push({
-      label: "接收",
-      value: [orgById(form.toOrgId)?.name, form.signer].filter(Boolean).join(" · ") || "—",
-    });
-  else
+  } else {
+    if (form.trip)
+      list.push({
+        label: "寄出",
+        value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
+      });
     list.push(
       { label: "采样单位", value: orgById(form.orgId)?.name || "—" },
       { label: "地点", value: form.placeAt ? placeText(form.placeAt) : "—" }
     );
+  }
   return list;
 });
 function goto(key: StepKey) {
@@ -705,10 +759,11 @@ function checkStep(key: StepKey) {
   if (key === "basic" && !form.name.trim()) errors.name = "请填写任务名称";
   if (key === "from" && !form.fromOrgId) errors.fromOrgId = "请选择寄出单位";
   if (key === "from" && !form.sender) errors.sender = "请选择或填写寄出人";
-  if (key === "to" && !form.toOrgId) errors.toOrgId = "请选择接收单位";
-  if (key === "to" && form.toOrgId && form.toOrgId === form.fromOrgId)
-    errors.toOrgId = "接收单位不能和寄出单位相同";
-  if (key === "to" && !form.signer) errors.signer = "请选择或填写签收人";
+  if (key === "to" && !form.toOrgId) errors.toOrgId = "请选择调入单位";
+  else if (key === "to" && !transferReady.value.length)
+    errors.toOrgId = transferBlocked.value.length
+      ? "有箱子未分配单位或不在你的管理范围内"
+      : "选中的箱子已经在调入单位";
   if (key === "boxes" && !form.boxIds.length) errors.boxIds = "请至少绑定一台采样箱";
   if (key === "sample" && form.trip && !form.orgId) errors.orgId = "寄送采样箱要选择采样单位";
   if (key === "sample" && form.trip && form.orgId && form.orgId === form.fromOrgId)
@@ -753,7 +808,7 @@ async function next() {
       }
     }
   }
-  if (current.value === "boxes" && (form.kind === "调拨" || form.trip) && !form.fromOrgId)
+  if (current.value === "boxes" && form.kind === "采样" && form.trip && !form.fromOrgId)
     form.fromOrgId = suggestedFrom();
   step.value = Math.min(step.value + 1, steps.value.length - 1);
 }
@@ -790,11 +845,7 @@ const policyText = computed(() => {
 });
 
 /** 人员选择：u:编号 是系统用户，其他是手填的外部人员姓名。 */
-function personModel(
-  nameKey: "sender" | "signer",
-  idKey: "senderId" | "signerId",
-  list: Ref<Person[]>
-) {
+function personModel(nameKey: "sender", idKey: "senderId", list: Ref<Person[]>) {
   return computed({
     get: () => (form[idKey] ? `u:${form[idKey]}` : form[nameKey]),
     set: (value: string) => {
@@ -807,7 +858,6 @@ function personModel(
   });
 }
 const senderPick = personModel("sender", "senderId", fromUsers);
-const signerPick = personModel("signer", "signerId", toUsers);
 
 async function loadUsers(orgId: string, target: Ref<Person[]>) {
   target.value = orgId ? (await API.taskOptions(orgId)).users : [];
@@ -821,21 +871,6 @@ watch(
     await loadUsers(id, fromUsers);
     const me = fromUsers.value.find((u) => u.id === String(user.userInfo.userId || ""));
     if (me && !form.sender) Object.assign(form, { sender: me.name, senderId: me.id });
-  }
-);
-// 签收人默认是接收单位的负责人
-watch(
-  () => form.toOrgId,
-  async (id) => {
-    const lead = orgById(id)?.leader;
-    form.signer = lead?.name || "";
-    form.signerId = lead?.id || "";
-    await loadUsers(id, toUsers);
-    if (lead && !toUsers.value.some((u) => u.id === lead.id))
-      toUsers.value = [
-        { id: lead.id, name: lead.name, dept: orgById(id)?.path || "" },
-        ...toUsers.value,
-      ];
   }
 );
 // 换任务类型后步骤不同，回到第一步
@@ -866,12 +901,6 @@ const outside = computed(() => {
     })
     .map((box) => box.id);
 });
-/** 选中的箱子分属哪些单位（未分配的算总公司）。 */
-const boxOrgs = computed(() => [
-  ...new Set(
-    chosenBoxes.value.map((box) => (box.orgId ? box.org : `${box.org || "总公司"}（未分配）`))
-  ),
-]);
 
 async function refreshPreview() {
   const request = ++previewRequest;
@@ -936,7 +965,59 @@ async function submit() {
   for (const item of steps.value) {
     if (!checkStep(item.key)) return goto(item.key);
   }
-  const transfer = form.kind === "调拨";
+  if (form.kind === "调拨") {
+    const ready = transferReady.value;
+    if (ready.length > 1) {
+      try {
+        await ElMessageBox.confirm(
+          `箱子不在同一个单位，将分别创建：${ready
+            .map((group) => `${group.orgName} ${group.boxes.length} 台`)
+            .join("，")}。都不填地址、不发货，调入单位签收后归属变更。`,
+          "按单位拆成多张调拨单",
+          { confirmButtonText: "创建", cancelButtonText: "返回" }
+        );
+      } catch {
+        return;
+      }
+    }
+    saving.value = true;
+    const created: string[] = [];
+    try {
+      const name = form.name.trim();
+      for (const group of ready) {
+        const ids = group.boxes.map((box) => box.id);
+        const overrides = Object.fromEntries(
+          Object.entries(form.overrides).filter(([id]) => ids.includes(id))
+        );
+        const { id } = await API.createTask({
+          name: (ready.length > 1 ? `${name} · ${group.orgName}` : name).slice(0, 120),
+          kind: "调拨",
+          direct: true,
+          boxIds: ids,
+          fromOrgId: group.orgId,
+          toOrgId: form.toOrgId,
+          overrides: canPolicy.value ? overrides : {},
+          policy: canPolicy.value && custom.value ? policy.value : null,
+          note: form.note,
+          maxOpens: limitOpens.value ? maxOpens.value : null,
+        });
+        created.push(id);
+      }
+      saved.value = true;
+      ElMessage.success(
+        created.length > 1 ? `已创建 ${created.length} 张调拨单` : "调拨单已创建，等待调入单位签收"
+      );
+      await router.push(created.length === 1 ? `/task/detail/${created[0]}` : "/task/tasks");
+    } catch (error) {
+      if (!created.length) throw error;
+      saved.value = true;
+      ElMessage.warning(`已创建 ${created.length} 张调拨单，后面的没有建成。请到任务列表查看。`);
+      await router.push("/task/tasks");
+    } finally {
+      saving.value = false;
+    }
+    return;
+  }
   const data: TaskCreate = {
     name: form.name.trim(),
     kind: form.kind,
@@ -945,33 +1026,20 @@ async function submit() {
     policy: canPolicy.value && custom.value ? policy.value : null,
     note: form.note,
     maxOpens: limitOpens.value ? maxOpens.value : null,
-    ...(transfer
+    orgId: form.orgId,
+    placeAt: form.placeAt,
+    people: form.people,
+    sample: form.sample,
+    recordVideo: form.recordVideo,
+    ...(form.trip
       ? {
+          trip: form.trip,
           fromOrgId: form.fromOrgId,
-          toOrgId: form.toOrgId,
           sender: form.sender,
           senderId: form.senderId,
-          signer: form.signer,
-          signerId: form.signerId,
           fromPlace: form.fromPlace,
-          toPlace: form.toPlace,
         }
-      : {
-          orgId: form.orgId,
-          placeAt: form.placeAt,
-          people: form.people,
-          sample: form.sample,
-          recordVideo: form.recordVideo,
-          ...(form.trip
-            ? {
-                trip: form.trip,
-                fromOrgId: form.fromOrgId,
-                sender: form.sender,
-                senderId: form.senderId,
-                fromPlace: form.fromPlace,
-              }
-            : {}),
-        }),
+      : {}),
   };
   saving.value = true;
   try {
@@ -997,23 +1065,23 @@ onMounted(async () => {
     .filter(Boolean)
     .slice(0, 100);
   if (preset.length) {
-    const found = await Promise.all(
-      preset.map((id) => SampleBoxAPI.detail(encodeURIComponent(id)).catch(() => null))
-    );
-    chosenBoxes.value = found.filter((box): box is SampleBox => box !== null);
+    const found = await SampleBoxAPI.lookup(preset).catch(() => null);
+    chosenBoxes.value = found?.list || [];
     form.boxIds = chosenBoxes.value.map((box) => box.id);
   }
 });
 </script>
 <style scoped>
-/* 卡片铺开到 1280px：选箱表格、核对页要宽；填写类的步骤输入框收在 720px 内，不拉得太长 */
+/* 填写步骤收在中间，旁边放摘要；选箱和核对用整宽，避免一张表漂在大块空白里 */
 .create-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: var(--page-gap);
+  grid-template-columns: minmax(0, 680px) 260px;
+  gap: 16px;
   align-items: start;
+  justify-content: center;
+  width: 100%;
 }
-.create-layout.solo {
+.create-layout.wide {
   grid-template-columns: minmax(0, 1fr);
 }
 .summary {
@@ -1032,20 +1100,51 @@ onMounted(async () => {
   min-width: 0;
 }
 .task-form :deep(.el-card__body) {
-  padding: 24px 28px;
+  padding: 20px 24px 16px;
 }
-.steps {
-  max-width: 960px;
-  margin: 4px auto 32px;
+.stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.steps :deep(.jump) {
+.step {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px 6px 6px;
+  font: inherit;
+  color: var(--el-text-color-secondary);
+  cursor: default;
+  background: var(--el-fill-color-blank);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 999px;
+}
+.step.done {
+  color: var(--el-color-success);
   cursor: pointer;
 }
-.body {
-  min-height: 320px;
+.step.on {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-5);
 }
-.body:not(.wide) :deep(.el-form-item__content) {
-  max-width: 720px;
+.step .n {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  border: 1px solid currentcolor;
+  border-radius: 50%;
+}
+.step-lead {
+  margin: 14px 0 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+.group-table {
+  margin-top: 4px;
 }
 .preview {
   margin: 16px 0 8px;
@@ -1065,7 +1164,7 @@ onMounted(async () => {
 }
 .indent {
   width: auto;
-  margin: -6px 0 16px 110px;
+  margin: -6px 0 16px 96px;
 }
 .actions {
   display: flex;

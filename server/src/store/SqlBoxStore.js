@@ -102,6 +102,20 @@ export class SqlBoxStore extends BoxStore {
     return row ? BoxState.fromRow(row) : null;
   }
 
+  /** 按编号或名称精确匹配，最多 100 个。导入箱号时用，不按模糊搜索。 */
+  async findByIdsOrNames(keys) {
+    const list = [
+      ...new Set((keys || []).map((key) => String(key || "").trim()).filter(Boolean)),
+    ].slice(0, 100);
+    if (!list.length) return [];
+    const marks = list.map(() => "?").join(",");
+    const rows = await this.executor.all(
+      `SELECT * FROM sample_box WHERE id IN (${marks}) OR name IN (${marks})`,
+      [...list, ...list]
+    );
+    return rows.map((row) => BoxState.fromRow(row));
+  }
+
   async list() {
     const rows = await this.executor.all(
       `SELECT ${BOX_COLUMNS.join(", ")} FROM sample_box ORDER BY last_report_at DESC`

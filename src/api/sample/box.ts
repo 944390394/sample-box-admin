@@ -144,6 +144,22 @@ const SampleBoxAPI = {
   list() {
     return request<unknown, SampleBox[]>({ url: "/api/v1/sample/boxes", method: "get" });
   },
+  /** 按编号或名称精确匹配，建单时导入箱号。不在范围内的算找不到。 */
+  lookup(ids: string[]) {
+    return request<
+      unknown,
+      {
+        list: SampleBox[];
+        missing: string[];
+        skipped: { key: string; id?: string; name?: string; reason: string }[];
+        truncated: boolean;
+      }
+    >({
+      url: "/api/v1/sample/boxes/lookup",
+      method: "post",
+      data: { ids },
+    });
+  },
   page(params: BoxQuery) {
     return request<unknown, BoxPage>({
       url: "/api/v1/sample/boxes",

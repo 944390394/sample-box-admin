@@ -206,7 +206,7 @@ export const TASK_PERMS = [
     9410,
     "task:create:transfer",
     "新建调拨任务",
-    "把采样箱从一个单位送到另一个单位",
+    "把采样箱调到另一个单位，签收后归属变更",
     "task",
     "do",
     TASK_ENTER

@@ -243,6 +243,14 @@ export class ReportPolicyController {
       }
       metadata.fromPlace = readPlace(input.fromPlace);
       metadata.toPlace = readPlace(input.toPlace);
+      // 直接调拨：不定位、不发货，建单后待签收。地址和寄出人、签收人不写入
+      if (input.direct === true) {
+        metadata.direct = true;
+        metadata.fromPlace = null;
+        metadata.toPlace = null;
+        metadata.sender = "";
+        metadata.signer = "";
+      }
       for (const [idKey, nameKey] of [
         ["senderId", "sender"],
         ["signerId", "signer"],
@@ -252,6 +260,7 @@ export class ReportPolicyController {
           String(input[idKey]),
         ]);
         if (!user) throw new Error("寄出人或签收人不存在或已停用");
+        if (metadata.direct) continue;
         metadata[idKey] = String(user.id);
         metadata[nameKey] = user.nickname;
       }
@@ -315,13 +324,24 @@ export class ReportPolicyController {
     }
     if (
       input.kind === "调拨" &&
-      (!metadata.fromOrg ||
-        !metadata.toOrg ||
-        !metadata.sender ||
-        !metadata.signer ||
-        metadata.fromOrg === metadata.toOrg)
+      (!metadata.fromOrg || !metadata.toOrg || metadata.fromOrg === metadata.toOrg)
     )
+      throw new Error(
+        metadata.direct
+          ? "请选择不同的调出单位和调入单位"
+          : "请填写不同的寄出、接收公司及寄出人、签收人"
+      );
+    if (input.kind === "调拨" && !metadata.direct && (!metadata.sender || !metadata.signer))
       throw new Error("请填写不同的寄出、接收公司及寄出人、签收人");
+    if (metadata.direct && (!metadata.fromOrgId || !metadata.toOrgId))
+      throw new Error("请选择调出单位和调入单位");
+    // 一张直接调拨单只含同一个单位的箱子，多个单位由页面拆成多张
+    if (metadata.direct) {
+      const foreign = boxes.filter(
+        (box) => String(box.org_id ?? "") !== String(metadata.fromOrgId)
+      );
+      if (foreign.length) throw new Error("直接调拨的箱子必须都属于调出单位，请按单位分开建单");
+    }
     const id = await this.policies.createTask(
       {
         ...metadata,
