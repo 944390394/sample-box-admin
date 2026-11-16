@@ -19,6 +19,7 @@ import {
 import { queryOperationLogs } from "./src/log/operationLog.js";
 import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js";
 import { mergeDatabaseSettings, publicDatabase, scrub } from "./src/settings/databaseConfig.js";
+import { mergeProduct, publicBrand, publicProduct } from "./src/settings/productSettings.js";
 import { tcpPassthroughSettings } from "./src/tcpSettings.js";
 
 const serverRoot = dirname(fileURLToPath(import.meta.url));
@@ -270,6 +271,17 @@ const routes = [
     handler: saveDatabase,
   },
   {
+    method: "PUT",
+    path: "/api/v1/system/settings/product",
+    auth: true,
+    handler: saveProduct,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/system/brand",
+    handler: systemBrand,
+  },
+  {
     method: "GET",
     path: "/api/v1/system/operation-logs",
     auth: true,
@@ -457,7 +469,39 @@ async function systemSettings(ctx) {
       certExpiresAt,
     }),
     database: publicDatabase(state.config),
+    product: publicProduct(state.config?.product),
   });
+}
+
+function systemBrand(ctx) {
+  ctx.ok(publicBrand(state.config?.product));
+}
+
+async function saveProduct(ctx) {
+  const roles = await roleCodes(ctx.user.id);
+  if (!roles.includes("ADMIN")) return ctx.fail("只有系统管理员可以修改系统设置");
+  let product;
+  try {
+    product = mergeProduct(state.config?.product, ctx.body || {});
+  } catch (error) {
+    return ctx.fail(error instanceof Error ? error.message : "系统设置不正确");
+  }
+  const next = { ...(state.config || {}), product };
+  writeFileSync(configPath, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+  chmodSync(configPath, 0o600);
+  state.config = next;
+  await audit(state.db, {
+    orgId: String(ctx.user.dept_id || ""),
+    orgName: "",
+    actorId: String(ctx.user.id),
+    actorName: ctx.user.nickname || ctx.user.username,
+    action: "修改系统设置",
+    targetType: "settings",
+    targetId: "",
+    result: "成功",
+    ip: ctx.ip || "",
+  });
+  ctx.ok(publicProduct(product), "已保存");
 }
 
 async function saveDatabase(ctx) {
@@ -645,6 +689,7 @@ const httpServer = createServer(async (req, res) => {
     params: matched.params,
     ip: clientIp(req),
     user: null,
+    config: state.config,
     ok: (data, msg) => ok(res, data, msg),
     fail: (msg, code, status) => fail(res, msg, code, status),
   };

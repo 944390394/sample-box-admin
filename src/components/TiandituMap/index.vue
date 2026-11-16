@@ -7,6 +7,7 @@
 
 <script setup lang="ts">
 import { loadTianditu, onTiandituKeyError } from "@/utils/tianditu";
+import { useProductStore } from "@/stores/product";
 import type { TiandituMap, TiandituOverlay } from "@/utils/tianditu";
 
 export interface TiandituPoint {
@@ -123,9 +124,11 @@ onMounted(async () => {
     message.value = text;
   });
   try {
+    const product = useProductStore();
+    await product.load().catch(() => undefined);
     await loadTianditu(
-      import.meta.env.VITE_TIANDITU_TK ?? "",
-      import.meta.env.VITE_TIANDITU_SK ?? ""
+      product.map.tk || import.meta.env.VITE_TIANDITU_TK || "",
+      product.map.sk || import.meta.env.VITE_TIANDITU_SK || ""
     );
     await nextTick();
     const api = window.T;

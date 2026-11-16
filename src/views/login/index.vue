@@ -8,9 +8,9 @@
     <div class="login-layout">
       <div class="login-brand">
         <div class="login-brand__header">
-          <el-image :src="logo" class="login-brand__logo" />
+          <el-image :src="brandLogo" class="login-brand__logo" />
           <div class="login-brand__identity">
-            <span class="login-brand__name">{{ appConfig.title }}</span>
+            <span class="login-brand__name">{{ brandName }}</span>
             <span class="login-brand__version">v{{ appConfig.version }}</span>
           </div>
         </div>
@@ -171,12 +171,15 @@ import router from "@/router";
 import { useUserStore } from "@/stores";
 import { AuthStorage } from "@/utils/auth";
 import { appConfig } from "@/settings";
+import SettingsAPI from "@/api/system/settings";
 import ThemeSwitch from "@/components/ThemeSwitch/index.vue";
 import ResetPwd from "./components/ResetPwd.vue";
 import QrCodeLogin from "./components/QrCodeLogin.vue";
 import logo from "@/assets/images/logo.png";
 
 const userStore = useUserStore();
+const brandName = ref(appConfig.title);
+const brandLogo = ref(logo);
 const route = useRoute();
 const component = ref<"login" | "resetPwd" | "qrcode">("login");
 
@@ -247,7 +250,15 @@ function showForm(type: "resetPwd") {
   component.value = type;
 }
 
-onMounted(() => getCaptcha());
+onMounted(() => {
+  getCaptcha();
+  SettingsAPI.brand()
+    .then((brand) => {
+      if (brand.name) brandName.value = brand.name;
+      if (brand.logoDataUrl) brandLogo.value = brand.logoDataUrl;
+    })
+    .catch(() => undefined);
+});
 </script>
 
 <style lang="scss" scoped>

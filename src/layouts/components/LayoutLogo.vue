@@ -2,9 +2,9 @@
   <div class="layout-logo">
     <transition enter-active-class="animate__animated animate__fadeInLeft">
       <router-link :key="+collapse" class="wh-full flex-center" to="/">
-        <img :src="logo" class="w20px h20px" />
+        <img :src="product.logoSrc" class="w20px h20px" />
         <span v-if="!collapse" class="layout-logo__title">
-          {{ appConfig.title }}
+          {{ product.displayName }}
         </span>
       </router-link>
     </transition>
@@ -12,8 +12,12 @@
 </template>
 
 <script lang="ts" setup>
-import { appConfig } from "@/settings";
-import logo from "@/assets/images/logo.png";
+import { useProductStore } from "@/stores/product";
+
+const product = useProductStore();
+onMounted(() => {
+  product.load().catch(() => undefined);
+});
 
 defineProps({
   collapse: {

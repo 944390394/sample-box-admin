@@ -8,6 +8,7 @@ import {
   toDeptOptions,
 } from "../shared/org.js";
 import { audit } from "./src/log/audit.js";
+import { passwordMinOf } from "./src/settings/productSettings.js";
 import { menuOptions } from "./menus.js";
 
 async function record(ctx, action, targetType, targetId, result) {
@@ -467,9 +468,10 @@ export async function deleteUsers(ctx) {
 
 export async function resetPassword(ctx) {
   const password = ctx.query.password;
-  if (!password || String(password).length < 6) {
+  const min = passwordMinOf(ctx.config);
+  if (!password || String(password).length < min) {
     await record(ctx, "重置密码", "user", ctx.params.id, "失败");
-    return ctx.fail("密码至少需要6位字符");
+    return ctx.fail(`密码至少需要${min}位字符`);
   }
   const { hashPassword } = await import("./auth.js");
   await ctx.db.run("UPDATE sys_user SET password_hash = ? WHERE id = ?", [
