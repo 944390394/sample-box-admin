@@ -529,7 +529,7 @@ const stats = computed(() => {
     label: "任务期间开箱",
     value: opens,
     unit: "次",
-    hint: t.maxOpens != null ? `上限每台 ${t.maxOpens} 次` : "不限次数",
+    hint: t.maxOpens != null ? `上限每台 ${t.maxOpens} 次，从建单记到结束` : "从建单记到任务结束",
     tone: overLimit.value.length ? "danger" : "",
   });
   const low = d.boxes.filter(

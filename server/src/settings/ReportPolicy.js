@@ -336,7 +336,7 @@ export class ReportPolicy {
       const snapshots = new Map();
       for (const boxId of [...input.boxIds].sort()) {
         const box = await tx.get(
-          "SELECT id,name,life,org_id,owner_id FROM sample_box WHERE id=?" +
+          "SELECT id,name,life,org_id,owner_id,opens FROM sample_box WHERE id=?" +
             (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
           [boxId]
         );
@@ -380,8 +380,8 @@ export class ReportPolicy {
       for (const boxId of input.boxIds) {
         const box = snapshots.get(boxId);
         await tx.run(
-          "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id) VALUES (?,?,?,?)",
-          [id, boxId, box.org_id, box.owner_id]
+          "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id,opens_start) VALUES (?,?,?,?,?)",
+          [id, boxId, box.org_id, box.owner_id, Number(box.opens) || 0]
         );
         // 建单就占用：箱子显示「在途」，选箱时不再出现在「可用」里。
         // 任务策略：旧固件等任务开始才生效；1.0.17 起建单即按 assignedPolicies 快照下发，任务期间不变
@@ -413,14 +413,20 @@ export class ReportPolicy {
         for (const { box_id } of ids) {
           // 带寄送的采样单在「运送中」就开始占用箱子，到「采样中」时已是本任务的，不再重复登记
           const busy = await tx.get("SELECT task_id FROM box_active_task WHERE box_id=?", [box_id]);
-          if (busy && busy.task_id === id) continue;
+          if (busy && busy.task_id === id) {
+            await tx.run(
+              "UPDATE sample_task_box SET opens_start=(SELECT opens FROM sample_box WHERE id=?) WHERE task_id=? AND box_id=? AND opens_start IS NULL",
+              [box_id, id, box_id]
+            );
+            continue;
+          }
           if (busy) throw new Error(`${box_id} 已有执行中的任务`);
           await tx.run("INSERT INTO box_active_task (box_id,task_id) VALUES (?,?)", [box_id, id]);
           // 任务开始后箱子算「在途」，结束后没有别的进行中任务再回到「未使用」
           await tx.run("UPDATE sample_box SET life='在途' WHERE id=? AND life='未使用'", [box_id]);
-          // 记下开始时的开箱次数，任务期间开了几次 = 当前 − 开始
+          // 建单时已经记下开箱次数。这里只补旧单：当时还没记，就从这一步开始算。
           await tx.run(
-            "UPDATE sample_task_box SET opens_start=(SELECT opens FROM sample_box WHERE id=?) WHERE task_id=? AND box_id=?",
+            "UPDATE sample_task_box SET opens_start=(SELECT opens FROM sample_box WHERE id=?) WHERE task_id=? AND box_id=? AND opens_start IS NULL",
             [box_id, id, box_id]
           );
         }
