@@ -335,7 +335,7 @@ import DeptAPI from "@/api/system/dept";
 import RoleAPI from "@/api/system/role";
 import type { UserForm, UserItem, UserQueryParams } from "@/api/system/user";
 import type { OptionItem } from "@/api/common";
-import { useAppStore, useUserStore } from "@/stores";
+import { useAppStore, useProductStore, useUserStore } from "@/stores";
 import { usePageTable, useTableSelection } from "@/composables";
 import { CommonStatus, DeviceEnum, DialogMode, UserGender } from "@/enums";
 import { downloadFile } from "@/utils";
@@ -422,12 +422,16 @@ const rules: FormRules<UserForm> = {
   mobile: [{ pattern: /^1[3-9]\d{9}$/, message: "请输入正确的手机号码", trigger: "blur" }],
 };
 
-const resetPasswordRules: FormRules<ResetPasswordForm> = {
-  password: [
-    { required: true, message: "请输入新密码", trigger: "blur" },
-    { min: 6, message: "密码至少需要6位字符", trigger: "blur" },
-  ],
-};
+const productStore = useProductStore();
+const resetPasswordRules = computed<FormRules<ResetPasswordForm>>(() => {
+  const min = productStore.security.passwordMin || 6;
+  return {
+    password: [
+      { required: true, message: "请输入新密码", trigger: "blur" },
+      { min, message: `密码至少需要${min}位字符`, trigger: "blur" },
+    ],
+  };
+});
 
 /**
  * 取昵称/用户名首字母作为头像占位文本。
@@ -643,6 +647,7 @@ const handleResetPasswordSubmit = useDebounceFn(async () => {
 }, 300);
 
 onMounted(() => {
+  productStore.load().catch(() => undefined);
   handleQuery();
 });
 </script>
