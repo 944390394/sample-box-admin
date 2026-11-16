@@ -87,8 +87,32 @@ export async function boxDistances(
 }
 
 /**
- * 任务期间各箱开了几次箱：结束了用结束时的次数，没结束用当前次数，减去开始时的次数。
- * 还没开始的任务返回 null。设备抹除后次数会归零，算出负数时按 0。
+ * 用任务开始后的上报，倒推建单那一刻服务器上的累计开箱次数。
+ * before 是建单前最后一包里的芯片次数；during 是建单之后按时间排列的芯片次数。
+ * 芯片复位后次数变小，只把变大的差值算进去，和入库时的累计方式一致。
+ */
+export function opensAtTaskStart(currentOpens, beforeReported, duringReported) {
+  let device = beforeReported == null ? null : Number(beforeReported);
+  let added = 0;
+  for (const value of duringReported || []) {
+    const reported = Number(value);
+    if (!Number.isFinite(reported)) continue;
+    if (device == null) {
+      device = reported;
+      added += reported;
+      continue;
+    }
+    if (reported >= device) added += reported - device;
+    device = reported;
+  }
+  const start = Number(currentOpens) - added;
+  return start > 0 ? start : 0;
+}
+
+/**
+ * 任务期间各箱开了几次箱。建单时记下当时的次数，结束前用当前次数，结束后用结束时的次数。
+ * 寄出前、封箱后都算在里面，直到任务结束才停。没记下开始次数的旧数据返回 null。
+ * 设备抹除后次数会归零，算出负数时按 0。
  */
 export async function openCounts(db, taskId) {
   const rows = await db.all(

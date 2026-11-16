@@ -616,8 +616,20 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     assert.equal(
       (await call(c.taskDetail.bind(c), { ...ctx, params: { id: limited.id } })).boxes[0]
         .opensDuring,
-      null
+      0
     );
+    // 还在待采样、没有寄出：开箱也从建单起算
+    await boxes.updateBox(box.id, (b) => {
+      b.opens = 6;
+    });
+    assert.equal(
+      (await call(c.taskDetail.bind(c), { ...ctx, params: { id: limited.id } })).boxes[0]
+        .opensDuring,
+      1
+    );
+    await boxes.updateBox(box.id, (b) => {
+      b.opens = 5;
+    });
     await call(c.transition.bind(c), {
       ...ctx,
       params: { id: limited.id },
