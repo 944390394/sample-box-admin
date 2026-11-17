@@ -87,8 +87,32 @@ export async function boxDistances(
 }
 
 /**
- * 任务期间各箱开了几次箱：结束了用结束时的次数，没结束用当前次数，减去开始时的次数。
- * 还没开始的任务返回 null。设备抹除后次数会归零，算出负数时按 0。
+ * 用任务开始后的上报，倒推建单那一刻服务器上的累计开箱次数。
+ * before 是建单前最后一包里的芯片次数；during 是建单之后按时间排列的芯片次数。
+ * 芯片复位后次数变小，只把变大的差值算进去，和入库时的累计方式一致。
+ */
+export function opensAtTaskStart(currentOpens, beforeReported, duringReported) {
+  let device = beforeReported == null ? null : Number(beforeReported);
+  let added = 0;
+  for (const value of duringReported || []) {
+    const reported = Number(value);
+    if (!Number.isFinite(reported)) continue;
+    if (device == null) {
+      device = reported;
+      added += reported;
+      continue;
+    }
+    if (reported >= device) added += reported - device;
+    device = reported;
+  }
+  const start = Number(currentOpens) - added;
+  return start > 0 ? start : 0;
+}
+
+/**
+ * 任务期间各箱开了几次箱。建单时记下当时的次数，结束前用当前次数，结束后用结束时的次数。
+ * 寄出前、封箱后都算在里面，直到任务结束才停。没记下开始次数的旧数据返回 null。
+ * 设备抹除后次数会归零，算出负数时按 0。
  */
 export async function openCounts(db, taskId) {
   const rows = await db.all(
@@ -105,56 +129,36 @@ export async function openCounts(db, taskId) {
 }
 
 /**
- * 去程、回程分开计的开箱次数。opens_seal 是封箱那一刻的次数：
- * 之前是去程，之后是回程。任务还没开始时三项都是 null。
+ * 封箱以后各箱又开了几次箱：没封过箱（调拨、还没到封箱）返回 null。
+ * 结束了用结束时的次数，没结束用当前次数；设备抹除后算出负数时按 0。
  */
-export async function openLegs(db, taskId) {
+export async function sealOpenCounts(db, taskId) {
   const rows = await db.all(
-    "SELECT m.box_id, m.opens_start, m.opens_end, m.opens_seal, b.opens FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=?",
+    "SELECT m.box_id, m.opens_seal, m.opens_end, b.opens FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=?",
     [taskId]
   );
   return new Map(
     rows.map((row) => {
-      if (row.opens_start == null) return [row.box_id, { total: null, out: null, back: null }];
-      const now = Number(row.opens_end ?? row.opens ?? row.opens_start);
-      const start = Number(row.opens_start);
-      const total = Math.max(0, now - start);
-      if (row.opens_seal == null) return [row.box_id, { total, out: total, back: null }];
-      const seal = Number(row.opens_seal);
-      return [row.box_id, { total, out: Math.max(0, seal - start), back: Math.max(0, now - seal) }];
+      if (row.opens_seal == null) return [row.box_id, null];
+      const until = row.opens_end ?? row.opens ?? row.opens_seal;
+      return [row.box_id, Math.max(0, Number(until) - Number(row.opens_seal))];
     })
   );
 }
 
-/** 任务给回程单独设了上限时，去程和回程分开核验。 */
-export function splitLimits(task) {
-  return Number.isInteger(task?.maxOpensBack);
-}
-
-/** 哪一台、哪一段超过了开箱上限。没超的箱子不出现。 */
-export function limitBreaches(task, legs) {
-  const split = splitLimits(task);
-  const hits = new Map();
-  for (const [id, leg] of legs) {
-    const hit = {
-      total:
-        !split && Number.isInteger(task.maxOpens) && leg.total != null && leg.total > task.maxOpens,
-      out: split && Number.isInteger(task.maxOpens) && leg.out != null && leg.out > task.maxOpens,
-      back:
-        split &&
-        Number.isInteger(task.maxOpensBack) &&
-        leg.back != null &&
-        leg.back > task.maxOpensBack,
-    };
-    if (hit.total || hit.out || hit.back) hits.set(id, hit);
-  }
-  return hits;
-}
-
-/** 开箱次数超过任务上限的箱号。 */
+/** 开箱次数超过任务上设置的上限的箱号。没设上限的任务不判断。 */
 export function overOpenLimit(task, counts) {
-  if (!Number.isInteger(task.maxOpens)) return [];
+  if (!Number.isInteger(task?.maxOpens)) return [];
   return [...counts.entries()].filter(([, n]) => n != null && n > task.maxOpens).map(([id]) => id);
+}
+
+/**
+ * 样品作废的箱子：任务期间开箱次数超过上限。次数只会变多，超了就一直算作废，
+ * 强制签收也不改变——作废的箱子不能「开始检测」。没设上限的任务没有作废。
+ */
+export async function voidBoxIds(db, taskId, task) {
+  if (!Number.isInteger(task?.maxOpens)) return new Set();
+  return new Set(overOpenLimit(task, await openCounts(db, taskId)));
 }
 
 /** 目标地址自己设了误差范围就用它，否则用系统设置的到达半径。 */

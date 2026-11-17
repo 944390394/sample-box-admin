@@ -118,6 +118,10 @@
             {{ ago(row.inspectedAt) }}{{ row.inspectedBy ? ` · ${row.inspectedBy}` : "" }}
           </div>
         </template>
+        <template v-else-if="row.voided">
+          <el-tag type="info" size="small">样品作废</el-tag>
+          <div class="muted">开箱超限，不检测</div>
+        </template>
         <el-button
           v-else-if="canInspect && !row.missing"
           size="small"

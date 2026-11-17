@@ -67,26 +67,18 @@ test("完整充放电之后，电量按这几次的高低电压对齐，并扣�
 });
 
 test("充电中先扣掉端电压抬高，同样电压低于静置曲线，也不记满", () => {
-  assert.ok(chargingPercent(4000) < voltagePercent(4000));
-  const charging = estimateBattery(null, 4000, 20, 1);
-  const resting = estimateBattery(null, 4000, 20, 0);
+  assert.ok(chargingPercent(4120) < voltagePercent(4120));
+  const charging = estimateBattery(null, 4120, 20, 1);
+  const resting = estimateBattery(null, 4120, 20, 0);
   assert.equal(charging.basis, "charge");
-  assert.equal(charging.soc, 54);
+  assert.equal(charging.soc, 76);
   assert.ok(charging.soc < resting.soc);
   assert.ok(charging.usable < resting.usable);
-});
 
-test("充电末段从 4.10 V 接到大电流曲线，4.16 V 记满，不再等充满脚", () => {
-  const atRelease = estimateBattery(null, 4100, 20, 1);
-  const onPlateau = estimateBattery(null, 4153, 20, 1);
-  const atTop = estimateBattery(null, 4160, 20, 1);
-  assert.equal(atRelease.basis, "charge");
-  assert.equal(atRelease.soc, 72);
-  assert.equal(onPlateau.soc, 97);
-  assert.ok(onPlateau.soc > atRelease.soc);
-  assert.ok(onPlateau.soc < 100);
-  assert.equal(atTop.soc, 100);
-  assert.equal(atTop.usable, 100);
+  const topped = estimateBattery(null, 4200, 20, 1);
+  // 到了恒压段（4.18 V 以上）不再卡在 85%，按电压走但最多 92%，等充满指示才到 100
+  assert.equal(topped.soc, 87);
+  assert.ok(topped.usable < 100);
 });
 
 test("充满后 4.16 V 记满，往下按电压平滑降，4.10 V 接上静置曲线", () => {

@@ -117,11 +117,7 @@ test("小程序绑定：没绑先要账号密码，绑定后静默登录；换�
     const bound = await call("bind", {
       body: { code: "c", username: "admin", password: "123456" },
     });
-    assert.deepEqual(bound.data, {
-      bound: true,
-      userId: String(admin.id),
-      accessToken: `t-${admin.id}`,
-    });
+    assert.deepEqual(bound.data, { bound: true, accessToken: `t-${admin.id}` });
     assert.equal((await call("login")).data.bound, true);
     assert.equal(
       (await db.get("SELECT action FROM sys_operation_log WHERE action='绑定微信'"))?.action,
@@ -234,11 +230,7 @@ test("扫网页绑定二维码：票据 5 分钟、只能用一次、账号下�
     const bound = await call("bindTicket", {
       body: { code: "c", ticket, nickname: "  小王的微信  ", avatar },
     });
-    assert.deepEqual(bound.data, {
-      bound: true,
-      userId: String(admin.id),
-      accessToken: `t-${admin.id}`,
-    });
+    assert.deepEqual(bound.data, { bound: true, accessToken: `t-${admin.id}` });
     assert.match(
       (await call("bindTicket", { body: { code: "c", ticket } })).message,
       /过期或已经用过/
@@ -297,7 +289,7 @@ test("扫网页绑定二维码：票据 5 分钟、只能用一次、账号下�
   }
 });
 
-test("手机号快捷登录：凭证缓存、过期重取；按人员手机号找账号，对不上不绑、对上多个都绑并让用户选；登录后可补昵称头像", async () => {
+test("手机号快捷登录：凭证缓存、过期重取；按人员手机号找账号，对不上或多个时不绑；登录后可补昵称头像", async () => {
   // 微信接口：稳定版凭证 + 换手机号；第一次换手机号时报凭证过期
   const calls = [];
   let expiredOnce = true;
@@ -375,11 +367,7 @@ test("手机号快捷登录：凭证缓存、过期重取；按人员手机号�
       });
       return out;
     };
-    assert.deepEqual((await call("phone")).data, {
-      bound: true,
-      userId: "41",
-      accessToken: "t-41",
-    });
+    assert.deepEqual((await call("phone")).data, { bound: true, accessToken: "t-41" });
     assert.equal(
       (await db.get("SELECT user_id FROM sys_user_wechat WHERE openid='o-phone'")).user_id,
       "41"
@@ -389,10 +377,7 @@ test("手机号快捷登录：凭证缓存、过期重取；按人员手机号�
       "手机号绑定微信"
     );
     phone = "13700000007";
-    const both = (await call("phone")).data;
-    assert.equal(both.choose, true);
-    assert.deepEqual(both.accounts.map((a) => a.userId).sort(), ["41", "42", "43"]);
-    assert.equal(both.accessToken, undefined);
+    assert.match((await call("phone")).message, /137\*\*\*\*0007 登记在多个账号/);
     phone = "13600000006";
     assert.match((await call("phone")).message, /136\*\*\*\*0006 没有对应的账号/);
     phone = "";
@@ -406,14 +391,9 @@ test("手机号快捷登录：凭证缓存、过期重取；按人员手机号�
     });
     assert.equal(saved.data.nickname, "老张");
     assert.equal(saved.data.avatar, "data:image/jpeg;base64,/9j/4AAQ");
-    // 昵称头像说的是这个微信：同一个微信绑的李四也跟着改
-    assert.equal(
-      (await db.get("SELECT nickname FROM sys_user_wechat WHERE user_id='42'")).nickname,
-      "老张"
-    );
-    const wang = await db.get("SELECT * FROM sys_user WHERE id='44'");
+    const lee = await db.get("SELECT * FROM sys_user WHERE id='42'");
     assert.match(
-      (await call("profile", { user: wang, body: { nickname: "x" } })).message,
+      (await call("profile", { user: lee, body: { nickname: "x" } })).message,
       /还没有绑定微信/
     );
   } finally {
@@ -600,156 +580,4 @@ test("监控通道：最多 8 路、名称必填、地址要 http(s)；坏数据
   assert.throws(() => validateCameras([{ name: "门口", liveUrl: "rtsp://x" }]), /http/);
   assert.deepEqual(readCameras("not json"), []);
   assert.equal(readCameras(JSON.stringify([{ name: "a" }, { bad: 1 }])).length, 1);
-});
-
-test("一个微信绑多个账号：登录时让选，带上账号编号直接登进去；一个账号仍只绑一个微信；停用的列出来但不能选", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "wechat-multi-"));
-  const db = await openDatabase(
-    { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
-    process.cwd()
-  );
-  try {
-    await migrate(db);
-    await seedOrg(db);
-    const passwordOf = { admin: "123456" };
-    await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('51','second','第二个账号',?,'11',1)",
-      [(await db.get("SELECT password_hash FROM sys_user WHERE username='admin'")).password_hash]
-    );
-    passwordOf.second = "123456";
-    const credentials = async (_ctx, username, password) => {
-      const user = await db.get("SELECT * FROM sys_user WHERE username=?", [username]);
-      return user && passwordOf[username] === password ? { user } : { fail: ["用户名或密码错误"] };
-    };
-    let openid = "o-me";
-    let now = Date.parse("2026-11-12T08:00:00Z");
-    const auth = new WechatAuth({
-      wechat: { openid: async () => ({ openid, appId: "wx1", unionid: "" }) },
-      credentials,
-      tokens: (user) => ({ accessToken: `t-${user.id}` }),
-      now: () => new Date(now),
-    });
-    const call = async (method, extra = {}) => {
-      let out;
-      await auth[method]({
-        db,
-        ip: "",
-        body: { code: "c" },
-        ...extra,
-        ok: (data) => (out = { ok: true, data }),
-        fail: (message, code) => (out = { message, code }),
-      });
-      return out;
-    };
-    const admin = await db.get("SELECT * FROM sys_user WHERE username='admin'");
-
-    // 同一个微信先后绑两个账号：第二次不会顶掉第一个
-    await call("bind", {
-      body: { code: "c", username: "admin", password: "123456", nickname: "我的微信" },
-    });
-    now += 60000;
-    const second = await call("bind", {
-      body: { code: "c", username: "second", password: "123456" },
-    });
-    assert.equal(second.data.userId, "51");
-    assert.equal(
-      (await db.all("SELECT user_id FROM sys_user_wechat WHERE openid='o-me'")).length,
-      2
-    );
-    // 第二个账号没填昵称：沿用这个微信在第一个账号上填过的
-    assert.equal(
-      (await db.get("SELECT nickname FROM sys_user_wechat WHERE user_id='51'")).nickname,
-      "我的微信"
-    );
-
-    // 不指定账号：返回列表让选，最近登录的在前，不发令牌
-    const choose = (await call("login")).data;
-    assert.equal(choose.choose, true);
-    assert.equal(choose.accessToken, undefined);
-    assert.deepEqual(
-      choose.accounts.map((a) => a.userId),
-      ["51", String(admin.id)]
-    );
-    assert.equal(choose.accounts[1].nickname, "系统管理员");
-    assert.match(choose.accounts[1].roleNames, /系统管理员/);
-    assert.equal(choose.accounts[1].deptName, "系统管理");
-    // 指定账号：直接登进去；指定一个没绑在这个微信上的：还是让选
-    assert.deepEqual(
-      (await call("login", { body: { code: "c", userId: String(admin.id) } })).data,
-      { bound: true, userId: String(admin.id), accessToken: `t-${admin.id}` }
-    );
-    assert.equal((await call("login", { body: { code: "c", userId: "6" } })).data.choose, true);
-    // 切换账号用的列表
-    assert.equal((await call("accounts")).data.accounts.length, 2);
-    // 我的微信：还绑了 1 个别的账号
-    assert.equal((await call("mine", { user: admin })).data.otherAccounts, 1);
-
-    // 停用的账号：列出来、标原因、选了也登不进去
-    await db.run("UPDATE sys_user SET status=0 WHERE id='51'");
-    const listed = (await call("login")).data.accounts.find((a) => a.userId === "51");
-    assert.deepEqual([listed.disabled, listed.reason], [true, "已停用"]);
-    assert.equal((await call("login", { body: { code: "c", userId: "51" } })).code, "A0232");
-    await db.run("UPDATE sys_user SET status=1 WHERE id='51'");
-
-    // 一个账号只绑一个微信：第二个账号绑到另一个微信后，从原来的微信上消失
-    openid = "o-other";
-    await call("bind", { body: { code: "c", username: "second", password: "123456" } });
-    openid = "o-me";
-    assert.deepEqual(
-      (await db.all("SELECT user_id FROM sys_user_wechat WHERE openid='o-me'")).map(
-        (r) => r.user_id
-      ),
-      [String(admin.id)]
-    );
-    // 只剩一个账号：直接登录，不用选
-    assert.equal((await call("login")).data.userId, String(admin.id));
-    // 解绑只解当前账号
-    openid = "o-other";
-    await call("bind", { body: { code: "c", username: "admin", password: "123456" } });
-    assert.ok((await call("unbind", { user: admin })).ok);
-    assert.equal((await call("login")).data.userId, "51");
-  } finally {
-    await db.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("迁移 047：老的绑定表（openid 做主键）换成可以一个微信绑多个账号，数据保留", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "wechat-mig-"));
-  const db = await openDatabase(
-    { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
-    process.cwd()
-  );
-  try {
-    await db.run(
-      "CREATE TABLE sys_user_wechat (openid VARCHAR(64) PRIMARY KEY, user_id VARCHAR(64) NOT NULL, appid VARCHAR(64) NOT NULL DEFAULT '', bound_at VARCHAR(32) NOT NULL, last_login_at VARCHAR(32), unionid TEXT NOT NULL DEFAULT '', nickname TEXT NOT NULL DEFAULT '', avatar TEXT)"
-    );
-    await db.run("CREATE UNIQUE INDEX uk_user_wechat_user_app ON sys_user_wechat (user_id, appid)");
-    await db.run(
-      "INSERT INTO sys_user_wechat (openid, user_id, appid, bound_at, nickname) VALUES ('o-1', '2', 'wx1', '2026-11-01', '老微信')"
-    );
-    const { up } = await import("../migrations/047_wechat_multi_account.js");
-    await up(db);
-    await up(db); // 再跑一次不出错
-    assert.equal(
-      (await db.get("SELECT nickname FROM sys_user_wechat WHERE openid='o-1'")).nickname,
-      "老微信"
-    );
-    await db.run(
-      "INSERT INTO sys_user_wechat (openid, user_id, appid, bound_at) VALUES ('o-1', '3', 'wx1', '2026-11-12')"
-    );
-    assert.equal(
-      (await db.all("SELECT user_id FROM sys_user_wechat WHERE openid='o-1'")).length,
-      2
-    );
-    await assert.rejects(
-      db.run(
-        "INSERT INTO sys_user_wechat (openid, user_id, appid, bound_at) VALUES ('o-2', '3', 'wx1', '2026-11-12')"
-      ),
-      /UNIQUE/
-    );
-  } finally {
-    await db.close();
-    await rm(dir, { recursive: true, force: true });
-  }
 });

@@ -6,13 +6,14 @@
  * - 双向：寄去、采样、封箱后寄回寄出单位，核验签收；
  * - 不填（旧单）：箱子已在采样单位，直接采样，封箱后寄回核验。
  *
- * 双向采样单寄回后的「到达核验点」：箱子 GPS 进入寄回地址范围时自动推进到待核验，寄出单位也可以手动确认。
- *
  * 送到检测站的单（建单时签收方是「采样机构」类型的单位——采样机构就是检测站，task.inspect 为真）：
  * 签收后不直接结束，先到「待检测」，检测站每台箱子扫码「开始检测」，这台箱子的本次任务就结束、
  * 开箱次数从下一张单重新算；全部开始检测后整张单变「已检测」。
  *
- * 调拨单拒收时可以选「退回寄出单位」：不结束，加一段返程——退回中 → 已退回，寄出方扫码只能「接收退回」。
+ * 调拨单：
+ * - direct 为真（现在的建单页）：不定位、不发货，建单后直接待签收，接收单位签收后箱子归过去；
+ * - 没有 direct（旧单，或仍带寄出/收货地址的调用）：待寄出 → 运送中 → 待签收。
+ * 拒收时可以选「退回寄出单位」：不结束，加一段返程——退回中 → 已退回，寄出方扫码只能「接收退回」。
  */
 export const TRIPS = ["单向", "双向"];
 
@@ -28,9 +29,11 @@ export const RETURN_STEPS = ["退回中", "已退回"];
 export function stepsOf(task) {
   const tail = task.inspect ? INSPECT_STEPS : ["已签收"];
   if (task.kind === "调拨") {
+    // 直接调拨没有寄出、运送；旧单和带地址的调用仍走发货
+    const head = task.direct ? ["待签收"] : ["待寄出", "运送中", "待签收"];
     // 拒收并退回：签收那一步之后换成返程
-    if (RETURN_STEPS.includes(task.status)) return ["待寄出", "运送中", "待签收", ...RETURN_STEPS];
-    return ["待寄出", "运送中", "待签收", ...tail];
+    if (RETURN_STEPS.includes(task.status)) return [...head, ...RETURN_STEPS];
+    return [...head, ...tail];
   }
   // 早期的通用任务只有这三步，按状态认出来
   if (["待执行", "执行中"].includes(task.status)) return ["待执行", "执行中", "已完成"];
@@ -53,7 +56,7 @@ export function initialOf(task) {
 
 /**
  * 从 status 能推进到哪些状态：流程里的下一步，加上签收那一步的拒收和任何时候的取消。
- * 拒收：调拨单在待签收时（可以选退回寄出单位）；送检测站的采样单在待核验时。
+ * 拒收：调拨单在待签收时（可以选退回寄出单位）；采样单在待核验时（拒收即样品作废，比如开箱超限）。
  */
 export function nextOf(task, status) {
   if (ENDED.includes(status)) return [];
@@ -63,7 +66,7 @@ export function nextOf(task, status) {
   const next = [steps[index + 1]];
   if (
     (task.kind === "调拨" && status === "待签收") ||
-    (task.inspect && task.kind === "采样" && status === "待核验")
+    (task.kind === "采样" && status === "待核验")
   )
     next.push("已拒收");
   if (task.kind === "调拨" && status === "待签收") next.push("退回中");

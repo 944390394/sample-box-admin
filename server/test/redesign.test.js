@@ -178,10 +178,7 @@ test("权限：默认授权、老角色升级补权限、菜单按权限裁剪",
     "sys:user:unbind-wechat",
   ])
     assert.ok(DEFAULT_ROLE_PERMS.BRANCH_ADMIN.includes(code), code);
-  assert.ok(DEFAULT_ROLE_PERMS.SAMPLER.includes("task:sign"));
-  assert.ok(DEFAULT_ROLE_PERMS.SAMPLER.includes("device:box:task"));
-  assert.ok(DEFAULT_ROLE_PERMS.SAMPLER.includes("task:create:transfer"));
-  assert.ok(DEFAULT_ROLE_PERMS.SAMPLER.includes("task:create:sample"));
+  assert.ok(!DEFAULT_ROLE_PERMS.SAMPLER.includes("task:sign"));
   // 原来靠「关联任务」签收的角色，升级后补上 task:sign，行为不变
   const added = upgradeRolePerms("DUTY", ["device:box:task", "device:box:list"]);
   assert.ok(added.includes("task:sign"));

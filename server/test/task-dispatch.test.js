@@ -11,7 +11,6 @@ import { UplinkParser } from "../src/domain/UplinkParser.js";
 import { MemoryStateCache } from "../src/cache/MemoryStateCache.js";
 import { ReportPolicy } from "../src/settings/ReportPolicy.js";
 import { ReportPolicyController } from "../src/http/ReportPolicyController.js";
-import { canSee, resolveScope } from "../src/auth/boxAccess.js";
 import { applyBoxSettings, currentBoxSettings } from "../src/settings/boxConfig.js";
 import { radiusOf } from "../src/settings/taskPlaces.js";
 import { distanceM, effectiveDeptLocation, readPlace } from "../src/geo/place.js";
@@ -617,8 +616,20 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     assert.equal(
       (await call(c.taskDetail.bind(c), { ...ctx, params: { id: limited.id } })).boxes[0]
         .opensDuring,
-      null
+      0
     );
+    // 还在待采样、没有寄出：开箱也从建单起算
+    await boxes.updateBox(box.id, (b) => {
+      b.opens = 6;
+    });
+    assert.equal(
+      (await call(c.taskDetail.bind(c), { ...ctx, params: { id: limited.id } })).boxes[0]
+        .opensDuring,
+      1
+    );
+    await boxes.updateBox(box.id, (b) => {
+      b.opens = 5;
+    });
     await call(c.transition.bind(c), {
       ...ctx,
       params: { id: limited.id },
@@ -662,297 +673,6 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     const oldDetail = await call(c.taskDetail.bind(c), { ...ctx, params: { id: old.id } });
     assert.equal(oldDetail.target, null);
     assert.equal(oldDetail.can["运送中"], true);
-  } finally {
-    await boxes.flush();
-    await db.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("仅本人的参与单位能看见寄给本单位的任务，看不到别人的箱子", async () => {
-  const depts = [
-    { id: "5", parentId: "0", name: "合作采样机构", sort: 1 },
-    { id: "51", parentId: "5", name: "采样机构甲", sort: 1 },
-    { id: "511", parentId: "51", name: "甲现场组", sort: 1 },
-    { id: "52", parentId: "5", name: "采样机构乙", sort: 2 },
-    { id: "2", parentId: "0", name: "总公司", sort: 3 },
-  ];
-  const self = await resolveScope(
-    null,
-    { id: "15", dept_id: "51" },
-    [{ code: "SAMPLER", data_scope: 4 }],
-    null,
-    depts
-  );
-  assert.deepEqual(self.orgIds, []);
-  assert.deepEqual(self.ownerIds, ["15"]);
-  assert.ok(
-    self.partyOrgIds.includes("51") &&
-      self.partyOrgIds.includes("5") &&
-      self.partyOrgIds.includes("511")
-  );
-  assert.equal(self.partyOrgIds.includes("52"), false);
-  const field = await resolveScope(
-    null,
-    { id: "16", dept_id: "511" },
-    [{ code: "SAMPLER", data_scope: 4 }],
-    null,
-    depts
-  );
-  assert.equal(field.partyOrgIds.includes("51"), true);
-  assert.equal(field.orgIds.includes("51"), false);
-  assert.equal(canSee({ scope: self }, { orgId: "51", ownerId: "9" }), false);
-
-  const dir = await mkdtemp(path.join(os.tmpdir(), "task-party-"));
-  const db = await openDatabase(
-    { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
-    process.cwd()
-  );
-  const boxes = new SqlBoxStore(db),
-    policies = new ReportPolicy(db);
-  try {
-    await migrate(db);
-    for (const [id, parent, name] of [
-      ["2", "0", "总公司"],
-      ["5", "0", "合作采样机构"],
-      ["51", "5", "采样机构甲"],
-      ["52", "5", "采样机构乙"],
-    ]) {
-      await db.run(
-        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES (?,?,?,?,1,1)",
-        [id, parent, name, id]
-      );
-    }
-    await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('15','ag.staff','采样机构员工','x','51',1)"
-    );
-    const ingest = new IngestService({
-      boxes,
-      policies,
-      cache: new MemoryStateCache(),
-      hub: { publish() {} },
-      clock: { now: () => new Date() },
-      parser: new UplinkParser(),
-    });
-    const { box } = await ingest.accept(
-      packet({ uart: "why=boot,opens=0,fw=1.0.10,seq=1", imei: "864317080990151" })
-    );
-    await boxes.updateBox(box.id, (b) => {
-      b.life = "未使用";
-      b.org = "总公司";
-      b.orgId = "2";
-      b.ownerId = "9";
-    });
-    const { box: other } = await ingest.accept(
-      packet({ uart: "why=boot,opens=0,fw=1.0.10,seq=1", imei: "864317080990152" })
-    );
-    await boxes.updateBox(other.id, (b) => {
-      b.life = "未使用";
-      b.orgId = "2";
-      b.ownerId = "9";
-    });
-    const c = new ReportPolicyController(boxes, policies);
-    const south = ctxOf(["2"]);
-    const see = (party, userId) => ({
-      user: { id: userId, nickname: "采样机构员工" },
-      access: {
-        perms: new Set(
-          upgradeCodes(["device:box:task", "task:arrive", "task:sign", "task:sample-start"])
-        ),
-        scope: { all: false, orgIds: [], ownerIds: [userId], partyOrgIds: party },
-      },
-    });
-    const mine = see(["51", "511", "5"], "15");
-    const otherAgency = see(["52", "5"], "52");
-    const unrelated = await call(c.createTask.bind(c), {
-      ...south,
-      body: {
-        name: "寄给别人",
-        kind: "调拨",
-        boxIds: [box.id],
-        fromOrgId: "2",
-        toOrgId: "52",
-        sender: "公司员工",
-        signer: "别人",
-      },
-    });
-    await call(c.transition.bind(c), {
-      ...south,
-      params: { id: unrelated.id },
-      body: { status: "已取消" },
-    });
-    const created = await call(c.createTask.bind(c), {
-      ...south,
-      body: {
-        name: "寄采样机构甲",
-        kind: "调拨",
-        boxIds: [box.id],
-        fromOrgId: "2",
-        toOrgId: "51",
-        sender: "公司员工",
-        signerId: "15",
-      },
-    });
-    assert.equal(
-      (await call(c.tasks.bind(c), { ...mine, query: { q: "寄给别人" } })).list.length,
-      0
-    );
-    assert.equal(
-      (await call(c.tasks.bind(c), { ...otherAgency, query: { q: "寄采样机构甲" } })).list.length,
-      0
-    );
-    await assert.rejects(
-      call(c.taskDetail.bind(c), { ...otherAgency, params: { id: created.id } }),
-      /不在你的管理范围/
-    );
-    await call(c.transition.bind(c), {
-      ...south,
-      params: { id: created.id },
-      body: { status: "运送中" },
-    });
-    await call(c.transition.bind(c), {
-      ...mine,
-      params: { id: created.id },
-      body: { status: "待签收" },
-    });
-    const signed = await call(c.transition.bind(c), {
-      ...mine,
-      params: { id: created.id },
-      body: { status: "已签收" },
-    });
-    assert.equal(signed.saved, true);
-    assert.equal((await boxes.findById(box.id)).ownerId, "15");
-    assert.equal(
-      (await call(c.tasks.bind(c), { ...mine, query: { q: "寄给别人" } })).list.length,
-      0
-    );
-    const idle = await call(c.createTask.bind(c), {
-      ...south,
-      body: { name: "不寄送", kind: "采样", boxIds: [other.id], orgId: "51" },
-    });
-    const row = await db.get("SELECT to_org_id FROM sample_task WHERE id=?", [idle.id]);
-    assert.equal(row.to_org_id, "51");
-    assert.deepEqual(
-      (await call(c.tasks.bind(c), { ...mine, query: { q: "不寄送" } })).list.map((t) => t.id),
-      [idle.id]
-    );
-    assert.equal(
-      (await call(c.tasks.bind(c), { ...otherAgency, query: { q: "不寄送" } })).list.length,
-      0
-    );
-  } finally {
-    await boxes.flush();
-    await db.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("保管人能从本单位为自己保管的箱子建任务单，不能从别的单位寄出", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "task-owner-create-"));
-  const db = await openDatabase(
-    { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
-    process.cwd()
-  );
-  const boxes = new SqlBoxStore(db),
-    policies = new ReportPolicy(db);
-  try {
-    await migrate(db);
-    for (const [id, parent, name] of [
-      ["2", "0", "总公司"],
-      ["51", "0", "采样机构甲"],
-    ]) {
-      await db.run(
-        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES (?,?,?,?,1,1)",
-        [id, parent, name, id]
-      );
-    }
-    await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('15','ag.staff','采样机构员工','x','51',1),('9','other','别人','x','2',1)"
-    );
-    const ingest = new IngestService({
-      boxes,
-      policies,
-      cache: new MemoryStateCache(),
-      hub: { publish() {} },
-      clock: { now: () => new Date() },
-      parser: new UplinkParser(),
-    });
-    const { box } = await ingest.accept(
-      packet({ uart: "why=boot,opens=0,fw=1.0.10,seq=1", imei: "864317080990161" })
-    );
-    await boxes.updateBox(box.id, (b) => {
-      b.life = "未使用";
-      b.org = "采样机构甲";
-      b.orgId = "51";
-      b.ownerId = "15";
-    });
-    const c = new ReportPolicyController(boxes, policies);
-    const keeper = {
-      user: { id: "15", nickname: "采样机构员工", dept_id: "51" },
-      access: {
-        perms: new Set([
-          "device:box:task",
-          "device:box:list",
-          "device:box:detail",
-          "task:create:transfer",
-          "task:create:sample",
-        ]),
-        scope: { all: false, orgIds: [], ownerIds: ["15"], partyOrgIds: ["51"] },
-      },
-    };
-    const options = await call(c.taskOptions.bind(c), { ...keeper, query: {} });
-    assert.equal(options.orgs.find((org) => org.id === "51").inScope, true);
-    assert.equal(options.orgs.find((org) => org.id === "2").inScope, false);
-    const scan = await call(c.scan.bind(c), { ...keeper, params: { id: box.id }, query: {} });
-    assert.equal(scan.canCreate, true);
-    const created = await call(c.createTask.bind(c), {
-      ...keeper,
-      body: {
-        name: "保管人调拨",
-        kind: "调拨",
-        boxIds: [box.id],
-        fromOrgId: "51",
-        toOrgId: "2",
-        senderId: "15",
-        signerId: "9",
-      },
-    });
-    assert.ok(created.id);
-    await db.run("UPDATE sys_dept SET type='采样机构' WHERE id='51'");
-    await db.run("UPDATE sys_dept SET type='公司' WHERE id='2'");
-    await db.run(
-      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES ('52','0','采样机构乙','52',1,1,'采样机构')"
-    );
-    await assert.rejects(
-      call(c.createTask.bind(c), {
-        ...keeper,
-        body: {
-          name: "寄给机构",
-          kind: "调拨",
-          boxIds: [box.id],
-          fromOrgId: "51",
-          toOrgId: "52",
-          senderId: "15",
-          signerId: "9",
-        },
-      }),
-      /采样机构只能寄给公司/
-    );
-    await assert.rejects(
-      call(c.createTask.bind(c), {
-        ...keeper,
-        body: {
-          name: "从总公司寄",
-          kind: "调拨",
-          boxIds: [box.id],
-          fromOrgId: "2",
-          toOrgId: "51",
-          senderId: "15",
-          signerId: "9",
-        },
-      }),
-      /寄出单位不在你的管理范围/
-    );
   } finally {
     await boxes.flush();
     await db.close();

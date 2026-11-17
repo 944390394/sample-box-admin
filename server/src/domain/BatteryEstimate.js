@@ -2,14 +2,16 @@
  * 单节锂电池只有电压和充电状态，没有电流。
  * 没在充电时，用静置电压曲线；充过电之后，用这几次高低电压把曲线两端对齐。
  * 充电时端电压会被内阻和极化抬高，同样的电压对应更低的电量，所以先减掉抬压再查静置曲线。
- * 这台充电器充满停在 4.16 V 附近，到不了 4.18 V。4.10 V 以上少扣抬压，顺着充满段走到 4.16 V 记满，不再等充满脚从八成跳到 100%。
+ * 电压顶到 4.2 V 时多半刚进恒压，电量还没满，充电中封顶；充电器报充满才记 100%。
  * 预留比例从总电量底部扣掉，剩余才是可用电量。
  */
 
 /** 充电端电压比静置电压大约高这么多。没有电流，取固定补偿。 */
 const CHARGE_LIFT_MV = 120;
-/** 还在大电流充电时最多记 85%。4.10 V 以上改走末段，不再用这条封顶。 */
+/** 还在充电时不允许记满：恒流阶段最多 85%；电压到恒压段（4.18 V 以上）最多 92%，最后一段等充满指示。 */
 const CHARGING_SOC_CAP = 85;
+const CV_MV = 4180;
+const CV_SOC_CAP = 92;
 /**
  * 充满之后 TP4057 会反复补电：充满脚只亮一下，充电脚又拉低，电压仍在 4.1 V 以上。
  * 电压掉到这条线以下，才算离开充满。
@@ -41,22 +43,13 @@ export function voltagePercent(mv) {
   return lookup(CURVE, mv);
 }
 
-/** 大电流充电中的电量。先去掉抬压，再封顶。4.10 V 以上不用这条，见 taperChargePercent。 */
+/** 充电中的电量。先去掉抬压，再封顶，避免 4.2 V 附近被当成已经充满。 */
 export function chargingPercent(mv) {
   const voltage = Number(mv);
-  return Math.min(voltagePercent(voltage - CHARGE_LIFT_MV), CHARGING_SOC_CAP);
-}
-
-/**
- * 充电末段。4.10 V 仍接上大电流充电的电量，到 4.16 V 记满。
- * 电流已经变小，不再固定扣 120 mV，避免充满脚亮的瞬间从八成跳到 100%。
- */
-function taperChargePercent(mv) {
-  const voltage = Number(mv);
-  if (voltage >= FULL_TOP_MV) return 100;
-  const start = chargingPercent(FULL_RELEASE_MV);
-  const ratio = (voltage - FULL_RELEASE_MV) / (FULL_TOP_MV - FULL_RELEASE_MV);
-  return start + ratio * (100 - start);
+  return Math.min(
+    voltagePercent(voltage - CHARGE_LIFT_MV),
+    voltage >= CV_MV ? CV_SOC_CAP : CHARGING_SOC_CAP
+  );
 }
 
 /**
@@ -88,10 +81,7 @@ export function advanceSeries(state, mv, charge) {
   } else {
     state.full = false;
   }
-  if (charge === 1 && !state.eased) {
-    if (voltage >= FULL_RELEASE_MV) return taperChargePercent(voltage);
-    return chargingPercent(voltage);
-  }
+  if (charge === 1 && !state.eased) return chargingPercent(voltage);
   return voltagePercent(voltage);
 }
 

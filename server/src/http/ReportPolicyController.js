@@ -39,6 +39,7 @@ import {
   openCounts,
   overOpenLimit,
   radiusOf,
+  sealOpenCounts,
   targetOf,
 } from "../settings/taskPlaces.js";
 
@@ -52,30 +53,6 @@ function inScope(ctx, orgId) {
   return !scope || scope.all || scope.orgIds.includes(String(orgId ?? ""));
 }
 
-/** 建单时的寄出单位：数据范围内的单位，或保管人所在部门的上下级。仅本人没有数据范围单位，也能从本单位把保管的箱子寄出。 */
-function canShipFrom(ctx, orgId) {
-  return inScope(ctx, orgId) || inParty(ctx, orgId);
-}
-
-/** 任务参与方：数据范围里的单位，加上所在部门及其上下级。看箱子仍只用数据范围。 */
-function inParty(ctx, orgId) {
-  const scope = ctx.access?.scope;
-  if (!scope || scope.all) return true;
-  const id = String(orgId ?? "");
-  if (!id) return false;
-  return scope.orgIds.includes(id) || (scope.partyOrgIds || []).includes(id);
-}
-
-function partyMatchIds(scope) {
-  return [
-    ...new Set(
-      [...(scope?.orgIds || []), ...(scope?.partyOrgIds || [])]
-        .map((id) => String(id))
-        .filter(Boolean)
-    ),
-  ];
-}
-
 /** 当前用户是不是调拨单指定的签收人。 */
 function isSigner(ctx, task) {
   return Boolean(task.signerId) && String(ctx.user?.id ?? "") === String(task.signerId);
@@ -83,6 +60,14 @@ function isSigner(ctx, task) {
 
 function actorOf(ctx) {
   return { id: ctx.user?.id, name: ctx.user?.nickname || ctx.user?.username || "" };
+}
+
+function isSystemAdmin(ctx) {
+  const roles = ctx.access?.roles || ctx.user?.roles || [];
+  return (
+    roles.some((role) => (typeof role === "string" ? role : role?.code) === "ADMIN") ||
+    Boolean(ctx.access?.scope?.all)
+  );
 }
 
 /** 所有策略写入都再次校验目标设备范围；批量操作不接受客户端声称的权限。 */
@@ -256,9 +241,8 @@ export class ReportPolicyController {
           to = deptOf(input.toOrgId);
         if (!from || !to) throw new Error("请选择寄出和接收单位");
         if (String(from.id) === String(to.id)) throw new Error("寄出和接收单位不能相同");
-        if (!canShipFrom(ctx, from.id)) throw new Error("寄出单位不在你的管理范围内");
-        if (from.type === "采样机构" && to.type === "采样机构")
-          throw new Error("采样机构只能寄给公司");
+        if (!inScope(ctx, from.id) && !isSystemAdmin(ctx))
+          throw new Error("寄出单位不在你的管理范围内");
         Object.assign(metadata, {
           fromOrgId: String(from.id),
           fromOrg: from.name,
@@ -268,6 +252,14 @@ export class ReportPolicyController {
       }
       metadata.fromPlace = readPlace(input.fromPlace);
       metadata.toPlace = readPlace(input.toPlace);
+      // 直接调拨：不定位、不发货，建单后待签收。地址和寄出人、签收人不写入
+      if (input.direct === true) {
+        metadata.direct = true;
+        metadata.fromPlace = null;
+        metadata.toPlace = null;
+        metadata.sender = "";
+        metadata.signer = "";
+      }
       for (const [idKey, nameKey] of [
         ["senderId", "sender"],
         ["signerId", "signer"],
@@ -277,6 +269,7 @@ export class ReportPolicyController {
           String(input[idKey]),
         ]);
         if (!user) throw new Error("寄出人或签收人不存在或已停用");
+        if (metadata.direct) continue;
         metadata[idKey] = String(user.id);
         metadata[nameKey] = user.nickname;
       }
@@ -288,9 +281,7 @@ export class ReportPolicyController {
           org = deptOf(input.orgId);
         if (!from || !org) throw new Error("寄送采样箱要选择寄出单位和采样单位");
         if (String(from.id) === String(org.id)) throw new Error("寄出单位和采样单位不能相同");
-        if (!canShipFrom(ctx, from.id)) throw new Error("寄出单位不在你的管理范围内");
-        if (from.type === "采样机构" && org.type === "采样机构")
-          throw new Error("采样机构只能寄给公司");
+        if (!inScope(ctx, from.id)) throw new Error("寄出单位不在你的管理范围内");
         Object.assign(metadata, {
           trip: input.trip,
           fromOrgId: String(from.id),
@@ -334,6 +325,7 @@ export class ReportPolicyController {
     if (receiver?.type === "采样机构") metadata.inspect = true;
     metadata.createdBy = actorOf(ctx).name;
     // 任务期间每台箱子最多开几次箱，不填不限
+    // 没填就是不限。填了就按这张单上的次数判断，采样和调拨一样。
     if (input.maxOpens != null && input.maxOpens !== "") {
       const max = Number(input.maxOpens);
       if (!Number.isInteger(max) || max < 0 || max > 999)
@@ -342,13 +334,24 @@ export class ReportPolicyController {
     }
     if (
       input.kind === "调拨" &&
-      (!metadata.fromOrg ||
-        !metadata.toOrg ||
-        !metadata.sender ||
-        !metadata.signer ||
-        metadata.fromOrg === metadata.toOrg)
+      (!metadata.fromOrg || !metadata.toOrg || metadata.fromOrg === metadata.toOrg)
     )
+      throw new Error(
+        metadata.direct
+          ? "请选择不同的调出单位和调入单位"
+          : "请填写不同的寄出、接收公司及寄出人、签收人"
+      );
+    if (input.kind === "调拨" && !metadata.direct && (!metadata.sender || !metadata.signer))
       throw new Error("请填写不同的寄出、接收公司及寄出人、签收人");
+    if (metadata.direct && (!metadata.fromOrgId || !metadata.toOrgId))
+      throw new Error("请选择调出单位和调入单位");
+    // 一张直接调拨单只含同一个单位的箱子，多个单位由页面拆成多张
+    if (metadata.direct && !isSystemAdmin(ctx)) {
+      const foreign = boxes.filter(
+        (box) => String(box.org_id ?? "") !== String(metadata.fromOrgId)
+      );
+      if (foreign.length) throw new Error("直接调拨的箱子必须都属于调出单位，请按单位分开建单");
+    }
     const id = await this.policies.createTask(
       {
         ...metadata,
@@ -368,30 +371,22 @@ export class ReportPolicyController {
   }
 
   /**
-   * 能看到的任务：建单时箱子的单位或保管人在自己范围内（绑箱快照，不用箱子现在的归属），
-   * 或者自己是寄出、接收单位，或者自己是指定的寄出人、签收人。
-   * 箱子后来归了自己，不把这台箱子以前寄给别人的单也打开。
+   * 能看到的任务：绑定的箱子都在自己范围内（按历史快照），
+   * 或者自己是调拨单的寄出、接收单位——接收方看不到寄出方的箱子，也要能签收。
    */
   #visible(ctx) {
     const scope = scopeSql(ctx.access.scope);
     if (!scope) return { sql: "", params: [] };
     const historicalScope = scope.sql
-      .replace(/\borg_id\b/g, "COALESCE(m.org_id,'')")
-      .replace(/\bowner_id\b/g, "COALESCE(m.owner_id,'')");
-    const orgIds = partyMatchIds(ctx.access.scope);
+      .replace(/\borg_id\b/g, "COALESCE(b.org_id,m.org_id,'')")
+      .replace(/\bowner_id\b/g, "COALESCE(b.owner_id,m.owner_id,'')");
+    const orgIds = ctx.access.scope.orgIds;
     const own = orgIds.length
       ? ` OR t.from_org_id IN (${orgIds.map(() => "?").join(",")}) OR t.to_org_id IN (${orgIds.map(() => "?").join(",")})`
       : "";
-    const userId = String(ctx.user?.id || "");
-    const named = /^[0-9A-Za-z_-]{1,64}$/.test(userId) ? ` OR t.body LIKE ? OR t.body LIKE ?` : "";
     return {
-      sql: `(NOT EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND NOT (${historicalScope}))${own}${named})`,
-      params: [
-        ...scope.params,
-        ...orgIds,
-        ...orgIds,
-        ...(named ? [`%"signerId":"${userId}"%`, `%"senderId":"${userId}"%`] : []),
-      ],
+      sql: `(NOT EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND NOT (${historicalScope}))${own})`,
+      params: [...scope.params, ...orgIds, ...orgIds],
     };
   }
 
@@ -461,10 +456,11 @@ export class ReportPolicyController {
       `SELECT t.status, COUNT(*) AS n FROM sample_task t ${base} GROUP BY t.status`,
       params
     );
-    const counts = { 全部: 0, 进行中: 0, 已结束: 0 };
+    const counts = { 全部: 0, 进行中: 0, 已结束: 0, 签收: 0 };
     for (const row of grouped) {
       const n = Number(row.n);
       counts[row.status] = n;
+      if (SIGN_STEPS.includes(row.status)) counts.签收 += n;
       counts.全部 += n;
       counts[ENDED.includes(row.status) ? "已结束" : "进行中"] += n;
     }
@@ -473,8 +469,9 @@ export class ReportPolicyController {
       `SELECT t.* FROM sample_task t ${base ? `${base} AND` : "WHERE"} t.status NOT IN (${ENDED_SQL}) ORDER BY created_at DESC LIMIT 500`,
       params
     );
+    // 只能取消的不算「待我处理」：和工作台、顶栏铃铛用同一个口径
     const mineRows = activeRows.filter((row) =>
-      Object.values(this.#abilities(ctx, JSON.parse(row.body), row.status)).some(Boolean)
+      actionable(this.#abilities(ctx, JSON.parse(row.body), row.status))
     );
     counts.mine = mineRows.length;
 
@@ -482,6 +479,9 @@ export class ReportPolicyController {
       statusParams = [...params];
     if (ctx.query.status === "进行中") statusClauses.push(`t.status NOT IN (${ENDED_SQL})`);
     else if (ctx.query.status === "已结束") statusClauses.push(`t.status IN (${ENDED_SQL})`);
+    // 「签收」：调拨的待签收和采样的待核验都是签收核验那一步，列在一起
+    else if (ctx.query.status === "签收")
+      statusClauses.push(`t.status IN (${SIGN_STEPS.map((s) => `'${s}'`).join(",")})`);
     else if (
       typeof ctx.query.status === "string" &&
       ctx.query.status &&
@@ -557,7 +557,7 @@ export class ReportPolicyController {
         name: row.name,
         type: row.type || "公司",
         path: pathOf(row.id),
-        inScope: canShipFrom(ctx, row.id),
+        inScope: inScope(ctx, row.id),
         location: effectiveDeptLocation(rows, row.id),
         leader: row.leader_name ? { id: String(row.leader_user_id), name: row.leader_name } : null,
       }))
@@ -608,6 +608,9 @@ export class ReportPolicyController {
     const target = targetOf(task, row.status);
     const withPosition = ctx.access.perms.has(BOX.location);
     const counts = await openCounts(this.db, row.id);
+    // 开箱超限的箱子样品作废：强制签收后也不能开始检测
+    const voided = new Set(overOpenLimit(task, counts));
+    const afterSeal = await sealOpenCounts(this.db, row.id);
     const perms0 = ctx.access.perms;
     // 工况按字段给：电量、充电、箱盖、信号各要各的权限；一项都没有时 status 为空
     const statusOf = (state) => {
@@ -647,6 +650,8 @@ export class ReportPolicyController {
       boxes.push({
         ...box,
         opensDuring: counts.get(box.id) ?? null,
+        opensAfterSeal: afterSeal.get(box.id) ?? null,
+        voided: voided.has(box.id),
         owner: state?.owner || "",
         inspectedAt: inspected.get(box.id)?.inspected_at || "",
         inspectedBy: inspected.get(box.id)?.inspected_by || "",
@@ -720,11 +725,11 @@ export class ReportPolicyController {
     const view = has(BOX.task);
     const transfer = task.kind === "调拨" && task.toOrgId;
     // 参与方：寄出单位、收货单位（调拨）、指定签收人、采样单位、寄回的寄出单位（带寄送的采样单）
-    const sender = transfer ? inParty(ctx, task.fromOrgId) : true;
-    const receiver = transfer ? inParty(ctx, task.toOrgId) : false;
+    const sender = transfer ? inScope(ctx, task.fromOrgId) : true;
+    const receiver = transfer ? inScope(ctx, task.toOrgId) : false;
     const signer = transfer && isSigner(ctx, task);
-    const sampler = task.orgId ? inParty(ctx, task.orgId) : true;
-    const home = task.kind === "采样" && task.trip ? inParty(ctx, task.fromOrgId) : true;
+    const sampler = task.orgId ? inScope(ctx, task.orgId) : true;
+    const home = task.kind === "采样" && task.trip ? inScope(ctx, task.fromOrgId) : true;
     const may = (perm, party) => Boolean(view && has(perm) && party);
     const next = nextOf(task, status);
     const signTo = signTargetOf(task);
@@ -836,7 +841,9 @@ export class ReportPolicyController {
       `SELECT t.* FROM sample_task t WHERE t.status NOT IN (${ENDED_SQL})${visible.sql ? ` AND ${visible.sql}` : ""} ORDER BY created_at DESC LIMIT 500`,
       visible.params
     );
+    // todo：我现在能推进的任务（去重），工作台标题、顶栏铃铛、任务单「待我处理」都用这个数
     const groups = {
+      todo: [],
       send: [],
       arrive: [],
       sign: [],
@@ -862,6 +869,7 @@ export class ReportPolicyController {
         to: task.kind === "调拨" ? task.toOrg || "" : task.org || "",
         boxes: (task.boxIds || []).length,
       };
+      if (actionable(can)) groups.todo.push(brief);
       if (can["运送中"]) groups.send.push(brief);
       if (can["待签收"] || (row.status === "运送中" && can["待采样"])) groups.arrive.push(brief);
       if (can["已签收"] || can["待检测"] || can[FORCE_SIGN]) groups.sign.push(brief);
@@ -1165,13 +1173,19 @@ export class ReportPolicyController {
     if (status === "退回中" && !note.trim()) throw new Error("请填写拒收原因");
     // 接收方看不到寄出方的箱子，签收、到达不再按箱子范围拦
     // 带寄送的采样单同理：采样单位、寄出单位按任务上的单位放行
-    const sampleParty =
+    const party =
       task.kind === "采样" &&
-      (inParty(ctx, task.orgId) || (task.trip && inParty(ctx, task.fromOrgId)));
-    const transferParty =
-      transfer &&
-      (inParty(ctx, task.toOrgId) || inParty(ctx, task.fromOrgId) || isSigner(ctx, task));
-    if (!sampleParty && !transferParty) await this.targets(ctx, ids);
+      task.trip &&
+      (inScope(ctx, task.orgId) || inScope(ctx, task.fromOrgId));
+    if (
+      !party &&
+      !(
+        transfer &&
+        ["待签收", "已签收", "已拒收", "待检测", "已检测", "退回中", "已退回"].includes(status) &&
+        (inScope(ctx, task.toOrgId) || inScope(ctx, task.fromOrgId) || isSigner(ctx, task))
+      )
+    )
+      await this.targets(ctx, ids);
     // 寄出、寄回这两步记的是出发地的距离；拒收并退回记离收货地址多远，接收退回记离寄出地址多远
     const at =
       { 运送中: "待寄出", 在途: "已封箱", 退回中: "待签收", 已退回: "退回中" }[status] || status;
@@ -1247,6 +1261,14 @@ export class ReportPolicyController {
       ip: ctx.ip || "",
     });
   }
+}
+
+/** 签收核验那一步：调拨叫「待签收」，采样寄回叫「待核验」。任务单列表的「待签收」标签两种都列。 */
+const SIGN_STEPS = ["待签收", "待核验"];
+
+/** 有取消以外的动作可做：算「待我处理」。只能取消的（比如管理员看别人的单）不算。 */
+function actionable(can) {
+  return Object.entries(can).some(([to, ok]) => ok && to !== "已取消");
 }
 
 /** 任务要记进出的地点：调拨看寄出、收货地址，采样看计划地点（双向再加寄出地址）。没坐标的跳过。 */

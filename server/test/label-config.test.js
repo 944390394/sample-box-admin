@@ -23,7 +23,8 @@ test("只存改过的名称，空值和默认值回到默认", () => {
   assert.deepEqual(next.labels, { life: { 未使用: "空闲" }, kind: { timer: "心跳" } });
   const labels = publicLabels(next);
   assert.equal(labels.life.未使用, "空闲");
-  assert.equal(labels.life.在途, "在途");
+  // 空值回到默认名称：箱子被任务占用默认叫「任务中」
+  assert.equal(labels.life.在途, "任务中");
   assert.equal(labels.kind.timer, "心跳");
   assert.equal("nope" in labels, false);
 });

@@ -1,5 +1,5 @@
 import { BOX } from "../auth/boxAccess.js";
-import { boxDistances, openCounts, radiusOf, targetOf } from "./taskPlaces.js";
+import { boxDistances, openCounts, radiusOf, sealOpenCounts, targetOf } from "./taskPlaces.js";
 
 /**
  * 签收核验：收货方扫码签收前，看每台箱子的状态、本次开了几次箱、在不在收货点附近。
@@ -17,6 +17,7 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
   const at = task.kind === "调拨" ? (status === "退回中" ? "退回中" : "待签收") : status;
   const target = targetOf(task, at);
   const counts = await openCounts(db, taskId);
+  const afterSeal = await sealOpenCounts(db, taskId);
   const places = await boxDistances(db, ids, target, { withPosition: true });
   const list = [];
   const problems = [];
@@ -25,16 +26,19 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
   const seePlace = can(BOX.location);
   const seePower = can(BOX.power);
   const seeCharge = can(BOX.charging);
+  const limit = Number.isInteger(task.maxOpens) ? task.maxOpens : null;
   for (const place of places) {
     const state = place.missing ? null : (await boxes.findById(place.id))?.toJSON();
     const opens = counts.get(place.id) ?? null;
-    const over = Number.isInteger(task.maxOpens) && opens != null && opens > task.maxOpens;
+    const over = Number.isInteger(limit) && opens != null && opens > limit;
     const lid = state?.lid ?? null;
     const alert = state?.alert || "";
     const name = place.name || place.id;
     const issues = [];
-    if (over)
-      issues.push(seeOpens ? `开箱 ${opens} 次，超过上限 ${task.maxOpens} 次` : "开箱次数超过上限");
+    if (over) issues.push(seeOpens ? `开箱 ${opens} 次，超过上限 ${limit} 次` : "开箱次数超过上限");
+    // 封箱后不该再开箱：开过就算异常，不管有没有设上限
+    const sealed = afterSeal.get(place.id) ?? null;
+    if (sealed) issues.push(seeOpens ? `封箱后又开箱 ${sealed} 次` : "封箱后又开过箱");
     if (place.near === false)
       issues.push(
         seePlace
@@ -49,6 +53,7 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
       name,
       missing: place.missing,
       opensDuring: seeOpens ? opens : null,
+      opensAfterSeal: seeOpens ? sealed : null,
       over,
       near: place.near,
       distanceM: seePlace ? place.distanceM : null,
@@ -72,7 +77,7 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
         }
       : null,
     radiusM: radiusOf(target),
-    maxOpens: Number.isInteger(task.maxOpens) ? task.maxOpens : null,
+    maxOpens: Number.isInteger(limit) ? limit : null,
     boxes: list,
     problems,
   };

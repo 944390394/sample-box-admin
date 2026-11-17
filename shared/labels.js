@@ -12,7 +12,8 @@ export const LABEL_GROUPS = [
     items: [
       { key: "待激活", label: "待激活" },
       { key: "未使用", label: "未使用" },
-      { key: "在途", label: "在途" },
+      // 箱子被任务占用（含已到检测站、等着开始检测）。不叫「在途」，免得和采样单寄回那一步「在途」混在一起
+      { key: "在途", label: "任务中" },
       { key: "停用", label: "停用" },
     ],
   },

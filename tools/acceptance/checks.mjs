@@ -336,30 +336,33 @@ export const CHECKS = [
     },
   },
   {
-    name: "检测站开始检测：任务详情逐台点「开始检测」，箱子回到在仓库；最后一台检测完任务变「已检测」",
+    name: "检测站开始检测：合格箱逐台「开始检测」回在仓库；超限箱样品作废不检测；合格箱检测完整单变「已检测」",
     role: "admin",
     async run({ open, expect, page, shot, tasks, api }) {
       await open(`/task/detail/${tasks.inspect}`);
+      // 生产规则：开箱超限的箱子样品作废，强制签收后也不能开始检测；只有合格箱有按钮
       const buttons = page.getByRole("button", { name: "开始检测", exact: true });
-      expect((await buttons.count()) === 2, `两台箱子都有「开始检测」（${await buttons.count()} 个）`);
-      await shot("待检测的送检单");
+      expect((await buttons.count()) === 1, `只有合格箱有「开始检测」（${await buttons.count()} 个）`);
+      const bodyText = (await page.locator(".page-container").innerText().catch(() => "")).replace(/\s+/g, " ");
+      expect(bodyText.includes("样品作废"), `超限箱标「样品作废」（${bodyText.slice(0, 80)}）`);
+      await shot("待检测的送检单：超限箱作废");
       await buttons.first().click();
       await page.locator(".el-message-box").getByRole("button", { name: "开始检测", exact: true }).click();
       await page.waitForTimeout(2000);
-      expect((await page.getByRole("button", { name: "开始检测", exact: true }).count()) === 1, "开始检测一台后只剩一台的按钮");
       const detail = await api.get(`/api/v1/sample/tasks/${tasks.inspect}`);
       const done = detail.boxes.find((b) => b.inspectedAt);
       const mine = done ? await api.get(`/api/v1/sample/boxes/${done.id}`) : null;
       expect(mine?.life === "未使用", `开始检测的那台回到「未使用」（在仓库）（${mine?.life}）`);
-      await page.getByRole("button", { name: "开始检测", exact: true }).first().click();
-      await page.locator(".el-message-box").getByRole("button", { name: "开始检测", exact: true }).click();
-      await page.waitForTimeout(2000);
+      // 唯一合格箱检测完，整单即结束（作废箱不检测、一起释放）
       const after = await api.get(`/api/v1/sample/tasks/${tasks.inspect}`);
-      expect(after.task.status === "已检测", `两台都开始检测后任务变「已检测」（${after.task.status}）`);
+      expect(after.task.status === "已检测", `合格箱检测完后任务变「已检测」（${after.task.status}）`);
+      const voidedBox = after.boxes.find((b) => b.voided);
+      const voidedLife = voidedBox ? await api.get(`/api/v1/sample/boxes/${voidedBox.id}`) : null;
+      expect(voidedLife?.life === "未使用", `作废箱整单结束时一起回到「未使用」（${voidedLife?.life}）`);
       await shot("检测完成的送检单");
       await open(`/monitor/overview/${STATION.id}`);
       const tiles = (await page.locator('[data-test="station-tiles"]').innerText().catch(() => "")).replace(/\s+/g, " ");
-      expect(/今天已开箱检测 2/.test(tiles) && /未开箱检测 0/.test(tiles), `检测站总览：今天已检测 2、待检测 0（${tiles}）`);
+      expect(/今天已开箱检测 1/.test(tiles) && /未开箱检测 0/.test(tiles), `检测站总览：今天已检测 1、待检测 0（${tiles}）`);
     },
   },
   {

@@ -49,9 +49,9 @@ export async function reverseAddress(tk, lng, lat, fetchImpl = fetch, sk = "") {
   } catch (error) {
     // 不把包含凭证URL的底层fetch异常带进日志。
     if (error instanceof Error && error.message.startsWith("天地图")) throw error;
+    // eslint-disable-next-line preserve-caught-error -- 故意不带 cause：底层错误里有带密钥的地址
     throw new Error(
-      controller.signal.aborted ? "天地图地址服务响应超时" : "天地图地址服务连接失败",
-      { cause: error }
+      controller.signal.aborted ? "天地图地址服务响应超时" : "天地图地址服务连接失败"
     );
   } finally {
     clearTimeout(timer);

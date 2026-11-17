@@ -206,7 +206,7 @@ export const TASK_PERMS = [
     9410,
     "task:create:transfer",
     "新建调拨任务",
-    "把采样箱从一个单位送到另一个单位",
+    "把采样箱调到另一个单位，签收后归属变更",
     "task",
     "do",
     TASK_ENTER
@@ -1087,18 +1087,7 @@ const LEGACY_DEFAULTS = {
     "task:video",
     "sys:user:view",
   ],
-  SAMPLER: [
-    ...OLD(["list", "detail", "status", "location", "track", "task"]),
-    "task:arrive",
-    "task:sample-start",
-    "task:seal",
-    "task:send-back",
-    "task:reject",
-    "task:force-sign",
-    "task:create:transfer",
-    "task:create:sample",
-    "task:send",
-  ],
+  SAMPLER: [...OLD(["list", "detail", "status", "location", "track"])],
   HOME_SWITCH: [],
 };
 
@@ -1109,16 +1098,10 @@ export const DEFAULT_ROLE_PERMS = {
     Object.entries(LEGACY_DEFAULTS).map(([code, list]) => [code, upgradeCodes(list)])
   ),
 };
-// task:sign 是拆分前的老码，放进 LEGACY 会被拆成检测、退回等。现场采样员只要签收本身。
-if (!DEFAULT_ROLE_PERMS.SAMPLER.includes("task:sign")) DEFAULT_ROLE_PERMS.SAMPLER.push("task:sign");
 
 /** 角色页「常用模板」：一键套用后再改。 */
 export const ROLE_TEMPLATES = [
-  {
-    key: "SAMPLER",
-    label: "现场采样员",
-    hint: "看自己保管的箱子，能为这些箱子建任务单，并处理寄到本单位的任务",
-  },
+  { key: "SAMPLER", label: "现场采样员", hint: "看自己保管的箱子：电量、箱盖、位置、轨迹" },
   { key: "DISPATCH", label: "调度员", hint: "建调拨和采样任务、推进流转、分配箱子" },
   { key: "VERIFY", label: "核验员", hint: "签收核验、看开关箱记录和任务期间上报" },
   { key: "DUTY", label: "值班员", hint: "盯告警、离线、低电量，看任务期间上报" },

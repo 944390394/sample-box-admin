@@ -80,7 +80,13 @@ test("流程：送检测站的单签收后待检测、全部开始检测后已�
     "已拒收",
     "已取消",
   ]);
-  assert.deepEqual(nextOf({ kind: "采样", trip: "双向" }, "待核验"), ["已签收", "已取消"]);
+  assert.deepEqual(nextOf({ kind: "采样", trip: "双向" }, "待核验"), [
+    "已签收",
+    "已拒收",
+    "已取消",
+  ]);
+  // 旧采样单（箱子本来就在采样单位）寄回核验时同样可以拒收作废
+  assert.deepEqual(nextOf({ kind: "采样" }, "待核验"), ["已签收", "已拒收", "已取消"]);
 });
 
 test("检测站：扫码签收后逐台开始检测，开箱次数定在签收那刻、箱子随即可用；总览按单位统计在途、待检测、已检测", async () => {
@@ -347,6 +353,133 @@ test("检测站整张单一起开始检测、拒收照旧结束", async () => {
       });
     assert.equal((await boxes.findById(box.id)).life, "未使用");
     assert.equal((await boxes.findById(box.id)).orgId, "2");
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("开箱超限作废：强制签收后超限的箱子不能开始检测，其余检测完整张单结束、作废的箱子一起回到未使用", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "station-void-"));
+  const db = await openDatabase(
+    { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
+    process.cwd()
+  );
+  const boxes = new SqlBoxStore(db),
+    policies = new ReportPolicy(db);
+  try {
+    await migrate(db);
+    for (const [id, parent, name, type] of [
+      ["2", "0", "华南分公司", "公司"],
+      ["6", "0", "检测站", "采样机构"],
+    ]) {
+      await db.run(
+        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
+        [id, parent, name, `C${id}`, type]
+      );
+    }
+    const ingest = new IngestService({
+      boxes,
+      policies,
+      cache: new MemoryStateCache(),
+      hub: { publish() {} },
+      clock: { now: () => new Date() },
+      parser: new UplinkParser(),
+    });
+    const imeiB = "864317080992518";
+    const { box: a } = await ingest.accept(packet({ uart: "why=boot,opens=0,fw=1.0.16,seq=1" }));
+    const { box: b } = await ingest.accept(
+      packet({ imei: imeiB, uart: "why=boot,opens=0,fw=1.0.16,seq=1" })
+    );
+    for (const id of [a.id, b.id])
+      await boxes.updateBox(id, (x) => {
+        x.life = "未使用";
+        x.org = "华南分公司";
+        x.orgId = "2";
+      });
+    const c = new ReportPolicyController(boxes, policies);
+    const admin = ctxOf(null);
+    const { id } = await call(c.createTask.bind(c), {
+      ...admin,
+      body: {
+        name: "超限",
+        kind: "调拨",
+        boxIds: [a.id, b.id],
+        fromOrgId: "2",
+        toOrgId: "6",
+        sender: "寄件人",
+        signer: "检测站",
+        maxOpens: 2,
+      },
+    });
+    for (const status of ["运送中", "待签收"])
+      await call(c.transition.bind(c), { ...admin, params: { id }, body: { status } });
+    // B 途中开了 3 次，超过上限
+    await ingest.accept(packet({ imei: imeiB, uart: "why=pad,opens=3,seq=2" }));
+    await assert.rejects(
+      call(c.transition.bind(c), { ...admin, params: { id }, body: { status: "待检测" } }),
+      /强制签收/
+    );
+    await call(c.transition.bind(c), {
+      ...admin,
+      params: { id },
+      body: { status: "强制签收", note: "现场确认" },
+    });
+    let detail = await call(c.taskDetail.bind(c), { ...admin, params: { id } });
+    assert.equal(detail.boxes.find((x) => x.id === b.id).voided, true);
+    assert.equal(detail.boxes.find((x) => x.id === a.id).voided, false);
+    await assert.rejects(
+      call(c.inspect.bind(c), { ...admin, params: { id, boxId: b.id } }),
+      /作废/
+    );
+    const done = await call(c.inspect.bind(c), { ...admin, params: { id, boxId: a.id } });
+    assert.deepEqual(done, { done: true, left: 0 });
+    detail = await call(c.taskDetail.bind(c), { ...admin, params: { id } });
+    assert.equal(detail.task.status, "已检测");
+    assert.equal(detail.boxes.find((x) => x.id === b.id).inspectedAt, "");
+    assert.match(detail.logs.at(-1).note, /1 台开箱超限作废/);
+    for (const box of [a, b]) assert.equal((await boxes.findById(box.id)).life, "未使用");
+    assert.equal(
+      await db.get("SELECT task_id FROM box_active_task WHERE box_id=?", [b.id]),
+      undefined
+    );
+
+    // 整张单一起开始检测：同样跳过作废的箱子
+    for (const box of [a, b])
+      await boxes.updateBox(box.id, (x) => {
+        x.org = "华南分公司";
+        x.orgId = "2";
+      });
+    const whole = await call(c.createTask.bind(c), {
+      ...admin,
+      body: {
+        name: "整单超限",
+        kind: "调拨",
+        boxIds: [a.id, b.id],
+        fromOrgId: "2",
+        toOrgId: "6",
+        sender: "寄件人",
+        signer: "检测站",
+        maxOpens: 0,
+      },
+    });
+    for (const status of ["运送中", "待签收"])
+      await call(c.transition.bind(c), { ...admin, params: { id: whole.id }, body: { status } });
+    await ingest.accept(packet({ imei: imeiB, uart: "why=pad,opens=4,seq=3" }));
+    await call(c.transition.bind(c), {
+      ...admin,
+      params: { id: whole.id },
+      body: { status: "强制签收", note: "现场确认" },
+    });
+    await call(c.transition.bind(c), {
+      ...admin,
+      params: { id: whole.id },
+      body: { status: "已检测" },
+    });
+    detail = await call(c.taskDetail.bind(c), { ...admin, params: { id: whole.id } });
+    assert.ok(detail.boxes.find((x) => x.id === a.id).inspectedAt);
+    assert.equal(detail.boxes.find((x) => x.id === b.id).inspectedAt, "");
+    for (const box of [a, b]) assert.equal((await boxes.findById(box.id)).life, "未使用");
   } finally {
     await db.close();
     await rm(dir, { recursive: true, force: true });

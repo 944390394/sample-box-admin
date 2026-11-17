@@ -235,13 +235,6 @@ const routes = [
     auth: false,
     handler: (ctx) => (state.installed ? wechatAuth.login(ctx) : ctx.fail("请先完成数据库安装")),
   },
-  // 这个微信绑的全部账号：小程序「切换账号」用，要 wx.login 的 code，不发令牌
-  {
-    method: "POST",
-    path: "/api/v1/auth/wechat/accounts",
-    auth: false,
-    handler: (ctx) => (state.installed ? wechatAuth.accounts(ctx) : ctx.fail("请先完成数据库安装")),
-  },
   {
     method: "POST",
     path: "/api/v1/auth/wechat/bind",
@@ -803,6 +796,12 @@ const routes = [
     path: "/api/v1/sample/boxes",
     auth: true,
     handler: (ctx) => useSample(ctx, (api) => api.list(ctx)),
+  },
+  {
+    method: "POST",
+    path: "/api/v1/sample/boxes/lookup",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.lookup(ctx)),
   },
   {
     method: "GET",

@@ -200,200 +200,55 @@ test("寄送采样单：寄出单位寄出，采样单位确认到达和采样�
     );
     // 采样单不改箱子归属
     assert.equal((await boxes.findById(box.id)).orgId, "2");
-  } finally {
-    await boxes.flush();
-    await db.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
 
-test("到达核验点：箱子 GPS 进入寄回范围自动推进，范围外、基站和补传不推进，人仍可手动确认", async () => {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000 } });
-  const dir = await mkdtemp(path.join(os.tmpdir(), "task-arrive-"));
-  const db = await openDatabase(
-    { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
-    process.cwd()
-  );
-  await migrate(db);
-  const boxes = new SqlBoxStore(db),
-    policies = new ReportPolicy(db);
-  try {
-    for (const [id, name] of [
-      ["2", "总仓"],
-      ["5", "检测机构甲"],
+    // 封箱后又开箱：签收核验列为异常，不能直接签收；可以拒收（样品作废）
+    const three = (await call(c.createTask.bind(c), { ...admin, body: { ...base, trip: "双向" } }))
+      .id;
+    for (const [who, status] of [
+      [admin, "运送中"],
+      [sampler, "待采样"],
+      [sampler, "采样中"],
     ]) {
-      await db.run(
-        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,'公司')",
-        [id, "0", name, `C${id}`]
-      );
+      await call(c.transition.bind(c), { ...who, params: { id: three }, body: { status } });
     }
-    const ingest = new IngestService({
-      boxes,
-      policies,
-      cache: new MemoryStateCache(),
-      hub: { publish() {} },
-      clock: { now: () => new Date() },
-      parser: new UplinkParser(),
+    await ingest.accept(
+      packet({ uart: "why=pad,opens=1,seq=2", gpsfix: 1, lng: 114.3, lat: 22.8 })
+    );
+    await call(c.transition.bind(c), {
+      ...sampler,
+      params: { id: three },
+      body: { status: "已封箱" },
     });
-    const { box } = await ingest.accept(
-      packet({ uart: "why=boot,opens=0,seq=1", gpsfix: 1, lng: 114.3, lat: 22.8 })
+    detail = await call(c.taskDetail.bind(c), { ...admin, params: { id: three } });
+    assert.equal(detail.boxes[0].opensDuring, 1);
+    assert.equal(detail.boxes[0].opensAfterSeal, 0);
+    await ingest.accept(
+      packet({ uart: "why=pad,opens=2,seq=3", gpsfix: 1, lng: 114.3, lat: 22.8 })
     );
-    await boxes.updateBox(box.id, (b) => {
-      b.life = "未使用";
-      b.orgId = "2";
-      b.org = "总仓";
+    for (const [who, status] of [
+      [sampler, "在途"],
+      [admin, "待核验"],
+    ]) {
+      await call(c.transition.bind(c), { ...who, params: { id: three }, body: { status } });
+    }
+    detail = await call(c.taskDetail.bind(c), { ...admin, params: { id: three } });
+    assert.equal(detail.boxes[0].opensAfterSeal, 1);
+    // 这里的管理员没有「查看开箱次数」，只说开过、不给次数
+    assert.match(detail.check.problems.map((p) => p.text).join("；"), /封箱后又开过箱/);
+    await assert.rejects(
+      call(c.transition.bind(c), { ...admin, params: { id: three }, body: { status: "已签收" } }),
+      /封箱后又开过箱/
+    );
+    await call(c.transition.bind(c), {
+      ...admin,
+      params: { id: three },
+      body: { status: "已拒收", note: "封箱后被打开，样品作废" },
     });
-    const c = new ReportPolicyController(boxes, policies);
-    const admin = {
-      user: { id: "1", nickname: "管理员" },
-      access: {
-        roles: ["ADMIN"],
-        perms: new Set(
-          upgradeCodes(["device:box:task", "device:box:policyTask", "task:sign", "task:cancel"])
-        ),
-        scope: { all: true, orgIds: [], ownerIds: [] },
-      },
-    };
-    const home = { address: "总仓", lng: 114.1, lat: 22.6 };
-    const site = { address: "机构甲", lng: 114.3, lat: 22.8 };
-    const sendHome = async (id) => {
-      for (const status of ["运送中", "待采样", "采样中", "已封箱", "在途"]) {
-        await call(c.transition.bind(c), { ...admin, params: { id }, body: { status } });
-      }
-    };
-    const make = (boxIds, name) =>
-      call(c.createTask.bind(c), {
-        ...admin,
-        body: {
-          name,
-          kind: "采样",
-          trip: "双向",
-          boxIds,
-          orgId: "5",
-          fromOrgId: "2",
-          sender: "张三",
-          placeAt: site,
-          fromPlace: home,
-        },
-      });
-
-    const stamp = (date) => {
-      const p = (n) => String(n).padStart(2, "0");
-      return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
-    };
-    const now = new Date();
-    const id = (await make([box.id], "自动到达")).id;
-    await sendHome(id);
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=2",
-        gpsfix: 1,
-        lng: 114.3,
-        lat: 22.8,
-        time: stamp(now),
-        imei: box.imei,
-      })
-    );
-    assert.equal((await db.get("SELECT status FROM sample_task WHERE id=?", [id])).status, "在途");
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=3,bf=1",
-        gpsfix: 1,
-        lng: 114.1,
-        lat: 22.6,
-        time: stamp(now),
-        imei: box.imei,
-      })
-    );
-    assert.equal((await db.get("SELECT status FROM sample_task WHERE id=?", [id])).status, "在途");
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=4",
-        gpsfix: 0,
-        lbslng: 114.1,
-        lbslat: 22.6,
-        imei: box.imei,
-      })
-    );
-    // 基站比这包 GPS 新：位置按基站算，不自动到达
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=5",
-        gpsfix: 1,
-        lng: 114.1,
-        lat: 22.6,
-        time: "2020-01-01 00:00:00",
-        imei: box.imei,
-      })
-    );
-    assert.equal((await db.get("SELECT status FROM sample_task WHERE id=?", [id])).status, "在途");
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=6",
-        gpsfix: 1,
-        lng: 114.1002,
-        lat: 22.6002,
-        time: stamp(new Date(now.getTime() + 3600000)),
-        imei: box.imei,
-      })
-    );
     assert.equal(
-      (await db.get("SELECT status FROM sample_task WHERE id=?", [id])).status,
-      "待核验"
+      (await db.get("SELECT status FROM sample_task WHERE id=?", [three])).status,
+      "已拒收"
     );
-    const log = await db.get(
-      "SELECT action, actor_name, note FROM sample_task_log WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
-      [id]
-    );
-    assert.equal(log.action, "到达核验点");
-    assert.equal(log.actor_name, "系统");
-    assert.match(log.note, /自动到达/);
-    await call(c.transition.bind(c), { ...admin, params: { id }, body: { status: "已取消" } });
-
-    const { box: other } = await ingest.accept(
-      packet({
-        uart: "why=boot,opens=0,seq=1",
-        gpsfix: 1,
-        lng: 114.3,
-        lat: 22.8,
-        imei: "864317080990201",
-      })
-    );
-    await boxes.updateBox(other.id, (b) => {
-      b.life = "未使用";
-      b.orgId = "2";
-    });
-    const both = (await make([box.id, other.id], "两台都到才自动")).id;
-    await sendHome(both);
-    const later = stamp(new Date(now.getTime() + 2 * 3600000));
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=7",
-        gpsfix: 1,
-        lng: 114.1,
-        lat: 22.6,
-        time: later,
-        imei: box.imei,
-      })
-    );
-    assert.equal(
-      (await db.get("SELECT status FROM sample_task WHERE id=?", [both])).status,
-      "在途"
-    );
-    await ingest.accept(
-      packet({
-        uart: "why=timer,opens=0,seq=2",
-        gpsfix: 1,
-        lng: 114.1,
-        lat: 22.6,
-        time: later,
-        imei: other.imei,
-      })
-    );
-    assert.equal(
-      (await db.get("SELECT status FROM sample_task WHERE id=?", [both])).status,
-      "待核验"
-    );
+    assert.equal((await boxes.findById(box.id)).life, "未使用");
   } finally {
     await boxes.flush();
     await db.close();

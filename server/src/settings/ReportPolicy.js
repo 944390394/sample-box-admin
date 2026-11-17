@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { hasCoords } from "../geo/place.js";
 import { ENDED, ENDED_SQL, initialOf, nextOf } from "./taskFlow.js";
+import { voidBoxIds } from "./taskPlaces.js";
 import {
   currentBoxSettings,
   firmwareAcceptsConfig,
@@ -8,7 +8,6 @@ import {
   firmwareSupportsQueueAck,
   firmwareSupportsLink,
 } from "./boxConfig.js";
-import { boxDistances, distanceSnapshot, targetOf } from "./taskPlaces.js";
 
 export function supportsDispatch(firmware) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(firmware));
@@ -290,49 +289,6 @@ export class ReportPolicy {
     });
   }
 
-  /**
-   * 双向采样单寄回后：这张单上的箱子都用 GPS 进了寄回地址的到达范围，就自动推进到待核验。
-   * 人也可以在任务上点「到达核验点」，不要求已经进范围。补传的旧位置不触发，免得回放出发前的点。
-   * 只有基站定位时不自动（误差大），仍可手动确认。
-   */
-  async arriveHome(box) {
-    if (!box?.id) return;
-    const rows = await this.db.all(
-      "SELECT t.id, t.kind, t.body FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.kind='采样' AND t.status='在途'",
-      [box.id]
-    );
-    for (const row of rows) {
-      let task;
-      try {
-        task = JSON.parse(row.body);
-      } catch {
-        continue;
-      }
-      const target = targetOf({ ...task, kind: row.kind }, "在途");
-      if (!hasCoords(target)) continue;
-      const ids = task.boxIds?.length
-        ? task.boxIds
-        : (await this.db.all("SELECT box_id FROM sample_task_box WHERE task_id=?", [row.id])).map(
-            (item) => item.box_id
-          );
-      const places = await boxDistances(this.db, ids, target);
-      if (
-        !places.length ||
-        places.some((item) => item.near !== true || item.position?.source !== "GPS")
-      )
-        continue;
-      try {
-        await this.transition(row.id, "待核验", {
-          actor: { id: "", name: "系统" },
-          note: "箱子进入核验点范围，自动到达",
-          detail: distanceSnapshot(target, places),
-        });
-      } catch (error) {
-        if (!/状态已改变/.test(String(error instanceof Error ? error.message : error))) throw error;
-      }
-    }
-  }
-
   async observe(box, uplink) {
     // Flash replay describes the policy at the event time, possibly before a reboot.
     if (uplink.backfill) return;
@@ -367,8 +323,8 @@ export class ReportPolicy {
   async createTask(input, actor = {}) {
     const id = `TK-${Date.now()}-${randomUUID().slice(0, 6)}`;
     const initial = initialOf(input);
-    // 采样单的采样单位记进 to_org_id。不寄送的单以前只有 body.orgId，仅本人的采样机构对不上。
-    const toOrgId = input.kind === "采样" ? input.orgId : input.toOrgId;
+    // 带寄送的采样单：接收方是采样单位，记进 to_org_id，采样单位不管箱子也能看到这张单
+    const toOrgId = input.kind === "采样" && input.trip ? input.orgId : input.toOrgId;
     const body = {
       ...input,
       policy: stamped(input.policy),
@@ -380,7 +336,7 @@ export class ReportPolicy {
       const snapshots = new Map();
       for (const boxId of [...input.boxIds].sort()) {
         const box = await tx.get(
-          "SELECT id,name,life,org_id,owner_id FROM sample_box WHERE id=?" +
+          "SELECT id,name,life,org_id,owner_id,opens FROM sample_box WHERE id=?" +
             (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
           [boxId]
         );
@@ -424,8 +380,8 @@ export class ReportPolicy {
       for (const boxId of input.boxIds) {
         const box = snapshots.get(boxId);
         await tx.run(
-          "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id) VALUES (?,?,?,?)",
-          [id, boxId, box.org_id, box.owner_id]
+          "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id,opens_start) VALUES (?,?,?,?,?)",
+          [id, boxId, box.org_id, box.owner_id, Number(box.opens) || 0]
         );
         // 建单就占用：箱子显示「在途」，选箱时不再出现在「可用」里。
         // 任务策略：旧固件等任务开始才生效；1.0.17 起建单即按 assignedPolicies 快照下发，任务期间不变
@@ -457,17 +413,29 @@ export class ReportPolicy {
         for (const { box_id } of ids) {
           // 带寄送的采样单在「运送中」就开始占用箱子，到「采样中」时已是本任务的，不再重复登记
           const busy = await tx.get("SELECT task_id FROM box_active_task WHERE box_id=?", [box_id]);
-          if (busy && busy.task_id === id) continue;
+          if (busy && busy.task_id === id) {
+            await tx.run(
+              "UPDATE sample_task_box SET opens_start=(SELECT opens FROM sample_box WHERE id=?) WHERE task_id=? AND box_id=? AND opens_start IS NULL",
+              [box_id, id, box_id]
+            );
+            continue;
+          }
           if (busy) throw new Error(`${box_id} 已有执行中的任务`);
           await tx.run("INSERT INTO box_active_task (box_id,task_id) VALUES (?,?)", [box_id, id]);
           // 任务开始后箱子算「在途」，结束后没有别的进行中任务再回到「未使用」
           await tx.run("UPDATE sample_box SET life='在途' WHERE id=? AND life='未使用'", [box_id]);
-          // 记下开始时的开箱次数，任务期间开了几次 = 当前 − 开始
+          // 建单时已经记下开箱次数。这里只补旧单：当时还没记，就从这一步开始算。
           await tx.run(
-            "UPDATE sample_task_box SET opens_start=(SELECT opens FROM sample_box WHERE id=?) WHERE task_id=? AND box_id=?",
+            "UPDATE sample_task_box SET opens_start=(SELECT opens FROM sample_box WHERE id=?) WHERE task_id=? AND box_id=? AND opens_start IS NULL",
             [box_id, id, box_id]
           );
         }
+      } else if (status === "已封箱") {
+        // 记下封箱时的开箱次数：之后再开箱就是「封箱后开箱」
+        await tx.run(
+          "UPDATE sample_task_box SET opens_seal=(SELECT opens FROM sample_box WHERE id=sample_task_box.box_id) WHERE task_id=? AND opens_start IS NOT NULL",
+          [id]
+        );
       } else if (status === "待检测") {
         // 检测站签收：开箱次数到此为止（检测时开箱不算），箱子等着逐台扫码开始检测
         await tx.run(
@@ -476,11 +444,17 @@ export class ReportPolicy {
         );
       } else if (ENDED.includes(status)) {
         if (status === "已检测") {
-          // 整张单一起「开始检测」：还没扫的箱子都记上
-          await tx.run(
-            "UPDATE sample_task_box SET inspected_at=?, inspected_by=? WHERE task_id=? AND inspected_at IS NULL",
-            [new Date().toISOString(), String(actor.name || "").slice(0, 64), id]
-          );
+          // 整张单一起「开始检测」：还没扫的箱子都记上；开箱超限作废的不检测，不记
+          const voided = await voidBoxIds(tx, id, JSON.parse(task.body));
+          const at = new Date().toISOString(),
+            by = String(actor.name || "").slice(0, 64);
+          for (const { box_id } of ids) {
+            if (voided.has(box_id)) continue;
+            await tx.run(
+              "UPDATE sample_task_box SET inspected_at=?, inspected_by=? WHERE task_id=? AND box_id=? AND inspected_at IS NULL",
+              [at, by, id, box_id]
+            );
+          }
         }
         await tx.run("DELETE FROM box_active_task WHERE task_id=?", [id]);
         for (const { box_id } of ids) {
@@ -540,6 +514,9 @@ export class ReportPolicy {
       );
       if (!link) throw new Error("这台箱子不在这张任务单里");
       if (link.inspected_at) throw new Error("这台箱子已经开始检测了");
+      // 开箱超过任务上限的箱子样品作废（强制签收也一样），不检测；整张单结束时一起释放
+      const voided = await voidBoxIds(tx, taskId, JSON.parse(task.body));
+      if (voided.has(boxId)) throw new Error("这台箱子开箱次数超过上限，样品已作废，不能开始检测");
       const now = new Date().toISOString();
       const by = String(actor.name || "").slice(0, 64);
       await tx.run(
@@ -561,30 +538,40 @@ export class ReportPolicy {
         note: box?.name || boxId,
         at: now,
       });
-      const left = Number(
-        (
-          await tx.get(
-            "SELECT COUNT(*) AS n FROM sample_task_box WHERE task_id=? AND inspected_at IS NULL",
-            [taskId]
-          )
-        ).n
+      const waiting = await tx.all(
+        "SELECT box_id FROM sample_task_box WHERE task_id=? AND inspected_at IS NULL",
+        [taskId]
       );
+      const left = waiting.filter((row) => !voided.has(row.box_id)).length;
+      const released = [boxId];
       if (left === 0) {
         await tx.run("DELETE FROM box_active_task WHERE task_id=?", [taskId]);
         await tx.run("UPDATE sample_task SET status='已检测' WHERE id=? AND status='待检测'", [
           taskId,
         ]);
+        // 作废的箱子不检测，整张单结束时一起回到「未使用」
+        for (const { box_id } of waiting) {
+          await tx.run(
+            `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
+              AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.status NOT IN (${ENDED_SQL}) AND m.inspected_at IS NULL)`,
+            [box_id, box_id, box_id]
+          );
+          released.push(box_id);
+        }
+        const note = waiting.length
+          ? `其余箱子已开始检测，${waiting.length} 台开箱超限作废、不检测`
+          : "全部箱子已开始检测";
         // 晚 1 毫秒，流转记录按时间排时一定在最后一台「开始检测」之后
         await addTaskLog(tx, {
           taskId,
           status: "已检测",
           action: "检测完成",
           actor,
-          note: "全部箱子已开始检测",
+          note,
           at: new Date(Date.parse(now) + 1).toISOString(),
         });
       }
-      await this.refresh([boxId], tx);
+      await this.refresh(released, tx);
       result = { done: left === 0, left };
     });
     this.onPolicyChanged?.([boxId]);

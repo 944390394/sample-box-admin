@@ -121,14 +121,6 @@ export class IngestService {
     if (this.policies) {
       await this.policies.observe(committed.box, uplink);
       committed.box.reportPolicy = await this.policies.get(committed.box);
-      // 寄回途中进入核验点：自动待核验。失败只记日志，不影响这包上报。
-      if (this.policies.arriveHome && uplink.hasGps() && !uplink.backfill) {
-        try {
-          await this.policies.arriveHome(committed.box);
-        } catch (error) {
-          logSystem({ source: "service", kind: "arrive", deviceId: committed.box.id, error });
-        }
-      }
     }
     if (this.geocoder) {
       try {

@@ -249,7 +249,7 @@ export async function resolveScope(db, user, roles, cap = null, depts = null) {
     cap == null || isAdmin ? scopeRank(role.data_scope) : Math.max(scopeRank(role.data_scope), cap)
   );
   if (isAdmin || ranks.includes(1))
-    return { all: true, orgIds: [], ownerIds: [], manageOrgIds: [], partyOrgIds: [] };
+    return { all: true, orgIds: [], ownerIds: [], manageOrgIds: [] };
   const rows = depts || (await loadDepts(db));
   const tree = buildDeptTree(rows);
   const parentOf = new Map(rows.map((row) => [row.id, row.parentId]));
@@ -257,7 +257,6 @@ export async function resolveScope(db, user, roles, cap = null, depts = null) {
   const orgIds = new Set();
   const manage = new Set();
   const ownerIds = new Set();
-  const party = partyOrgIdsOf(tree, parentOf, deptId);
   for (const rank of ranks) {
     if (rank === 4) {
       ownerIds.add(String(user.id));
@@ -277,34 +276,7 @@ export async function resolveScope(db, user, roles, cap = null, depts = null) {
   }
   const hq = tree[0]?.id;
   if (hq && orgIds.has(hq)) orgIds.add("");
-  return {
-    all: false,
-    orgIds: [...orgIds],
-    ownerIds: [...ownerIds],
-    manageOrgIds: [...manage],
-    partyOrgIds: [...party],
-  };
-}
-
-/**
- * 任务参与单位：本人所在部门、下级，以及往上直到顶级的上级。不含兄弟部门。
- * 只用于「这张单是不是寄给我这个单位」，不放进看箱子的 orgIds。
- * 仅本人没有数据范围单位，靠这一组才能看见寄给采样机构甲的单。
- */
-function partyOrgIdsOf(tree, parentOf, deptId) {
-  const ids = new Set();
-  if (!deptId) return ids;
-  const seen = new Set();
-  for (
-    let cursor = deptId;
-    cursor && cursor !== "0" && !seen.has(cursor);
-    cursor = parentOf.get(cursor)
-  ) {
-    seen.add(cursor);
-    ids.add(cursor);
-  }
-  for (const id of collectDeptIds(tree, deptId) || []) ids.add(String(id));
-  return ids;
+  return { all: false, orgIds: [...orgIds], ownerIds: [...ownerIds], manageOrgIds: [...manage] };
 }
 
 /**

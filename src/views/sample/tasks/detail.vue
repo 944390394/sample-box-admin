@@ -782,7 +782,7 @@ const actionText = computed(() => {
     return `签收 ${n} 台采样箱${t.kind === "调拨" ? `，箱子改归 ${t.toOrg}` : ""}。签收后开箱次数不再累计，开箱检测时每台扫码点「开始检测」。${over}`;
   }
   if (action.to === "已检测") {
-    const left = (detail.value?.boxes || []).filter((b) => !b.inspectedAt).length;
+    const left = (detail.value?.boxes || []).filter((b) => !b.inspectedAt && !b.voided).length;
     return `剩下 ${left} 台箱子一起开始检测，任务结束。也可以在箱子列表里逐台开始检测。`;
   }
   if (action.to === "已签收" && t.kind === "调拨")

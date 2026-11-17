@@ -68,6 +68,7 @@ export class Mailer {
         upgraded.once("error", reject);
       });
       session.attach(socket);
+      // STARTTLS 之后要重新打招呼；这次的回应用不到
       await session.command("EHLO sample-box-admin", 250);
     }
     if (config.user) {
