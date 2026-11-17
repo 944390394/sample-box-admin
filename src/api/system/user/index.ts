@@ -1,4 +1,13 @@
 import request from "@/utils/request";
+
+export interface EffectivePerms {
+  user: { id: string; name: string; username: string };
+  admin: boolean;
+  roles: { id: string; name: string; active: boolean; scope: string }[];
+  chain: { id: string; name: string; limited: boolean; count: number | null; maxScope: string }[];
+  scope: { roles: string; cap: string; effective: string };
+  items: { code: string; has: boolean; roles: string[]; cutBy: string; grantable: boolean }[];
+}
 import type {
   UserInfo,
   UserForm,
@@ -10,6 +19,7 @@ import type {
   PasswordVerifyForm,
   MobileUpdateForm,
   EmailUpdateForm,
+  MyWechat,
 } from "./types";
 import type { ExcelResult, OptionItem, PageResult } from "@/api/common";
 
@@ -47,6 +57,13 @@ const UserAPI = {
    * @param userId 用户ID
    * @returns 用户表单详情
    */
+  /** 一个人的实际权限：每项来自哪些角色、有没有被部门上限挡住，数据范围怎么算出来的。 */
+  getEffectivePerms(userId: string) {
+    return request<unknown, EffectivePerms>({
+      url: `${USER_BASE_URL}/${userId}/effective-perms`,
+      method: "get",
+    });
+  },
   getFormData(userId: string) {
     return request<unknown, UserForm>({
       url: `${USER_BASE_URL}/${userId}/form`,
@@ -59,11 +76,14 @@ const UserAPI = {
    *
    * @param data 用户表单数据
    */
+  /** 不填密码时服务端随机生成，只在这次返回 password。 */
   create(data: UserForm) {
-    return request({
+    const payload = { ...data };
+    delete payload.avatar;
+    return request<unknown, { id: string; username: string; password: string }>({
       url: `${USER_BASE_URL}`,
       method: "post",
-      data,
+      data: payload,
     });
   },
 
@@ -74,10 +94,12 @@ const UserAPI = {
    * @param data 用户表单数据
    */
   update(id: string, data: UserForm) {
+    const payload = { ...data };
+    delete payload.avatar;
     return request({
       url: `${USER_BASE_URL}/${id}`,
       method: "put",
-      data,
+      data: payload,
     });
   },
 
@@ -87,12 +109,35 @@ const UserAPI = {
    * @param id 用户ID
    * @param password 新密码
    */
-  resetPassword(id: string, password: string) {
-    return request({
+  resetPassword(id: string, password = "") {
+    return request<unknown, { password: string }>({
       url: `${USER_BASE_URL}/${id}/password/reset`,
       method: "put",
-      params: { password },
+      data: { password },
     });
+  },
+
+  /** 下次登录必须改密。 */
+  forcePassword(id: string) {
+    return request({ url: `${USER_BASE_URL}/${id}/force-password`, method: "post" });
+  },
+  /** 免除首次改密（审核、演示等共用账号），仅系统管理员。 */
+  skipPassword(id: string) {
+    return request({ url: `${USER_BASE_URL}/${id}/skip-password`, method: "post" });
+  },
+
+  unlock(id: string) {
+    return request({ url: `${USER_BASE_URL}/${id}/unlock`, method: "post" });
+  },
+
+  /** 强制下线：已有登录全部失效。 */
+  kick(id: string) {
+    return request({ url: `${USER_BASE_URL}/${id}/kick`, method: "post" });
+  },
+
+  /** 解绑微信：之后在小程序里要重新输账号密码。 */
+  unbindWechat(id: string) {
+    return request({ url: `${USER_BASE_URL}/${id}/wechat`, method: "delete" });
   },
 
   /**
@@ -146,6 +191,24 @@ const UserAPI = {
         "Content-Type": "multipart/form-data",
       },
     });
+  },
+
+  /** 我绑定的微信（小程序登录用）。 */
+  myWechat() {
+    return request<unknown, MyWechat>({ url: `${USER_BASE_URL}/me/wechat`, method: "get" });
+  },
+
+  /** 生成绑定二维码的票据：5 分钟有效、只能用一次。 */
+  wechatTicket() {
+    return request<unknown, { ticket: string; expiresAt: string; ttlSec: number }>({
+      url: `${USER_BASE_URL}/me/wechat/ticket`,
+      method: "post",
+    });
+  },
+
+  /** 解绑自己的微信。 */
+  unbindMyWechat() {
+    return request({ url: "/api/v1/auth/wechat/bind", method: "delete" });
   },
 
   /** 获取个人中心用户信息 */

@@ -12,6 +12,8 @@ export interface RoleQueryParams extends BaseQueryParams {
 
 /** 角色分页对象 */
 export interface RoleItem {
+  /** 有这个角色的人数 */
+  userCount?: number;
   /** 角色ID */
   id?: string;
   /** 角色编码 */

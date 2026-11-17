@@ -32,8 +32,8 @@ export class BoxStore {
     throw new Error(`${this.constructor.name} 未实现 listRecent(${limit})`);
   }
 
-  async nextBoxId() {
-    throw new Error(`${this.constructor.name} 未实现 nextBoxId`);
+  async nextBoxName() {
+    throw new Error(`${this.constructor.name} 未实现 nextBoxName`);
   }
 
   /** 箱子最新状态和原始报文一次提交。失败时两边都不留下。 */

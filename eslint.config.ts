@@ -23,6 +23,7 @@ export default [
       "**/auto-imports.d.ts",
       "**/components.d.ts",
       "types/**/*.d.ts",
+      "firmware/**/build/**",
     ],
   },
 

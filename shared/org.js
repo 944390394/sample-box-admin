@@ -68,7 +68,7 @@ export const roles = [
   role(13, "调度员", "DISPATCH", 2, 7),
   role(14, "机构负责人", "AGENCY_LEAD", 2, 8),
   role(15, "现场采样员", "SAMPLER", 4, 9),
-  role(16, "视角切换", "HOME_SWITCH", 1, 10),
+  role(16, "视角切换", "HOME_SWITCH", 4, 10),
 ];
 
 function user(id, username, nickname, deptId, roleIds, status = 1) {

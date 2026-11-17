@@ -20,7 +20,8 @@
     "commit": "git-cz",
     "deploy": "node deploy.mjs",
     "server": "node server/index.js",
-    "test:server": "node --test \"server/test/*.test.js\""
+    "test:server": "node --test \"server/test/*.test.js\"",
+    "accept": "node tools/acceptance/run.mjs"
   },
   "config": {
     "commitizen": {
@@ -58,6 +59,7 @@
     "codemirror": "^5.65.21",
     "codemirror-editor-vue3": "^2.8.0",
     "echarts": "^6.1.0",
+    "element-china-area-data": "6.1.0",
     "element-plus": "^2.14.4",
     "exceljs": "^4.4.0",
     "lodash-es": "^4.18.1",
@@ -65,6 +67,7 @@
     "path-browserify": "^1.0.1",
     "path-to-regexp": "^8.4.2",
     "pinia": "^4.0.2",
+    "pinyin-pro": "3.26.0",
     "qrcode": "^1.5.4",
     "qs": "^6.15.3",
     "sortablejs": "^1.15.7",
@@ -99,6 +102,7 @@
     "husky": "^9.1.7",
     "jiti": "^2.7.0",
     "lint-staged": "^17.3.0",
+    "playwright-core": "^1.64.1",
     "postcss": "^8.5.26",
     "postcss-html": "^2.0.0",
     "postcss-scss": "^4.0.9",

@@ -49,31 +49,17 @@
       >
         <el-icon :size="16"><Refresh /></el-icon>
       </button>
-      <button
-        type="button"
-        class="layout-tabs__action"
-        aria-label="内容全屏"
-        title="内容全屏"
-        @click="appStore.toggleContentFullscreen()"
-      >
-        <div v-if="!appStore.contentFullscreen" class="i-svg:fullscreen icon-16" />
-        <div v-else class="i-svg:fullscreen-exit icon-16" />
-      </button>
       <el-dropdown trigger="click" @command="handleActionCommand">
         <button type="button" class="layout-tabs__action" aria-label="页签操作" title="页签操作">
           <el-icon :size="16"><ArrowDown /></el-icon>
         </button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="refresh">
-              <el-icon :size="14" class="icon-14"><Refresh /></el-icon>
-              <span>刷新当前</span>
-            </el-dropdown-item>
             <el-dropdown-item v-if="currentTag && !currentTag.affix" command="closeCurrent">
               <div class="i-svg:close icon-14" />
               <span>关闭当前</span>
             </el-dropdown-item>
-            <el-dropdown-item divided command="closeOtherTags">
+            <el-dropdown-item command="closeOtherTags">
               <div class="i-svg:close_other icon-14" />
               <span>关闭其它</span>
             </el-dropdown-item>
@@ -136,7 +122,7 @@ import { useRoute, useRouter, type RouteRecordRaw } from "vue-router";
 import { resolve } from "path-browserify";
 import { TagsViewStyle } from "@/enums";
 import { translateRouteTitle } from "@/lang/utils";
-import { useAppStore, usePermissionStore, useSettingsStore, useTagsViewStore } from "@/stores";
+import { usePermissionStore, useSettingsStore, useTagsViewStore } from "@/stores";
 import { isExternal } from "@/utils";
 import type { TagView } from "@/stores/tags-view";
 
@@ -149,7 +135,6 @@ interface ContextMenu {
 const router = useRouter();
 const route = useRoute();
 
-const appStore = useAppStore();
 const permissionStore = usePermissionStore();
 const settingsStore = useSettingsStore();
 const tagsViewStore = useTagsViewStore();
@@ -240,7 +225,7 @@ const routePathMap = computed(() => {
 const isFirstView = computed(() => {
   if (!selectedTag.value) return false;
   return (
-    selectedTag.value.path === "/dashboard" ||
+    selectedTag.value.path === "/monitor/home" ||
     selectedTag.value.fullPath === visitedViews.value[1]?.fullPath
   );
 });

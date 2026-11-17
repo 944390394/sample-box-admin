@@ -5,6 +5,8 @@ import type {
   VisitTrendQueryParams,
   VisitTrendDetail,
   VisitOverviewDetail,
+  OnlineActorCount,
+  UserStatsDetail,
 } from "./types";
 import type { PageResult } from "@/api/common";
 
@@ -33,6 +35,23 @@ const LogAPI = {
   getVisitOverview() {
     return request<unknown, VisitOverviewDetail>({
       url: `${LOG_BASE_URL}/analytics/overview`,
+      method: "get",
+    });
+  },
+
+  /** 最近 15 分钟在线人数。失败由首页自己显示离线，不弹全局错误。 */
+  getOnlineActors() {
+    return request<unknown, OnlineActorCount>({
+      url: `${LOG_BASE_URL}/analytics/online`,
+      method: "get",
+      silent: true,
+    });
+  },
+
+  /** 系统用户人数和今天相对昨天的新增增长率 */
+  getUserStats() {
+    return request<unknown, UserStatsDetail>({
+      url: `${LOG_BASE_URL}/analytics/users`,
       method: "get",
     });
   },

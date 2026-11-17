@@ -162,3 +162,35 @@ html.sidebar-color-blue .layout-root.layout--mix .layout-sidebar .el-menu {
   }
 }
 /* stylelint-enable no-descending-specificity */
+
+/* 侧边栏展开时更紧凑：分组 44px、菜单项 40px，菜单项留边距做圆角高亮 */
+.layout-root .layout-sidebar .el-menu:not(.el-menu--collapse):not(.el-menu--horizontal) {
+  --el-menu-item-height: 44px;
+  --el-menu-sub-item-height: 40px;
+
+  padding: 6px 8px;
+  border-right: none;
+
+  .el-menu--inline {
+    padding: 0;
+  }
+
+  .el-menu-item,
+  .el-sub-menu__title {
+    margin: 2px 0;
+    border-radius: 6px;
+  }
+
+  .el-menu-item.is-active {
+    font-weight: 600;
+  }
+}
+
+html:not(.dark):not(.sidebar-color-blue)
+  .layout-root
+  .layout-sidebar
+  .el-menu:not(.el-menu--collapse) {
+  .el-menu-item.is-active {
+    background-color: var(--el-color-primary-light-9);
+  }
+}

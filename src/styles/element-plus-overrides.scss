@@ -17,7 +17,7 @@
 .el-card {
   --el-card-border-color: var(--card-border);
   --el-card-border-radius: var(--card-radius);
-  --el-card-padding: 18px;
+  --el-card-padding: 16px;
 
   overflow: hidden;
   color: var(--el-text-color-primary);
@@ -39,12 +39,12 @@
   }
 
   .el-card__header {
-    padding: 14px 18px;
-    font-size: 14px;
-    font-weight: 500;
+    padding: 12px 16px;
+    font-size: 15px;
+    font-weight: 600;
     line-height: 1.4;
     color: var(--el-text-color-primary);
-    border-bottom: 1px solid var(--card-border);
+    border-bottom: 1px solid var(--card-divider);
   }
 
   .el-card__body {
@@ -127,7 +127,7 @@
 
 .el-table {
   --el-table-border-color: var(--el-border-color-extra-light);
-  --el-table-header-bg-color: #f8fafc;
+  --el-table-header-bg-color: #f7f8fa;
   --el-table-row-hover-bg-color: #f8fbff;
   --el-table-current-row-bg-color: #eef5ff;
   --el-table-tr-bg-color: var(--el-bg-color);

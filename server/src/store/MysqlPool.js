@@ -16,6 +16,8 @@ export class MysqlPool {
       user: config.user,
       password: config.password,
       database: config.database,
+      charset: "utf8mb4",
+      dateStrings: true,
       waitForConnections: true,
       connectionLimit: 20,
       timezone: "+08:00",

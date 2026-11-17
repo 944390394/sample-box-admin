@@ -54,9 +54,35 @@ export function useCommandPalette() {
       return;
     }
     const keywordText = keyword.value.toLowerCase();
-    results.value = menuItems.value.filter((item) =>
-      item.title.toLowerCase().includes(keywordText)
-    );
+    const text = keyword.value.trim();
+    const pages = menuItems.value.filter((item) => item.title.toLowerCase().includes(keywordText));
+    // 按编号直达：IMEI（15 位数字）开采样箱，TK- 开头开任务单；其余当关键字去列表里搜
+    const jumps: SearchItem[] = [];
+    if (/^d{15}$/.test(text))
+      jumps.push({
+        title: `打开采样箱 ${text}`,
+        path: `/device/boxes/${text}`,
+        icon: "el-icon-Box",
+      });
+    if (/^TK-/i.test(text))
+      jumps.push({
+        title: `打开任务单 ${text}`,
+        path: `/task/detail/${text}`,
+        icon: "el-icon-Document",
+      });
+    jumps.push({
+      title: `在采样箱里搜「${text}」`,
+      path: "/device/boxes",
+      params: { q: text },
+      icon: "el-icon-Search",
+    });
+    jumps.push({
+      title: `在任务单里搜「${text}」`,
+      path: "/task/tasks",
+      params: { q: text },
+      icon: "el-icon-Search",
+    });
+    results.value = [...pages, ...jumps];
   }
 
   function getDisplayList(): SearchItem[] {
@@ -146,6 +172,8 @@ export function useCommandPalette() {
         : `${parentPath}${parentPath.endsWith("/") ? "" : "/"}${route.path}`;
 
       if (EXCLUDED_PATHS.includes(route.path) || isExternal(route.path)) return;
+      // 隐藏页（详情、创建）和带参数的路由不进搜索
+      if (route.meta?.hidden || path.includes(":")) return;
 
       if (route.children) {
         loadRoutes(route.children, path);

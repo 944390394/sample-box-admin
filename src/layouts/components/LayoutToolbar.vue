@@ -10,29 +10,19 @@
       </div>
 
       <div class="layout-toolbar__item">
-        <SizeSelect />
-      </div>
-
-      <div class="layout-toolbar__item">
-        <LangSelect />
-      </div>
-
-      <div class="layout-toolbar__item">
-        <NoticeDropdown />
-      </div>
-
-      <div v-if="showTenantSwitcher" class="layout-toolbar__item">
-        <TenantSwitcher @change="handleTenantChange" />
+        <TodoBell />
       </div>
     </template>
 
     <div class="layout-toolbar__item layout-toolbar__item--profile">
       <el-dropdown trigger="click">
         <div class="layout-user">
-          <el-avatar class="layout-user__avatar" :size="28" :src="avatarUrl">
+          <el-avatar class="layout-user__avatar" :size="28">
             {{ avatarText }}
           </el-avatar>
-          <span class="layout-user__name">{{ userStore.userInfo.username }}</span>
+          <span class="layout-user__name">
+            {{ userStore.userInfo.nickname || userStore.userInfo.username }}
+          </span>
         </div>
         <template #dropdown>
           <el-dropdown-menu>
@@ -62,51 +52,20 @@ import { useAppStore, useSettingsStore, useUserStore } from "@/stores";
 
 import CommandPalette from "@/components/CommandPalette/index.vue";
 import Fullscreen from "@/components/Fullscreen/index.vue";
-import SizeSelect from "@/components/SizeSelect/index.vue";
-import LangSelect from "@/components/LangSelect/index.vue";
-import NoticeDropdown from "@/components/NoticeDropdown/index.vue";
-import TenantSwitcher from "@/components/TenantSwitcher/index.vue";
-import { useTenantStoreHook } from "@/stores/tenant";
+import TodoBell from "@/components/biz/TodoBell.vue";
+import { userAvatarText } from "@/utils/user-avatar";
 
 const { t } = useI18n();
 const appStore = useAppStore();
 const settingStore = useSettingsStore();
 const userStore = useUserStore();
-const tenantStore = useTenantStoreHook();
 
 const route = useRoute();
 const router = useRouter();
 
 const isDesktop = computed(() => appStore.device === DeviceEnum.DESKTOP);
 
-const avatarUrl = computed(() => userStore.userInfo.avatar || undefined);
-
-const avatarText = computed(() => {
-  const name = userStore.userInfo.nickname || userStore.userInfo.username || "";
-  return name.slice(0, 1);
-});
-
-const canSwitchTenant = computed(() => userStore.userInfo?.canSwitchTenant === true);
-
-const showTenantSwitcher = computed(() => {
-  if (!canSwitchTenant.value) {
-    return false;
-  }
-  return tenantStore.tenantList.length > 1;
-});
-
-function handleTenantChange(tenantId: number) {
-  tenantStore.switchTenant(tenantId).then(
-    () => {
-      ElMessage.success("切换租户成功");
-      window.location.href = "/";
-    },
-    (error: unknown) => {
-      const message = error instanceof Error ? error.message : "切换租户失败";
-      ElMessage.error(message);
-    }
-  );
-}
+const avatarText = computed(() => userAvatarText(userStore.userInfo));
 
 /**
  * 打开个人中心页面

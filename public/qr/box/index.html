@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>采样箱</title>
+  <style>
+    body { margin: 0; padding: 40px 20px; font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #333; text-align: center; background: #f5f6f8; }
+    a { color: #1f6feb; }
+  </style>
+</head>
+<body>
+  <!-- 箱码落地页：微信里扫码会被小程序接走，到不了这里；用别的扫码工具扫到时跳到网页后台的箱子详情。 -->
+  <p id="text">正在打开采样箱…</p>
+  <script>
+    (function () {
+      var id = new URLSearchParams(location.search).get("id") || "";
+      var text = document.getElementById("text");
+      if (!/^[0-9A-Za-z_\-]{1,64}$/.test(id)) {
+        text.textContent = "二维码内容不完整，请用微信扫码。";
+        return;
+      }
+      var target = "/#/device/boxes/" + encodeURIComponent(id);
+      text.innerHTML = '请用微信扫码进入小程序；或者 <a href="' + target + '">在网页后台查看</a>。';
+      location.replace(target);
+    })();
+  </script>
+</body>
+</html>

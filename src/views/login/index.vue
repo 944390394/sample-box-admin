@@ -2,15 +2,14 @@
   <div class="login-page">
     <div class="login-toolbar">
       <ThemeSwitch />
-      <LangSelect size="text-18px" />
     </div>
 
     <div class="login-layout">
       <div class="login-brand">
         <div class="login-brand__header">
-          <el-image :src="logo" class="login-brand__logo" />
+          <el-image :src="logoUrl" class="login-brand__logo" />
           <div class="login-brand__identity">
-            <span class="login-brand__name">{{ appConfig.title }}</span>
+            <span class="login-brand__name">{{ branding.title }}</span>
             <span class="login-brand__version">v{{ appConfig.version }}</span>
           </div>
         </div>
@@ -19,11 +18,11 @@
           <div class="login-brand__main">
             <el-tag class="login-brand__tag" type="primary" effect="plain" round>
               <span class="login-brand__tag-dot" />
-              Enterprise Ready
+              采样箱全程监管
             </el-tag>
-            <h1 class="login-brand__title">企业级管理系统</h1>
+            <h1 class="login-brand__title">{{ branding.title }}</h1>
             <p class="login-brand__desc">
-              提供安全、高效、可扩展的管理解决方案，助力企业数字化转型与业务增长。
+              采样箱从激活、调拨、采样到签收的全过程：位置、开箱、电量实时可查，开箱可录像留证。
             </p>
           </div>
           <div class="login-brand__features">
@@ -31,19 +30,19 @@
               <span class="login-brand__feature-mark">
                 <span class="login-brand__feature-icon i-svg:security" />
               </span>
-              <span class="login-brand__feature-text">安全可靠</span>
+              <span class="login-brand__feature-text">开箱留证</span>
             </div>
             <div class="login-brand__feature">
               <span class="login-brand__feature-mark">
                 <el-icon class="login-brand__feature-icon"><Clock /></el-icon>
               </span>
-              <span class="login-brand__feature-text">高效稳定</span>
+              <span class="login-brand__feature-text">实时定位</span>
             </div>
             <div class="login-brand__feature">
               <span class="login-brand__feature-mark">
                 <span class="login-brand__feature-icon i-svg:flexible" />
               </span>
-              <span class="login-brand__feature-text">灵活扩展</span>
+              <span class="login-brand__feature-text">全程可追溯</span>
             </div>
           </div>
         </div>
@@ -51,110 +50,82 @@
 
       <div class="login-card">
         <div class="login-card__inner">
-          <transition name="fade-slide" mode="out-in">
-            <QrCodeLogin
-              v-if="component === 'qrcode'"
-              key="qrcode"
-              class="login-card__form"
-              @switch="component = 'login'"
-            />
+          <div class="login-card__form">
+            <h2 class="login-card__title">欢迎回来</h2>
+            <p class="login-card__desc">请完成身份验证后进入系统</p>
 
-            <div v-else-if="component === 'login'" key="login" class="login-card__form">
-              <h2 class="login-card__title">欢迎回来</h2>
-              <p class="login-card__desc">请完成身份验证后进入系统</p>
+            <el-form
+              ref="loginFormRef"
+              :model="loginFormData"
+              :rules="loginRules"
+              size="large"
+              :validate-on-rule-change="false"
+            >
+              <el-form-item prop="username">
+                <el-input
+                  v-model.trim="loginFormData.username"
+                  placeholder="用户名"
+                  :prefix-icon="UserIcon"
+                />
+              </el-form-item>
 
-              <el-form
-                ref="loginFormRef"
-                :model="loginFormData"
-                :rules="loginRules"
-                size="large"
-                :validate-on-rule-change="false"
-              >
-                <el-form-item prop="username">
+              <el-tooltip :visible="isCapsLock" content="大写锁定已开启" placement="right">
+                <el-form-item prop="password">
                   <el-input
-                    v-model.trim="loginFormData.username"
-                    placeholder="用户名"
-                    :prefix-icon="UserIcon"
+                    v-model.trim="loginFormData.password"
+                    placeholder="密码"
+                    type="password"
+                    show-password
+                    :prefix-icon="LockIcon"
+                    @keyup="checkCapsLock"
+                    @keyup.enter="handleLoginSubmit"
                   />
                 </el-form-item>
+              </el-tooltip>
 
-                <el-tooltip :visible="isCapsLock" content="大写锁定已开启" placement="right">
-                  <el-form-item prop="password">
-                    <el-input
-                      v-model.trim="loginFormData.password"
-                      placeholder="密码"
-                      type="password"
-                      show-password
-                      :prefix-icon="LockIcon"
-                      @keyup="checkCapsLock"
-                      @keyup.enter="handleLoginSubmit"
-                    />
-                  </el-form-item>
-                </el-tooltip>
-
-                <el-form-item prop="captchaCode">
-                  <div class="captcha-row">
-                    <el-input
-                      v-model.trim="loginFormData.captchaCode"
-                      placeholder="验证码"
-                      class="captcha-row__input"
-                      @keyup.enter="handleLoginSubmit"
-                    >
-                      <template #prefix>
-                        <span class="input-prefix-icon i-svg:security" />
-                      </template>
-                    </el-input>
-                    <div class="captcha-img" @click="getCaptcha">
-                      <el-icon v-if="codeLoading" class="is-loading" :size="16">
-                        <Loading />
-                      </el-icon>
-                      <img v-else-if="captchaBase64" :src="captchaBase64" alt="验证码" />
-                      <el-icon v-else :size="16"><Refresh /></el-icon>
-                    </div>
+              <el-form-item prop="captchaCode">
+                <div class="captcha-row">
+                  <el-input
+                    v-model.trim="loginFormData.captchaCode"
+                    placeholder="验证码"
+                    class="captcha-row__input"
+                    @keyup.enter="handleLoginSubmit"
+                  >
+                    <template #prefix>
+                      <span class="input-prefix-icon i-svg:security" />
+                    </template>
+                  </el-input>
+                  <div class="captcha-img" @click="getCaptcha">
+                    <el-icon v-if="codeLoading" class="is-loading" :size="16">
+                      <Loading />
+                    </el-icon>
+                    <img v-else-if="captchaBase64" :src="captchaBase64" alt="验证码" />
+                    <el-icon v-else :size="16"><Refresh /></el-icon>
                   </div>
-                </el-form-item>
-
-                <div class="login-options">
-                  <el-checkbox v-model="loginFormData.rememberMe">记住我</el-checkbox>
-                  <a class="login-options__link" @click="showForm('resetPwd')">忘记密码？</a>
                 </div>
+              </el-form-item>
 
-                <el-button
-                  :loading="loading"
-                  type="primary"
-                  size="large"
-                  class="login-btn"
-                  @click="handleLoginSubmit"
-                >
-                  登录
-                </el-button>
-              </el-form>
-
-              <div class="login-alt">
-                <div class="login-alt__divider">其他登录方式</div>
-                <div class="login-alt__buttons">
-                  <button class="login-alt__btn" @click="component = 'qrcode'">
-                    <span class="login-alt__icon i-svg:qr-code" />
-                    扫码登录
-                  </button>
-                  <button class="login-alt__btn">
-                    <span class="login-alt__icon i-svg:security" />
-                    统一认证
-                  </button>
-                </div>
+              <div class="login-options">
+                <el-checkbox v-model="loginFormData.rememberMe">记住我</el-checkbox>
+                <el-tooltip content="请联系系统管理员在「人员」里重置密码" placement="top">
+                  <a class="login-options__link">忘记密码？</a>
+                </el-tooltip>
               </div>
-            </div>
 
-            <ResetPwd
-              v-else
-              key="resetPwd"
-              class="login-card__form"
-              @update:model-value="component = $event"
-            />
-          </transition>
+              <el-button
+                :loading="loading"
+                type="primary"
+                size="large"
+                class="login-btn"
+                @click="handleLoginSubmit"
+              >
+                登录
+              </el-button>
+            </el-form>
+          </div>
         </div>
 
-        <div class="login-footer">Copyright © 2021-2026 youlai.tech</div>
+        <div class="login-footer">智采 · 采样箱 · 账号由系统管理员开通</div>
       </div>
     </div>
   </div>
@@ -172,13 +143,11 @@ import { useUserStore } from "@/stores";
 import { AuthStorage } from "@/utils/auth";
 import { appConfig } from "@/settings";
 import ThemeSwitch from "@/components/ThemeSwitch/index.vue";
-import ResetPwd from "./components/ResetPwd.vue";
-import QrCodeLogin from "./components/QrCodeLogin.vue";
-import logo from "@/assets/images/logo.png";
+import { useBranding } from "@/composables/useBranding";
 
 const userStore = useUserStore();
 const route = useRoute();
-const component = ref<"login" | "resetPwd" | "qrcode">("login");
+const { branding, logoUrl } = useBranding();
 
 const loginFormRef = ref<FormInstance>();
 const loading = ref(false);
@@ -190,8 +159,8 @@ const UserIcon = markRaw(User);
 const LockIcon = markRaw(Lock);
 
 const loginFormData = ref<LoginRequest>({
-  username: "admin",
-  password: "123456",
+  username: "",
+  password: "",
   captchaId: "",
   captchaCode: "",
   rememberMe: AuthStorage.getRememberMe(),
@@ -241,10 +210,6 @@ function checkCapsLock(event: KeyboardEvent) {
   if (event instanceof KeyboardEvent) {
     isCapsLock.value = event.getModifierState("CapsLock");
   }
-}
-
-function showForm(type: "resetPwd") {
-  component.value = type;
 }
 
 onMounted(() => getCaptcha());

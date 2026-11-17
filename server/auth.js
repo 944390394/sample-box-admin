@@ -26,16 +26,36 @@ export function signToken(payload, secret, ttlSeconds) {
 }
 
 export function readToken(token, secret) {
-  const [body, signature] = String(token || "").split(".");
-  if (!body || !signature) return null;
-  const expected = createHmac("sha256", secret).update(body).digest("base64url");
-  const actualBuf = Buffer.from(signature);
-  const expectedBuf = Buffer.from(expected);
-  if (actualBuf.length !== expectedBuf.length || !timingSafeEqual(actualBuf, expectedBuf))
+  try {
+    const [body, signature] = String(token || "").split(".");
+    if (!body || !signature) return null;
+    const expected = createHmac("sha256", secret).update(body).digest("base64url");
+    const actualBuf = Buffer.from(signature);
+    const expectedBuf = Buffer.from(expected);
+    if (actualBuf.length !== expectedBuf.length || !timingSafeEqual(actualBuf, expectedBuf))
+      return null;
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload.exp || payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
     return null;
-  const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-  if (!payload.exp || payload.exp < Date.now()) return null;
-  return payload;
+  }
+}
+
+/** 兼容未改密的旧会话，改密后访问和刷新令牌都必须匹配新版本。 */
+export function sessionMatches(payload, user, type = "access") {
+  return Boolean(
+    payload?.userId &&
+    user &&
+    Number(user.status) === 1 &&
+    String(payload.userId) === String(user.id) &&
+    (type === "refresh" ? payload.typ === "refresh" : payload.typ !== "refresh") &&
+    (payload.sv ?? 0) === Number(user.session_version || 0)
+  );
+}
+
+export function sessionClaims(user) {
+  return { userId: user.id, username: user.username, sv: Number(user.session_version || 0) };
 }
 
 export function issueCaptcha() {

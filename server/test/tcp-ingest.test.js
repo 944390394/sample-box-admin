@@ -34,15 +34,21 @@ test("TCP 收到一包 JSON 后交给接入服务", async () => {
   await server.start();
   const port = server.address().port;
   const raw = packet({ uart: "why=boot,aa55=0" });
-  await new Promise((resolve, reject) => {
+  const reply = await new Promise((resolve, reject) => {
+    const chunks = [];
     const socket = net.connect({ host: "127.0.0.1", port }, () => {
-      socket.end(raw);
+      socket.write(raw);
+    });
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      socket.end();
     });
     socket.on("error", reject);
-    socket.on("close", resolve);
+    socket.on("close", () => resolve(chunks.join("")));
   });
   await done;
   assert.equal(received[0], raw);
+  assert.equal(reply, "ok\n");
   await server.close();
 });
 
@@ -67,18 +73,39 @@ test("非法报文不会拖垮监听", async () => {
     const socket = net.connect({ host: "127.0.0.1", port }, () => {
       socket.end('{"imei":"bad"}');
     });
-    socket.on("error", resolve);
-    socket.on("close", resolve);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve();
+    }, 500);
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    socket.on("error", finish);
+    socket.on("close", finish);
   });
   const raw = packet({ uart: "why=timer,aa55=0" });
-  await new Promise((resolve, reject) => {
+  await new Promise((resolve) => {
     const socket = net.connect({ host: "127.0.0.1", port }, () => {
       socket.end(raw);
     });
-    socket.on("error", reject);
-    socket.on("close", resolve);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve();
+    }, 500);
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    socket.on("data", () => socket.destroy());
+    socket.on("error", finish);
+    socket.on("close", finish);
   });
-  assert.equal(await done, raw);
+  const accepted = await Promise.race([
+    done,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("下一包没有入库")), 1000)),
+  ]);
+  assert.equal(accepted, raw);
   assert.equal(server.address().port, port);
   await server.close();
 });
