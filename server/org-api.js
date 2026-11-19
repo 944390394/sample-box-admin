@@ -5,7 +5,6 @@ import {
   filterDeptTree,
   filterUsers,
   paginate,
-  toDeptOptions,
 } from "../shared/org.js";
 import { audit } from "./src/log/audit.js";
 import {
@@ -17,6 +16,9 @@ import {
   permLabelOf,
 } from "./src/auth/permCatalog.js";
 import { resolveAccess, resolveDeptLimit } from "./src/auth/boxAccess.js";
+import { menuPreviewFor } from "./menus.js";
+import { operationScope } from "./src/log/operationLog.js";
+import { formatTimestamp } from "./src/domain/Clock.js";
 import {
   checkPassword,
   describePolicy,
@@ -28,7 +30,10 @@ import {
 /* 采样机构就是检测站：送到这里的任务签收后要逐台扫码「开始检测」，总览里单列。 */
 const DEPT_TYPES = ["公司", "采样机构"];
 const policyOf = (ctx) => ctx.security || SECURITY_DEFAULTS;
-const isAdmin = (ctx) => !ctx.access || ctx.access.roles?.includes("ADMIN");
+// #26 m-01：fail-closed——access 缺失一律按非管理员处理（旧写法 !ctx.access 恒真兜底是 fail-open 残留）。
+// HTTP 路径全部 auth:true 且 dispatcher 先 requireAccess 再进 handler，正常请求必带 access；
+// 未来新增路由/直调 handler 漏挂 access 时不再全量放行。与 hasPerm/canPass 的 ctx.access?. 写法同口径。
+const isAdmin = (ctx) => Boolean(ctx.access?.roles?.includes("ADMIN"));
 /**
  * 管人、管部门的范围：本部门（数据范围是「本单位及下级」时含下级），不含上级部门——下级管不了上级。
  * 看箱子的范围（scope.orgIds）另外还含上级单位，那是因为箱子挂在单位上，见 boxAccess.resolveScope。
@@ -41,6 +46,12 @@ function deptInManage(ctx, deptId) {
   if (!scope || scope.all || isAdmin(ctx)) return true;
   return manageIds(scope).includes(String(deptId ?? ""));
 }
+/**
+ * #26 B1：范围类拒绝统一带码，和 sample 侧同口径（task-handover-scope 的 A0301/A0404）。
+ * denyPerm = 没有这项权限/不能转授（A0301/403）；denyScope = 数据范围外（A0404/404，不泄露存在性）。
+ */
+const denyPerm = (ctx, msg) => ctx.fail(msg, "A0301", 403);
+const denyScope = (ctx, msg) => ctx.fail(msg, "A0404", 404);
 /**
  * 把 userInScope 的条件翻译成 SQL（L-P2-3）：可管单位里的人，加上自己。
  * 和 JS 版严格对齐——JS 里 NULL 部门算成空串，所以空串在范围内时要连 NULL 一起放行，
@@ -81,11 +92,26 @@ async function hasAdminRole(db, userId) {
     )
   );
 }
-/** 数据范围：1 全部、2 本单位及下级、3 本单位、4 仅本人，数字越小越宽。老数据里的 5 按本单位算。 */
+/** 数据范围宽度比较用：1 全部、2 本单位及下级、3 本单位、4 仅本人。自定义 5 按本单位宽度参与比较（D3 另查）。 */
 function scopeRank(value) {
   const n = Number(value);
   if (n === 5) return 3;
   return n >= 1 && n <= 4 ? n : 4;
+}
+/** 保留原始 5（自定义）的取值：写库/回显用，宽度比较仍走 scopeRank。 */
+function rawScope(value) {
+  const n = Number(value);
+  return n === 5 ? 5 : scopeRank(value);
+}
+/** 角色的自定义部门（sys_role_dept）。旧库没有这张表时按空算。 */
+async function roleDeptIdsOf(db, roleId) {
+  try {
+    return (
+      await db.all("SELECT dept_id FROM sys_role_dept WHERE role_id = ?", [String(roleId)])
+    ).map((row) => String(row.dept_id));
+  } catch {
+    return [];
+  }
 }
 const hasPerm = (ctx, code) => isAdmin(ctx) || Boolean(ctx.access?.perms?.has(code));
 /** 这项权限我能不能转授：系统管理员全部能；其他人要自己某个角色上这项开了「可转授」。 */
@@ -143,6 +169,15 @@ async function cannotAssign(ctx, roleId, verb = "分配") {
     return `「${role.name}」里有你不能转授的权限（${beyond.slice(0, 3).map(permLabelOf).join("、")}${beyond.length > 3 ? `，共 ${beyond.length} 项` : ""}），不能${verb}`;
   if (scopeRank(role.data_scope) < (await myScopeRank(ctx)))
     return `「${role.name}」的数据范围比你的宽，不能${verb}`;
+  // #26 D3：自定义范围（5）只有 scope≤2 的角色能授，且自定义部门要在自己的管理范围里
+  if (Number(role.data_scope) === 5) {
+    if ((await myScopeRank(ctx)) > 2)
+      return `「${role.name}」是自定义数据范围，只有「本单位及下级」以上数据范围的角色能${verb}`;
+    const picked = await roleDeptIdsOf(ctx.db, role.id);
+    const mine = new Set(manageIds(ctx.access?.scope || {}).map(String));
+    if (!ctx.access?.scope?.all && picked.some((id) => !mine.has(String(id))))
+      return `「${role.name}」的自定义部门超出你的管理范围，不能${verb}`;
+  }
   return "";
 }
 /** 人员的角色有变化时：要有「给人员分配角色」，加上和拿掉的角色都要过 cannotAssign。返回失败原因。 */
@@ -163,13 +198,14 @@ async function checkRoleChange(ctx, wanted, current = []) {
   }
   return "";
 }
-/** 管人员前的共同检查：用户存在、在范围里、非管理员不能动管理员。失败返回原因。 */
+/** 管人员前的共同检查：用户存在、在范围里、非管理员不能动管理员。失败返回原因和错误码（B1 带码）。 */
 async function guardUser(ctx, id) {
   const user = await ctx.db.get("SELECT * FROM sys_user WHERE id = ?", [String(id)]);
-  if (!user) return { error: "用户不存在" };
-  if (!userInScope(ctx, user)) return { error: "只能管理自己数据范围内的人员" };
+  if (!user) return { error: "用户不存在", code: "A0404", status: 404 };
+  if (!userInScope(ctx, user))
+    return { error: "只能管理自己数据范围内的人员", code: "A0404", status: 404 };
   if (!isAdmin(ctx) && (await hasAdminRole(ctx.db, user.id)))
-    return { error: "只有系统管理员可以管理系统管理员账号" };
+    return { error: "只有系统管理员可以管理系统管理员账号", code: "A0301", status: 403 };
   return { user };
 }
 import { readCoords, readDeptLocation } from "./src/geo/place.js";
@@ -177,7 +213,7 @@ import { randomBytes } from "node:crypto";
 import { readCameras, validateCameras } from "./src/settings/deptCameras.js";
 import { badRequest, conflict } from "./src/domain/AppError.js";
 
-async function record(ctx, action, targetType, targetId, result) {
+async function record(ctx, action, targetType, targetId, result, detail) {
   try {
     let orgName = "";
     if (ctx.user?.dept_id) {
@@ -195,6 +231,8 @@ async function record(ctx, action, targetType, targetId, result) {
       targetType,
       targetId: String(targetId || ""),
       result,
+      // #26 B4：授权审计明细（grant diff / 范围前后 / 自定义部门 diff），落 sys_operation_log.detail
+      detail,
       ip: ctx.ip || "",
     });
   } catch (error) {
@@ -469,35 +507,108 @@ async function nextId(db, table) {
   return String(max + 1);
 }
 
+/**
+ * #26 B1（D2）：部门读的可见集 = manageOrgIds 子树 + 祖先只读壳。
+ * 返回 null 表示不限（管理员/全部数据）；否则返回可见 id 集合。
+ * 祖先壳保留组织上下文（名称/编码/层级），但不下发地址、联系人、负责人、监控这些明细。
+ */
+function readScopeIds(scope, tree) {
+  if (!scope || scope.all) return null;
+  const parent = new Map();
+  const walk = (n) => {
+    parent.set(String(n.id), String(n.parentId ?? ""));
+    (n.children || []).forEach(walk);
+  };
+  (tree || []).forEach(walk);
+  const allowed = new Set();
+  for (const id of scope.manageOrgIds || []) {
+    let cur = String(id);
+    const seen = new Set();
+    while (cur && cur !== "0" && !seen.has(cur)) {
+      seen.add(cur);
+      allowed.add(cur);
+      cur = parent.get(cur);
+    }
+  }
+  return allowed;
+}
+
+/** 祖先壳节点：只留组织上下文，明细清空，readOnly 告诉页面这不是可维护的部门。 */
+function shellDept(node) {
+  return {
+    ...node,
+    address: "",
+    lng: null,
+    lat: null,
+    contact: "",
+    phone: "",
+    leaderUserId: "",
+    leaderName: "",
+    leaderMobile: "",
+    cameras: [],
+    readOnly: true,
+  };
+}
+
+function scopeDeptTree(tree, scope) {
+  const allowed = readScopeIds(scope, tree);
+  if (!allowed) return tree;
+  const manage = new Set((scope.manageOrgIds || []).map(String));
+  const filter = (nodes) =>
+    (nodes || [])
+      .filter((n) => allowed.has(String(n.id)))
+      .map((n) => {
+        const children = filter(n.children);
+        return manage.has(String(n.id)) ? { ...n, children } : shellDept({ ...n, children });
+      });
+  return filter(tree);
+}
+
+/** 选项树带上 readOnly（祖先壳不可选为归属/目标）；形状与 toDeptOptions 兼容。 */
+function scopedDeptOptions(nodes) {
+  return (nodes || []).map((node) => ({
+    value: node.id,
+    label: node.name,
+    ...(node.readOnly ? { readOnly: true } : {}),
+    ...(node.children?.length ? { children: scopedDeptOptions(node.children) } : {}),
+  }));
+}
+
 export async function listDepts(ctx) {
-  ctx.ok(filterDeptTree(await loadDeptTree(ctx.db), ctx.query));
+  ctx.ok(scopeDeptTree(filterDeptTree(await loadDeptTree(ctx.db), ctx.query), ctx.access?.scope));
 }
 
 export async function deptOptions(ctx) {
-  ctx.ok(toDeptOptions(await loadDeptTree(ctx.db)));
+  ctx.ok(scopedDeptOptions(scopeDeptTree(await loadDeptTree(ctx.db), ctx.access?.scope)));
 }
 
 export async function deptForm(ctx) {
   const row = await ctx.db.get(`${DEPT_WITH_LEADER} WHERE d.id = ?`, [ctx.params.id]);
-  if (!row) return ctx.fail("部门不存在");
+  // null = 不限；非 null 时不在可见集里一律 404，不泄露范围外部门的存在
+  const allowed = readScopeIds(ctx.access?.scope, await loadDeptTree(ctx.db));
+  if (!row || (allowed && !allowed.has(String(row.id))))
+    return ctx.fail("部门不存在", "A0404", 404);
   const item = toDept(row);
+  const readOnly = !deptInManage(ctx, item.id);
+  const detail = readOnly ? shellDept(item) : item;
   ctx.ok({
-    id: item.id,
-    name: item.name,
-    code: item.code,
-    parentId: item.parentId,
-    type: item.type,
-    status: item.status,
-    sort: item.sort,
-    address: item.address,
-    lng: item.lng,
-    lat: item.lat,
-    contact: item.contact,
-    phone: item.phone,
-    leaderUserId: item.leaderUserId,
-    leaderName: item.leaderName,
-    leaderMobile: item.leaderMobile,
-    cameras: item.cameras,
+    id: detail.id,
+    name: detail.name,
+    code: detail.code,
+    parentId: detail.parentId,
+    type: detail.type,
+    status: detail.status,
+    sort: detail.sort,
+    address: detail.address,
+    lng: detail.lng,
+    lat: detail.lat,
+    contact: detail.contact,
+    phone: detail.phone,
+    leaderUserId: detail.leaderUserId,
+    leaderName: detail.leaderName,
+    leaderMobile: detail.leaderMobile,
+    cameras: detail.cameras,
+    ...(readOnly ? { readOnly: true } : {}),
   });
 }
 
@@ -536,7 +647,7 @@ export async function createDept(ctx) {
   // 只能在自己管理范围里的部门下面建；顶级部门只有全部数据范围的人能建
   if (!(parentId === "0" ? isAdmin(ctx) || ctx.access?.scope?.all : deptInManage(ctx, parentId))) {
     await record(ctx, "新增部门", "dept", "", "失败");
-    return ctx.fail("只能在自己管理范围内的部门下面新建");
+    return denyScope(ctx, "只能在自己管理范围内的部门下面新建");
   }
   let place, leader, cameras;
   try {
@@ -550,7 +661,7 @@ export async function createDept(ctx) {
   const denied = await checkDeptFields(ctx, body, null, { place, leader, cameras });
   if (denied) {
     await record(ctx, "新增部门", "dept", "", "失败");
-    return ctx.fail(denied);
+    return denyPerm(ctx, denied);
   }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   // 部门、负责人账号、负责人关系一起成功或一起失败
@@ -595,7 +706,7 @@ export async function updateDept(ctx) {
   const current = await ctx.db.get("SELECT * FROM sys_dept WHERE id = ?", [ctx.params.id]);
   if (!current) {
     await record(ctx, "修改部门", "dept", ctx.params.id, "失败");
-    return ctx.fail("部门不存在");
+    return denyScope(ctx, "部门不存在");
   }
   const parentId = String(body.parentId ?? current.parent_id);
   if (parentId === current.id) {
@@ -608,7 +719,7 @@ export async function updateDept(ctx) {
       !(parentId === "0" ? isAdmin(ctx) || ctx.access?.scope?.all : deptInManage(ctx, parentId)))
   ) {
     await record(ctx, "修改部门", "dept", current.id, "失败");
-    return ctx.fail("只能修改自己管理范围内的部门");
+    return denyScope(ctx, "只能修改自己管理范围内的部门");
   }
   let place, leader, cameras;
   try {
@@ -623,7 +734,7 @@ export async function updateDept(ctx) {
   const denied = await checkDeptFields(ctx, body, current, { place, leader, cameras });
   if (denied) {
     await record(ctx, "修改部门", "dept", current.id, "失败");
-    return ctx.fail(denied);
+    return denyPerm(ctx, denied);
   }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const leaderId = await inTransaction(ctx.db, async (db) => {
@@ -671,7 +782,7 @@ export async function deleteDepts(ctx) {
   for (const id of ids) {
     if (!deptInManage(ctx, id)) {
       await record(ctx, "删除部门", "dept", id, "失败");
-      return ctx.fail("只能删除自己管理范围内的部门");
+      return denyScope(ctx, "只能删除自己管理范围内的部门");
     }
     const children = await ctx.db.get(
       "SELECT COUNT(*) AS total FROM sys_dept WHERE parent_id = ?",
@@ -689,10 +800,15 @@ export async function deleteDepts(ctx) {
       return ctx.fail("部门下还有用户，不能删除");
     }
   }
-  for (const id of ids) {
-    await ctx.db.run("DELETE FROM sys_dept_perm WHERE dept_id = ?", [id]);
-    await ctx.db.run("DELETE FROM sys_dept WHERE id = ?", [id]);
-  }
+  // #26 m-03：事务内逐部门清理——部门上限、角色自定义范围引用（sys_role_dept）、部门本体一起删，
+  // 免得删部门后 sys_role_dept 留悬空 dept_id（resolveScope 会纳入已删 id、审计回显名称落空）。
+  await inTransaction(ctx.db, async (db) => {
+    for (const id of ids) {
+      await db.run("DELETE FROM sys_dept_perm WHERE dept_id = ?", [id]);
+      await db.run("DELETE FROM sys_role_dept WHERE dept_id = ?", [id]);
+      await db.run("DELETE FROM sys_dept WHERE id = ?", [id]);
+    }
+  });
   await record(ctx, "删除部门", "dept", ids.join(","), "成功");
   ctx.ok(null, "删除部门成功");
 }
@@ -738,7 +854,7 @@ export async function roleOptions(ctx) {
 
 export async function roleForm(ctx) {
   const row = await ctx.db.get("SELECT * FROM sys_role WHERE id = ?", [ctx.params.id]);
-  if (!row) return ctx.fail("角色不存在");
+  if (!row) return denyScope(ctx, "角色不存在");
   const item = toRole(row);
   ctx.ok({
     id: item.id,
@@ -748,6 +864,181 @@ export async function roleForm(ctx) {
     sort: item.sort,
     dataScope: item.dataScope,
   });
+}
+
+/** #26 B1：角色的自定义部门（读 sys_role_dept，055b 建表）。 */
+export async function roleDeptIds(ctx) {
+  const role = await ctx.db.get("SELECT id FROM sys_role WHERE id = ?", [ctx.params.id]);
+  if (!role) return denyScope(ctx, "角色不存在");
+  ctx.ok(await roleDeptIdsOf(ctx.db, role.id));
+}
+
+/**
+ * #26 B4：菜单预览单源——角色已保存权限能看到的菜单，与侧栏 menusFor 同一实现
+ * （menuPreviewFor 直接复用 menusFor 的裁剪结果标 on/off），前端不再自抄菜单表。
+ * #26 m-06：另镜像前端 local-menus 的调拨/送检注入（开关 + device:box:task），预览=真实侧栏。
+ */
+export async function roleMenuPreview(ctx) {
+  const role = await ctx.db.get("SELECT id, code FROM sys_role WHERE id = ?", [ctx.params.id]);
+  if (!role) return denyScope(ctx, "角色不存在");
+  ctx.ok({ menus: menuPreviewFor(new Set(await permsOfRole(ctx.db, role))) });
+}
+
+/** #26 B4：角色页未保存勾选的菜单预览——给定 codes 的纯函数，同样走 menusFor；未知码丢掉。 */
+export async function draftMenuPreview(ctx) {
+  const known = new Set(ALL_PERMS.map((item) => item.code));
+  const codes = (Array.isArray(ctx.body?.codes) ? ctx.body.codes : []).filter((code) =>
+    known.has(code)
+  );
+  ctx.ok({ menus: menuPreviewFor(new Set(codes)) });
+}
+
+/** 审计明细里的权限码 → {code,label}，部门 id → {id,name}（读时装饰，日志里只存码/id）。 */
+function decorateAuditDetail(raw, deptNames) {
+  if (!raw || typeof raw !== "object") return null;
+  const perms = (list) =>
+    (Array.isArray(list) ? list : []).map((code) => ({ code, label: permLabelOf(code) }));
+  const depts = (list) =>
+    (Array.isArray(list) ? list : []).map((id) => ({
+      id: String(id),
+      name: deptNames.get(String(id)) || String(id),
+    }));
+  const out = {};
+  if (Array.isArray(raw.added)) out.added = perms(raw.added);
+  if (Array.isArray(raw.removed)) out.removed = perms(raw.removed);
+  if (Array.isArray(raw.grantOn)) out.grantOn = perms(raw.grantOn);
+  if (Array.isArray(raw.grantOff)) out.grantOff = perms(raw.grantOff);
+  if (raw.scopeBefore != null) out.scopeBefore = Number(raw.scopeBefore);
+  if (raw.scopeAfter != null) out.scopeAfter = Number(raw.scopeAfter);
+  if (raw.scope != null) out.scope = Number(raw.scope);
+  if (Array.isArray(raw.deptBefore)) out.deptBefore = depts(raw.deptBefore);
+  if (Array.isArray(raw.deptAfter)) out.deptAfter = depts(raw.deptAfter);
+  if (Array.isArray(raw.deptIds)) out.deptIds = depts(raw.deptIds);
+  // #26 m-07：部门上限变更明细（limited/maxScope 前后），与角色侧 scopeBefore/After 同口径
+  if (typeof raw.limitedBefore === "boolean") out.limitedBefore = raw.limitedBefore;
+  if (typeof raw.limitedAfter === "boolean") out.limitedAfter = raw.limitedAfter;
+  if (raw.maxScopeBefore !== undefined)
+    out.maxScopeBefore = raw.maxScopeBefore == null ? null : Number(raw.maxScopeBefore);
+  if (raw.maxScopeAfter !== undefined)
+    out.maxScopeAfter = raw.maxScopeAfter == null ? null : Number(raw.maxScopeAfter);
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * #26 B4：授权审计抽屉（只读）——谁在何时把哪些权限/可转授/范围授给该角色。
+ * 数据源 sys_operation_log（target_type=role）+ sys_role_perm.grantable 现状。
+ * 日志按 operationScope 同一口径裁剪（D1 actor 子树；仅本人看自己的；空范围不给），
+ * 明细 detail 读时装饰成带名称的 diff。最多回 200 条（抽屉够用，不做翻页）。
+ */
+export async function roleGrantAudit(ctx) {
+  const role = await ctx.db.get("SELECT * FROM sys_role WHERE id = ?", [ctx.params.id]);
+  if (!role) return denyScope(ctx, "角色不存在");
+  const rows = await ctx.db.all("SELECT perm, grantable FROM sys_role_perm WHERE role_id = ?", [
+    String(role.id),
+  ]);
+  const admin = role.code === "ADMIN";
+  const codes = admin ? ALL_PERMS.map((item) => item.code) : rows.map((row) => String(row.perm));
+  const grantable = admin
+    ? codes
+    : rows.filter((row) => Number(row.grantable) === 1).map((row) => String(row.perm));
+  const customIds = await roleDeptIdsOf(ctx.db, role.id);
+
+  const scope = await operationScope(ctx.db, ctx.user);
+  let entries = [];
+  const deptIds = scope.kind === "depts" ? (scope.ids || []).map(String).filter(Boolean) : [];
+  if (
+    scope.kind === "all" ||
+    scope.kind === "actor" ||
+    (scope.kind === "depts" && deptIds.length)
+  ) {
+    const where = ["target_type = 'role'", "target_id = ?"];
+    const params = [String(role.id)];
+    if (scope.kind === "depts") {
+      where.push(`org_id IN (${deptIds.map(() => "?").join(", ")})`);
+      params.push(...deptIds);
+    } else if (scope.kind === "actor") {
+      where.push("actor_id = ?");
+      params.push(String(scope.actorId || ""));
+    }
+    entries = await ctx.db.all(
+      `SELECT id, org_id, org_name, actor_id, actor_name, action, result, detail, created_at, ip
+       FROM sys_operation_log WHERE ${where.join(" AND ")}
+       ORDER BY created_at DESC, id DESC LIMIT 200`,
+      params
+    );
+  }
+  // 明细里提到的部门一次查齐名字（含现状自定义部门）
+  const mentioned = new Set(customIds.map(String));
+  const parsed = entries.map((row) => {
+    let raw = null;
+    try {
+      raw = row.detail ? JSON.parse(row.detail) : null;
+    } catch {
+      /* 坏明细当没有 */
+    }
+    for (const key of ["deptBefore", "deptAfter", "deptIds"])
+      for (const id of raw?.[key] || []) mentioned.add(String(id));
+    return raw;
+  });
+  const deptNames = new Map();
+  if (mentioned.size) {
+    const ids = [...mentioned];
+    const found = await ctx.db.all(
+      `SELECT id, name FROM sys_dept WHERE id IN (${ids.map(() => "?").join(", ")})`,
+      ids
+    );
+    for (const row of found) deptNames.set(String(row.id), row.name);
+  }
+  ctx.ok({
+    role: {
+      id: String(role.id),
+      name: role.name,
+      code: role.code,
+      dataScope: rawScope(role.data_scope),
+      deptIds: customIds.map((id) => ({ id, name: deptNames.get(id) || id })),
+    },
+    current: {
+      total: codes.length,
+      grantable: grantable.map((code) => ({ code, label: permLabelOf(code) })),
+    },
+    entries: entries.map((row, i) => ({
+      id: String(row.id),
+      actorId: String(row.actor_id || ""),
+      actorName: row.actor_name || "",
+      orgName: row.org_name || "",
+      action: row.action,
+      result: row.result,
+      createdAt:
+        row.created_at instanceof Date ? formatTimestamp(row.created_at) : String(row.created_at),
+      ip: row.ip || "",
+      detail: decorateAuditDetail(parsed[i], deptNames),
+    })),
+  });
+}
+
+/**
+ * #26 D3：自定义数据范围（5）的授予边界——仅 scope≤2 的角色可授 5；
+ * 自定义部门 ⊆ 自己 manageOrgIds（管理员不限）；部门要存在。
+ * 通过返回 { deptIds }，否则返回 { error, code, status }。
+ */
+async function checkCustomDeptIds(ctx, deptIds) {
+  if ((await myScopeRank(ctx)) > 2)
+    return {
+      error: "只有「本单位及下级」以上数据范围的角色能设置自定义部门",
+      code: "A0301",
+      status: 403,
+    };
+  const ids = [...new Set((deptIds || []).map(String))];
+  if (!isAdmin(ctx) && !ctx.access?.scope?.all) {
+    const mine = new Set(manageIds(ctx.access?.scope || {}).map(String));
+    if (ids.some((id) => !mine.has(id)))
+      return { error: "自定义部门只能选自己管理范围内的部门", code: "A0301", status: 403 };
+  }
+  for (const id of ids) {
+    if (!(await ctx.db.get("SELECT id FROM sys_dept WHERE id = ?", [id])))
+      return { error: `部门不存在：${id}`, code: "A0404", status: 404 };
+  }
+  return { deptIds: ids };
 }
 
 export async function createRole(ctx) {
@@ -763,30 +1054,42 @@ export async function createRole(ctx) {
   }
   // 数据范围也是授权：没有「设置角色数据范围」时新角色只看本人，有也不能比自己宽
   let dataScope = 4;
+  let customIds = [];
   if (hasPerm(ctx, "sys:role:scope")) {
-    dataScope = scopeRank(body.dataScope ?? 3);
-    if (dataScope < (await myScopeRank(ctx))) {
+    dataScope = rawScope(body.dataScope ?? 3);
+    if (dataScope === 5) {
+      const checked = await checkCustomDeptIds(ctx, body.deptIds);
+      if (checked.error) {
+        await record(ctx, "新增角色", "role", "", "失败");
+        return ctx.fail(checked.error, checked.code, checked.status);
+      }
+      customIds = checked.deptIds;
+    } else if (dataScope < (await myScopeRank(ctx))) {
       await record(ctx, "新增角色", "role", "", "失败");
-      return ctx.fail("数据范围不能比你自己的宽");
+      return denyPerm(ctx, "数据范围不能比你自己的宽");
     }
   }
   const id = await nextId(ctx.db, "sys_role");
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
-  await ctx.db.run(
-    `INSERT INTO sys_role (id, name, code, data_scope, sort, status, create_time, update_time)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      body.name,
-      body.code,
-      dataScope,
-      Number(body.sort) || 1,
-      Number(body.status ?? 1),
-      now,
-      now,
-    ]
-  );
-  await record(ctx, "新增角色", "role", id, "成功");
+  await inTransaction(ctx.db, async (db) => {
+    await db.run(
+      `INSERT INTO sys_role (id, name, code, data_scope, sort, status, create_time, update_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        body.name,
+        body.code,
+        dataScope,
+        Number(body.sort) || 1,
+        Number(body.status ?? 1),
+        now,
+        now,
+      ]
+    );
+    for (const deptId of customIds)
+      await db.run("INSERT INTO sys_role_dept (role_id, dept_id) VALUES (?, ?)", [id, deptId]);
+  });
+  await record(ctx, "新增角色", "role", id, "成功", { scope: dataScope, deptIds: customIds });
   ctx.ok(null, `新增角色${body.name}成功`);
 }
 
@@ -795,14 +1098,14 @@ export async function updateRole(ctx) {
   const current = await ctx.db.get("SELECT * FROM sys_role WHERE id = ?", [ctx.params.id]);
   if (!current) {
     await record(ctx, "修改角色", "role", ctx.params.id, "失败");
-    return ctx.fail("角色不存在");
+    return denyScope(ctx, "角色不存在");
   }
-  const fail = async (message) => {
+  const fail = async (message, code, status) => {
     await record(ctx, "修改角色", "role", current.id, "失败");
-    return ctx.fail(message);
+    return ctx.fail(message, code, status);
   };
   const admin = current.code === "ADMIN";
-  if (admin && !isAdmin(ctx)) return fail("只有系统管理员可以修改系统管理员角色");
+  if (admin && !isAdmin(ctx)) return fail("只有系统管理员可以修改系统管理员角色", "A0301", 403);
   const status = Number(body.status ?? current.status);
   if (admin && status !== 1) return fail("系统管理员角色不能停用");
   // 没有「编辑角色」：名称、排序、启停都不能改
@@ -810,30 +1113,86 @@ export async function updateRole(ctx) {
     const renamed = body.name != null && body.name !== current.name;
     const moved = body.sort != null && Number(body.sort) !== Number(current.sort);
     if (renamed || moved || status !== Number(current.status))
-      return fail("没有「编辑角色」权限，只能改数据范围");
+      return fail("没有「编辑角色」权限，只能改数据范围", "A0301", 403);
   }
-  // 数据范围单独授权：要有「设置角色数据范围」，不能比自己宽；系统管理员固定全部数据
-  const scope = body.dataScope == null ? scopeRank(current.data_scope) : scopeRank(body.dataScope);
-  if (scope !== scopeRank(current.data_scope)) {
+  // 数据范围单独授权：要有「设置角色数据范围」，不能比自己宽；系统管理员固定全部数据。
+  // #26 B1：rawScope 保留自定义 5（scopeRank 会把 5 折成 3，写库会丢自定义语义）
+  const currentScope = rawScope(current.data_scope);
+  const scope = body.dataScope == null ? currentScope : rawScope(body.dataScope);
+  const scopeChanged = scope !== currentScope;
+  const deptIds = Array.isArray(body.deptIds) ? body.deptIds : null;
+  // #26 m-05：空数组视同未传字段（合法 no-op——scope≠5 时下方事务的残留清理分支本就清自定义行，
+  // 与旧客户端不带 deptIds 同语义）；非空 deptIds + 非自定义范围仍拒，统一带校验码 A0400/400。
+  // 注意不能把 [] 归一成 null：scope5 + [] 仍要进下方 D3 分支清空自定义行（既有语义）。
+  if (deptIds?.length && scope !== 5)
+    return fail("自定义部门只在数据范围为「自定义部门数据」时生效", "A0400", 400);
+  if (scopeChanged) {
     if (admin) return fail("系统管理员固定是全部数据");
     if (!hasPerm(ctx, "sys:role:scope"))
-      return fail("没有「设置角色数据范围」权限，不能改数据范围");
-    if (scope < (await myScopeRank(ctx))) return fail("数据范围不能比你自己的宽");
+      return fail("没有「设置角色数据范围」权限，不能改数据范围", "A0301", 403);
+    if (scope !== 5 && scope < (await myScopeRank(ctx)))
+      return fail("数据范围不能比你自己的宽", "A0301", 403);
+  }
+  // 自定义范围：改成 5、或给已是 5 的角色改部门，都要过 D3（⊆ 自己 manage、仅 scope≤2 可授）
+  let customIds = null;
+  if (scope === 5 && (scopeChanged || deptIds)) {
+    if (!hasPerm(ctx, "sys:role:scope"))
+      return fail("没有「设置角色数据范围」权限，不能改自定义部门", "A0301", 403);
+    const wanted = deptIds ?? (scopeChanged ? [] : await roleDeptIdsOf(ctx.db, current.id));
+    const checked = await checkCustomDeptIds(ctx, wanted);
+    if (checked.error) return fail(checked.error, checked.code, checked.status);
+    customIds = checked.deptIds;
   }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  // 审计明细要对比改前的自定义部门，先读出来（事务里会删旧行）
+  const deptBefore =
+    currentScope === 5 || scope === 5 ? await roleDeptIdsOf(ctx.db, current.id) : [];
   // 角色编码建好后不能改：权限默认值、系统管理员判断都按编码来
-  await ctx.db.run(
-    `UPDATE sys_role SET name = ?, data_scope = ?, sort = ?, status = ?, update_time = ? WHERE id = ?`,
-    [
-      body.name || current.name,
-      scope === scopeRank(current.data_scope) ? current.data_scope : scope,
-      Number(body.sort ?? current.sort),
-      status,
-      now,
-      current.id,
-    ]
+  await inTransaction(ctx.db, async (db) => {
+    await db.run(
+      `UPDATE sys_role SET name = ?, data_scope = ?, sort = ?, status = ?, update_time = ? WHERE id = ?`,
+      [
+        body.name || current.name,
+        scopeChanged ? scope : current.data_scope,
+        Number(body.sort ?? current.sort),
+        status,
+        now,
+        current.id,
+      ]
+    );
+    if (scope === 5 && customIds) {
+      await db.run("DELETE FROM sys_role_dept WHERE role_id = ?", [String(current.id)]);
+      for (const deptId of customIds)
+        await db.run("INSERT INTO sys_role_dept (role_id, dept_id) VALUES (?, ?)", [
+          String(current.id),
+          deptId,
+        ]);
+    } else if (scope !== 5) {
+      // 改回非自定义：残留的自定义部门清掉，免得再改回 5 时带出旧选择
+      await db.run("DELETE FROM sys_role_dept WHERE role_id = ?", [String(current.id)]);
+    }
+  });
+  // #26 B4：授权审计明细——范围前后 + 自定义部门 diff；只改名/排序时不写空明细
+  const deptAfter = scope === 5 ? (customIds ?? deptBefore) : [];
+  const deptChanged =
+    deptBefore.length !== deptAfter.length || deptBefore.some((id) => !deptAfter.includes(id));
+  const detail = {};
+  if (scopeChanged) {
+    detail.scopeBefore = currentScope;
+    detail.scopeAfter = scope;
+  }
+  if (deptChanged) {
+    detail.deptBefore = deptBefore;
+    detail.deptAfter = deptAfter;
+  }
+  await record(
+    ctx,
+    "修改角色",
+    "role",
+    current.id,
+    "成功",
+    Object.keys(detail).length ? detail : undefined
   );
-  await record(ctx, "修改角色", "role", current.id, "成功");
   ctx.ok(null, `修改角色${body.name || current.name}成功`);
 }
 
@@ -856,12 +1215,13 @@ export async function deleteRoles(ctx) {
     const reason = role ? await cannotAssign(ctx, id, "删除") : "";
     if (reason) {
       await record(ctx, "删除角色", "role", id, "失败");
-      return ctx.fail(reason);
+      return denyPerm(ctx, reason);
     }
   }
   for (const id of ids) {
     await ctx.db.run("DELETE FROM sys_user_role WHERE role_id = ?", [id]);
     await ctx.db.run("DELETE FROM sys_role_perm WHERE role_id = ?", [id]);
+    await ctx.db.run("DELETE FROM sys_role_dept WHERE role_id = ?", [id]);
     await ctx.db.run("DELETE FROM sys_role WHERE id = ?", [id]);
   }
   await record(ctx, "删除角色", "role", ids.join(","), "成功");
@@ -903,7 +1263,7 @@ export async function listUsers(ctx) {
 export async function userForm(ctx) {
   const users = await loadUsers(ctx.db);
   const row = users.find((item) => item.id === ctx.params.id);
-  if (!row || !userInScope(ctx, row)) return ctx.fail("用户不存在");
+  if (!row || !userInScope(ctx, row)) return denyScope(ctx, "用户不存在");
   ctx.ok({
     id: row.id,
     username: row.username,
@@ -921,9 +1281,9 @@ export async function userForm(ctx) {
 /** 新建账号：密码按策略校验，不填就随机生成并只返回这一次。新账号首次登录必须改密。 */
 export async function createUser(ctx) {
   const body = ctx.body || {};
-  const fail = async (message) => {
+  const fail = async (message, code, status) => {
     await record(ctx, "新增用户", "user", "", "失败");
-    return ctx.fail(message);
+    return ctx.fail(message, code, status);
   };
   if (body.avatar != null && body.avatar !== "") {
     await record(ctx, "新增用户", "user", "", "失败");
@@ -934,10 +1294,10 @@ export async function createUser(ctx) {
   if (!/^[A-Za-z0-9_.@-]{3,64}$/.test(username))
     return fail("用户名须为 3–64 位字母、数字或 _ . @ -");
   if (!userInScope(ctx, { dept_id: body.deptId }))
-    return fail("只能在自己数据范围内的部门新建人员");
+    return fail("只能在自己数据范围内的部门新建人员", "A0404", 404);
   const roleIds = Array.isArray(body.roleIds) ? [...new Set(body.roleIds.map(String))] : [];
   const roleProblem = await checkRoleChange(ctx, roleIds, []);
-  if (roleProblem) return fail(roleProblem);
+  if (roleProblem) return fail(roleProblem, "A0301", 403);
   if (await ctx.db.get("SELECT id FROM sys_user WHERE username = ?", [username]))
     return fail("用户名已存在");
   let password = typeof body.password === "string" ? body.password : "";
@@ -986,11 +1346,11 @@ export async function updateUser(ctx) {
   const guard = await guardUser(ctx, ctx.params.id);
   if (guard.error) {
     await record(ctx, "修改用户", "user", ctx.params.id, "失败");
-    return ctx.fail(guard.error);
+    return ctx.fail(guard.error, guard.code, guard.status);
   }
   const current = guard.user;
   if (body.deptId && !userInScope(ctx, { dept_id: body.deptId }))
-    return ctx.fail("只能把人员放到自己数据范围内的部门");
+    return denyScope(ctx, "只能把人员放到自己数据范围内的部门");
   // 表单总会带上 roleIds；和现在一样就不算分配角色，没有「给人员分配角色」也能改别的资料
   let roleIds = null;
   if (Array.isArray(body.roleIds)) {
@@ -1001,7 +1361,7 @@ export async function updateUser(ctx) {
     const problem = await checkRoleChange(ctx, roleIds, before);
     if (problem) {
       await record(ctx, "修改用户", "user", current.id, "失败");
-      return ctx.fail(problem);
+      return denyPerm(ctx, problem);
     }
     if (roleIds.length === before.length && roleIds.every((id) => before.includes(id)))
       roleIds = null;
@@ -1012,7 +1372,7 @@ export async function updateUser(ctx) {
   // 一个动作一个权限：改资料要「编辑人员资料」，改状态要「停用与启用账号」，改角色要「给人员分配角色」（上面已查）
   if (nextStatus !== Number(current.status)) {
     const perm = nextStatus === 1 ? "sys:user:enable" : "sys:user:disable";
-    if (!hasPerm(ctx, perm)) return ctx.fail(`没有「${permLabelOf(perm)}」权限`);
+    if (!hasPerm(ctx, perm)) return denyPerm(ctx, `没有「${permLabelOf(perm)}」权限`);
   }
   const edited =
     (body.nickname != null && body.nickname !== current.nickname) ||
@@ -1020,7 +1380,7 @@ export async function updateUser(ctx) {
     (body.mobile !== undefined && (body.mobile || null) !== (current.mobile || null)) ||
     (body.gender !== undefined && body.gender !== current.gender) ||
     (body.email !== undefined && (body.email || "") !== (current.email || ""));
-  if (edited && !hasPerm(ctx, "sys:user:update")) return ctx.fail("没有「编辑人员资料」权限");
+  if (edited && !hasPerm(ctx, "sys:user:update")) return denyPerm(ctx, "没有「编辑人员资料」权限");
   const action =
     nextStatus !== Number(current.status) ? (nextStatus === 1 ? "激活" : "停用") : "修改用户";
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
@@ -1072,15 +1432,12 @@ export async function deleteUsers(ctx) {
       );
       if (!isAdmin(ctx) || Number(admins?.n || 0) <= 1) {
         await record(ctx, "删除用户", "user", id, "失败");
-        return ctx.fail(
-          Number(admins?.n || 0) <= 1
-            ? "不能删除最后一个系统管理员"
-            : "只有系统管理员可以删除系统管理员"
-        );
+        if (Number(admins?.n || 0) <= 1) return ctx.fail("不能删除最后一个系统管理员");
+        return denyPerm(ctx, "只有系统管理员可以删除系统管理员");
       }
     }
     const guard = await guardUser(ctx, id);
-    if (guard.error) return ctx.fail(guard.error);
+    if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   }
   for (const id of ids) {
     await ctx.db.run("DELETE FROM sys_user_role WHERE user_id = ?", [id]);
@@ -1095,7 +1452,7 @@ export async function deleteUsers(ctx) {
 /** 重置密码：填了按策略校验，不填随机生成并只返回这一次；重置后下次登录必须改密，已有登录全部失效。 */
 export async function resetPassword(ctx) {
   const guard = await guardUser(ctx, ctx.params.id);
-  if (guard.error) return ctx.fail(guard.error);
+  if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   let password = String(ctx.body?.password ?? ctx.query.password ?? "");
   const generated = !password;
   if (generated) password = randomPassword();
@@ -1119,7 +1476,7 @@ export async function resetPassword(ctx) {
 /** 强制下次登录改密，不改现在的密码，也不踢下线。 */
 export async function forcePasswordChange(ctx) {
   const guard = await guardUser(ctx, ctx.params.id);
-  if (guard.error) return ctx.fail(guard.error);
+  if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   await ctx.db.run("UPDATE sys_user SET must_change_password = 1 WHERE id = ?", [ctx.params.id]);
   await record(ctx, "强制改密", "user", ctx.params.id, "成功");
   ctx.ok(null, "该账号下次操作时需要先修改密码");
@@ -1130,9 +1487,9 @@ export async function forcePasswordChange(ctx) {
  * 只有系统管理员能做，记操作日志；不改密码，也不踢下线。
  */
 export async function skipPasswordChange(ctx) {
-  if (!isAdmin(ctx)) return ctx.fail("只有系统管理员可以免除改密");
+  if (!isAdmin(ctx)) return denyPerm(ctx, "只有系统管理员可以免除改密");
   const guard = await guardUser(ctx, ctx.params.id);
-  if (guard.error) return ctx.fail(guard.error);
+  if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   await ctx.db.run(
     "UPDATE sys_user SET must_change_password = 0, password_changed_at = ? WHERE id = ?",
     [new Date().toISOString(), ctx.params.id]
@@ -1143,7 +1500,7 @@ export async function skipPasswordChange(ctx) {
 
 export async function unlockUser(ctx) {
   const guard = await guardUser(ctx, ctx.params.id);
-  if (guard.error) return ctx.fail(guard.error);
+  if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   await ctx.db.run("UPDATE sys_user SET failed_count = 0, locked_until = '' WHERE id = ?", [
     ctx.params.id,
   ]);
@@ -1154,7 +1511,7 @@ export async function unlockUser(ctx) {
 /** 强制下线：会话版本加一，已签发的令牌全部失效，实时连接断开；微信绑定一并解除，免得小程序又自动登录回来。 */
 export async function kickUser(ctx) {
   const guard = await guardUser(ctx, ctx.params.id);
-  if (guard.error) return ctx.fail(guard.error);
+  if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   if (String(ctx.params.id) === String(ctx.user?.id))
     return ctx.fail("不能让自己下线，请直接退出登录");
   await ctx.db.run("UPDATE sys_user SET session_version = session_version + 1 WHERE id = ?", [
@@ -1169,7 +1526,7 @@ export async function kickUser(ctx) {
 /** 解绑微信：手机丢了或换人用时，管理员解掉，之后要重新输账号密码才能在小程序登录。 */
 export async function unbindWechat(ctx) {
   const guard = await guardUser(ctx, ctx.params.id);
-  if (guard.error) return ctx.fail(guard.error);
+  if (guard.error) return ctx.fail(guard.error, guard.code, guard.status);
   await ctx.db.run("DELETE FROM sys_user_wechat WHERE user_id = ?", [String(ctx.params.id)]);
   await record(ctx, "解绑微信", "user", ctx.params.id, "成功");
   ctx.ok(null, "已解绑微信");
@@ -1183,20 +1540,30 @@ export async function permCatalog(ctx) {
     groups: PERM_GROUPS,
     templates: ROLE_TEMPLATES,
     passwordRule: describePolicy(policyOf(ctx)),
+    // #26 B4（D3）：前端范围选择器预校验用——自己最宽的数据范围（1–4，管理员 1）
+    myScope: await myScopeRank(ctx),
   });
 }
 
 /* ---------------- 部门权限上限 ---------------- */
 
-const SCOPE_TEXT = { 1: "全部数据", 2: "本单位及下级", 3: "本单位", 4: "仅本人" };
+const SCOPE_TEXT = {
+  1: "全部数据",
+  2: "本单位及下级",
+  3: "本单位",
+  4: "仅本人",
+  5: "自定义部门数据",
+};
 
 /**
  * 部门的权限上限：自己的设置、上级的实际上限（下级只能在这个范围里勾）、自己的实际上限，
  * 以及当前用户能动哪些项（自己可转授的、且在上级范围里的）。
+ * #26 B1（D2）：读也按 manage 子树 + 祖先壳收口，范围外 A0404。
  */
 export async function deptLimit(ctx) {
   const dept = await ctx.db.get("SELECT * FROM sys_dept WHERE id = ?", [ctx.params.id]);
-  if (!dept) return ctx.fail("部门不存在");
+  const allowed = readScopeIds(ctx.access?.scope, await loadDeptTree(ctx.db));
+  if (!dept || (allowed && !allowed.has(String(dept.id)))) return denyScope(ctx, "部门不存在");
   const own = (
     await ctx.db.all("SELECT perm FROM sys_dept_perm WHERE dept_id = ?", [String(dept.id)])
   ).map((row) => String(row.perm));
@@ -1241,12 +1608,12 @@ export async function deptLimit(ctx) {
  */
 export async function saveDeptLimit(ctx) {
   const dept = await ctx.db.get("SELECT * FROM sys_dept WHERE id = ?", [ctx.params.id]);
-  if (!dept) return ctx.fail("部门不存在");
-  const fail = async (message) => {
+  if (!dept) return denyScope(ctx, "部门不存在");
+  const fail = async (message, code, status) => {
     await record(ctx, "设置部门权限上限", "dept", dept.id, "失败");
-    return ctx.fail(message);
+    return ctx.fail(message, code, status);
   };
-  if (!deptInManage(ctx, dept.id)) return fail("只能设置自己管理范围内的部门");
+  if (!deptInManage(ctx, dept.id)) return fail("只能设置自己管理范围内的部门", "A0404", 404);
   const known = new Set(ALL_PERMS.map((item) => item.code));
   const limited = Boolean(ctx.body?.limited);
   const codes = [
@@ -1264,20 +1631,23 @@ export async function saveDeptLimit(ctx) {
     const beyond = codes.filter((code) => !parent.perms.has(code));
     if (beyond.length)
       return fail(
-        `上级部门没有这几项，下级不能勾：${beyond.slice(0, 5).map(permLabelOf).join("、")}${beyond.length > 5 ? "，共 " + beyond.length + " 项" : ""}`
+        `上级部门没有这几项，下级不能勾：${beyond.slice(0, 5).map(permLabelOf).join("、")}${beyond.length > 5 ? "，共 " + beyond.length + " 项" : ""}`,
+        "A0301",
+        403
       );
   }
   if (maxScope != null && parent.maxScope != null && maxScope < parent.maxScope)
-    return fail(`最大数据范围不能比上级部门的「${SCOPE_TEXT[parent.maxScope]}」宽`);
+    return fail(`最大数据范围不能比上级部门的「${SCOPE_TEXT[parent.maxScope]}」宽`, "A0301", 403);
+  // #26 m-07：改前的上限状态先读出来——非管理员校验和成功审计明细（前后 diff）共用
+  const wasLimited = Number(dept.perm_limited) === 1;
+  const before = new Set(
+    (await ctx.db.all("SELECT perm FROM sys_dept_perm WHERE dept_id = ?", [String(dept.id)])).map(
+      (row) => String(row.perm)
+    )
+  );
+  const parentAll = parent.perms ? [...parent.perms] : ALL_PERMS.map((item) => item.code);
   if (!isAdmin(ctx)) {
     // 收紧（收回）只会让下级权力变小，管理范围里的部门都可以；放开（这个部门原来用不了、现在能用）要自己可转授
-    const wasLimited = Number(dept.perm_limited) === 1;
-    const before = new Set(
-      (await ctx.db.all("SELECT perm FROM sys_dept_perm WHERE dept_id = ?", [String(dept.id)])).map(
-        (row) => String(row.perm)
-      )
-    );
-    const parentAll = parent.perms ? [...parent.perms] : ALL_PERMS.map((item) => item.code);
     const usable = wasLimited
       ? new Set(parentAll.filter((code) => before.has(code)))
       : new Set(parentAll);
@@ -1286,15 +1656,18 @@ export async function saveDeptLimit(ctx) {
     const beyond = opened.filter((code) => !canPass(ctx, code));
     if (beyond.length)
       return fail(
-        `这几项你不能转授，不能放开：${beyond.slice(0, 5).map(permLabelOf).join("、")}${beyond.length > 5 ? "，共 " + beyond.length + " 项" : ""}`
+        `这几项你不能转授，不能放开：${beyond.slice(0, 5).map(permLabelOf).join("、")}${beyond.length > 5 ? "，共 " + beyond.length + " 项" : ""}`,
+        "A0301",
+        403
       );
     // 最大数据范围放宽时不能比自己的宽
     const mine = await myScopeRank(ctx);
     const was = dept.max_data_scope == null ? null : scopeRank(dept.max_data_scope);
     const widened = maxScope == null ? was != null : was != null && maxScope < was;
     if (widened && (maxScope == null ? (parent.maxScope ?? 1) < mine : maxScope < mine))
-      return fail("最大数据范围不能比你自己的宽");
-    if (maxScope != null && maxScope < mine) return fail("最大数据范围不能比你自己的宽");
+      return fail("最大数据范围不能比你自己的宽", "A0301", 403);
+    if (maxScope != null && maxScope < mine)
+      return fail("最大数据范围不能比你自己的宽", "A0301", 403);
   }
   await inTransaction(ctx.db, async (db) => {
     await db.run("UPDATE sys_dept SET perm_limited = ?, max_data_scope = ? WHERE id = ?", [
@@ -1311,7 +1684,27 @@ export async function saveDeptLimit(ctx) {
         ]);
     }
   });
-  await record(ctx, "设置部门权限上限", "dept", dept.id, "成功");
+  // #26 m-07：部门上限变更审计明细——与 B4 grant detail 同口径（日志只存码/数值，读时装饰）。
+  // perms diff 按「实际上限」比：不限 = 跟上级一样（parentAll），受限 = 自己勾的 codes；
+  // 这样收紧/放开/改勾选各变了哪些项一目了然。没有任何变化时不写空明细（同 saveRolePerms）。
+  const maxScopeBefore = dept.max_data_scope == null ? null : scopeRank(dept.max_data_scope);
+  const beforeEffective = wasLimited ? [...before] : parentAll;
+  const afterEffective = limited ? codes : parentAll;
+  const added = afterEffective.filter((code) => !beforeEffective.includes(code));
+  const removed = beforeEffective.filter(
+    (code) => known.has(code) && !afterEffective.includes(code)
+  );
+  const changed =
+    wasLimited !== limited || maxScopeBefore !== maxScope || added.length || removed.length;
+  const detail = {
+    limitedBefore: wasLimited,
+    limitedAfter: limited,
+    maxScopeBefore,
+    maxScopeAfter: maxScope,
+    added,
+    removed,
+  };
+  await record(ctx, "设置部门权限上限", "dept", dept.id, "成功", changed ? detail : undefined);
   ctx.ok(
     null,
     limited
@@ -1325,7 +1718,7 @@ export async function saveDeptLimit(ctx) {
  */
 export async function effectivePerms(ctx) {
   const user = await ctx.db.get("SELECT * FROM sys_user WHERE id = ?", [String(ctx.params.id)]);
-  if (!user || !userInScope(ctx, user)) return ctx.fail("用户不存在或不在你的管理范围内");
+  if (!user || !userInScope(ctx, user)) return denyScope(ctx, "用户不存在或不在你的管理范围内");
   const access = await resolveAccess(ctx.db, user);
   const roles = await ctx.db.all(
     "SELECT r.id, r.name, r.code, r.data_scope, r.status FROM sys_role r JOIN sys_user_role ur ON ur.role_id = r.id WHERE ur.user_id = ?",
@@ -1396,7 +1789,7 @@ export async function effectivePerms(ctx) {
  */
 export async function rolePerms(ctx) {
   const role = await ctx.db.get("SELECT id, code FROM sys_role WHERE id = ?", [ctx.params.id]);
-  if (!role) return ctx.fail("角色不存在");
+  if (!role) return denyScope(ctx, "角色不存在");
   const assignable = !hasPerm(ctx, "sys:role:grant")
     ? []
     : isAdmin(ctx)
@@ -1428,7 +1821,7 @@ export async function saveRolePerms(ctx) {
   const role = await ctx.db.get("SELECT id, code, name FROM sys_role WHERE id = ?", [
     ctx.params.id,
   ]);
-  if (!role) return ctx.fail("角色不存在");
+  if (!role) return denyScope(ctx, "角色不存在");
   if (role.code === "ADMIN") return ctx.fail("系统管理员固定拥有全部权限");
   const known = new Set(ALL_PERMS.map((item) => item.code));
   const wanted = Array.isArray(ctx.body?.codes) ? ctx.body.codes : [];
@@ -1454,7 +1847,8 @@ export async function saveRolePerms(ctx) {
     const beyond = [...changed].filter((code) => !canPass(ctx, code));
     if (beyond.length) {
       await record(ctx, "分配角色权限", "role", role.id, "失败");
-      return ctx.fail(
+      return denyPerm(
+        ctx,
         `这几项你不能转授，不能授予、收回或改可转授：${beyond.map(permLabelOf).join("、")}`
       );
     }
@@ -1468,6 +1862,15 @@ export async function saveRolePerms(ctx) {
         passed.has(code) ? 1 : 0,
       ]);
   });
-  await record(ctx, "分配角色权限", "role", role.id, "成功");
+  // #26 B4：授权审计明细——这次加了/收了哪些项、哪些项开关了可转授
+  const added = codes.filter((code) => !before.has(code));
+  const removed = [...before].filter((code) => known.has(code) && !codes.includes(code));
+  const grantOn = codes.filter((code) => passed.has(code) && !passedBefore.has(code));
+  const grantOff = codes.filter(
+    (code) => before.has(code) && !passed.has(code) && passedBefore.has(code)
+  );
+  const detail = { added, removed, grantOn, grantOff };
+  const changed = added.length || removed.length || grantOn.length || grantOff.length;
+  await record(ctx, "分配角色权限", "role", role.id, "成功", changed ? detail : undefined);
   ctx.ok(null, `已保存【${role.name}】的 ${codes.length} 项权限，其中 ${passed.size} 项可转授`);
 }

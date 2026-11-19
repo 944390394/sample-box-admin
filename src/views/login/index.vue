@@ -139,6 +139,7 @@ import type { FormInstance } from "element-plus";
 import AuthAPI from "@/api/auth";
 import type { LoginRequest } from "@/api/auth";
 import router from "@/router";
+import { resolveLoginRedirect } from "@/router/guards/permission";
 import { useUserStore } from "@/stores";
 import { AuthStorage } from "@/utils/auth";
 import { appConfig } from "@/settings";
@@ -196,8 +197,10 @@ async function handleLoginSubmit() {
   try {
     await userStore.login(loginFormData.value).then(
       async () => {
-        const redirectPath = (route.query.redirect as string) || "/";
-        await router.push(decodeURIComponent(redirectPath));
+        // redirect 可能属于上一角色的路由（换账号登录），先校验对新角色可达，
+        // 不可达回落工作台；replace 保持登录页被落地页替换的原有历史语义。
+        const target = await resolveLoginRedirect(route.query.redirect);
+        await router.replace(target);
       },
       () => getCaptcha()
     );

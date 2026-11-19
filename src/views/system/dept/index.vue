@@ -51,8 +51,15 @@
             @node-click="onNodeClick"
           >
             <template #default="{ data }">
-              <span class="node" :class="{ off: data.status !== CommonStatus.ENABLED }">
+              <span
+                class="node"
+                :class="{ off: data.status !== CommonStatus.ENABLED, shell: data.readOnly }"
+              >
                 <span class="node-name" :title="data.name">{{ data.name }}</span>
+                <!-- #26 B3（D2）：祖先只读壳——保留组织上下文，但不提供任何写操作入口 -->
+                <el-tooltip v-if="data.readOnly" content="上级单位仅可见不可管" placement="top">
+                  <el-tag size="small" type="info" effect="plain" class="node-type">仅可见</el-tag>
+                </el-tooltip>
                 <el-tag
                   v-if="data.type === '采样机构'"
                   size="small"
@@ -96,30 +103,36 @@
               </h3>
             </div>
             <div class="ops">
-              <el-button
-                v-hasPerm="['sys:dept:create']"
-                :icon="Plus"
-                @click="openDialog(selected.id)"
-              >
-                新增下级
-              </el-button>
-              <el-button
-                v-if="canEditAny"
-                type="primary"
-                :icon="Edit"
-                @click="openDialog(selected.parentId, selected.id)"
-              >
-                编辑
-              </el-button>
-              <el-button
-                v-hasPerm="['sys:dept:delete']"
-                type="danger"
-                plain
-                :icon="Delete"
-                @click="handleDelete(selected.id)"
-              >
-                删除
-              </el-button>
+              <!-- #26 B3：祖先只读壳不给写操作入口，tooltip 说明原因 -->
+              <el-tooltip v-if="selected.readOnly" content="上级单位仅可见不可管" placement="top">
+                <el-tag type="info" effect="plain">仅可见</el-tag>
+              </el-tooltip>
+              <template v-else>
+                <el-button
+                  v-hasPerm="['sys:dept:create']"
+                  :icon="Plus"
+                  @click="openDialog(selected.id)"
+                >
+                  新增下级
+                </el-button>
+                <el-button
+                  v-if="canEditAny"
+                  type="primary"
+                  :icon="Edit"
+                  @click="openDialog(selected.parentId, selected.id)"
+                >
+                  编辑
+                </el-button>
+                <el-button
+                  v-hasPerm="['sys:dept:delete']"
+                  type="danger"
+                  plain
+                  :icon="Delete"
+                  @click="handleDelete(selected.id)"
+                >
+                  删除
+                </el-button>
+              </template>
             </div>
           </div>
 
@@ -183,7 +196,12 @@
                 empty-text="没有下级部门"
                 @selection-change="handleSelectionChange"
               >
-                <el-table-column type="selection" width="44" />
+                <!-- #26 B3：祖先只读壳不可勾选，批量删除自然够不到它们 -->
+                <el-table-column
+                  type="selection"
+                  width="44"
+                  :selectable="(row: DeptItem) => !row.readOnly"
+                />
                 <!-- 编号放在名称下面：右侧详情区窄，列多了「状态」会被固定的操作列盖住 -->
                 <el-table-column label="部门名称 · 编号" min-width="150">
                   <template #default="{ row }">
@@ -215,24 +233,29 @@
                 </el-table-column>
                 <el-table-column label="操作" width="110" fixed="right">
                   <template #default="{ row }">
-                    <el-button
-                      v-if="canEditAny"
-                      link
-                      type="primary"
-                      size="small"
-                      @click="openDialog(row.parentId, row.id)"
-                    >
-                      编辑
-                    </el-button>
-                    <el-button
-                      v-hasPerm="['sys:dept:delete']"
-                      link
-                      type="danger"
-                      size="small"
-                      @click="handleDelete(row.id)"
-                    >
-                      删除
-                    </el-button>
+                    <el-tooltip v-if="row.readOnly" content="上级单位仅可见不可管" placement="top">
+                      <span class="muted">仅可见</span>
+                    </el-tooltip>
+                    <template v-else>
+                      <el-button
+                        v-if="canEditAny"
+                        link
+                        type="primary"
+                        size="small"
+                        @click="openDialog(row.parentId, row.id)"
+                      >
+                        编辑
+                      </el-button>
+                      <el-button
+                        v-hasPerm="['sys:dept:delete']"
+                        link
+                        type="danger"
+                        size="small"
+                        @click="handleDelete(row.id)"
+                      >
+                        删除
+                      </el-button>
+                    </template>
                   </template>
                 </el-table-column>
               </el-table>
@@ -321,16 +344,27 @@
           <el-row :gutter="16">
             <el-col :span="24">
               <el-form-item label="上级部门" prop="parentId">
+                <!-- #26 B3：scoped options；祖先壳禁用（不能把部门挂到上级单位下），scoped 用户没有「顶级部门」 -->
                 <el-tree-select
                   v-model="formData.parentId"
                   :disabled="basicLocked"
                   placeholder="选择上级部门"
                   :data="deptOptions"
+                  :props="{ label: 'label', children: 'children', disabled: 'readOnly' }"
                   filterable
                   check-strictly
                   :render-after-expand="false"
                   style="width: 100%"
-                />
+                >
+                  <template #default="{ data }">
+                    <span>{{ data.label }}</span>
+                    <span v-if="data.readOnly" class="option-meta">
+                      {{
+                        data.value === "0" ? "你的数据范围不能建顶级部门" : "上级单位仅可见不可管"
+                      }}
+                    </span>
+                  </template>
+                </el-tree-select>
               </el-form-item>
             </el-col>
             <el-col :span="12" :xs="24">
@@ -627,6 +661,8 @@ import { pinyin } from "pinyin-pro";
 import CameraEditor from "./CameraEditor.vue";
 import DeptLimitPanel from "./DeptLimitPanel.vue";
 import { usePerm } from "@/composables/usePerm";
+import { useUserStore } from "@/stores/user";
+import type { ApiError } from "@/utils/request";
 import type { RoleOption } from "@/api/system/role";
 
 defineOptions({
@@ -637,6 +673,9 @@ defineOptions({
 const router = useRouter();
 const deptFormRef = ref<FormInstance>();
 const can = usePerm();
+const me = useUserStore();
+/** #26 B3：只有全部数据范围能建顶级部门；scoped（本单位子树+祖先壳）不给「顶级部门」选项。 */
+const scopeAll = computed(() => me.userInfo.dataScope !== "scoped");
 /** 编辑部门拆成五项：名称和上级、类型、地址和联系人、监控通道、负责人，有任意一项就能打开编辑。 */
 const canEditAny = computed(() =>
   [
@@ -1041,6 +1080,16 @@ function resetForm(): void {
   Object.assign(formData, initialFormData, { cameras: [] });
 }
 
+/** scoped 选项树里第一个可管（非壳）节点：scoped 用户新增部门时的默认上级。 */
+function firstManageOption(nodes: OptionItem[]): string {
+  for (const node of nodes || []) {
+    if (!node.readOnly) return String(node.value);
+    const hit = node.children ? firstManageOption(node.children) : "";
+    if (hit) return hit;
+  }
+  return "";
+}
+
 /**
  * 打开新增/编辑部门弹窗。
  *
@@ -1048,11 +1097,20 @@ function resetForm(): void {
  * @param deptId 部门 ID（编辑时传入）
  */
 async function openDialog(parentId?: string, deptId?: string): Promise<void> {
-  const data = await DeptAPI.getOptions();
+  let data: OptionItem[];
+  try {
+    data = await DeptAPI.getOptions();
+  } catch {
+    return; // 失败原因全局提示已说明
+  }
+  // #26 B3：选项树后端已收敛（本单位子树+祖先只读壳），不再出现全公司树。
+  // 「顶级部门」只有全部数据范围能选；scoped 用户保留一个禁用的虚拟根，
+  // 只为编辑本单位根部门（parentId=0）时能正常回显，选不中。
   deptOptions.value = [
     {
       value: "0",
       label: "顶级部门",
+      ...(scopeAll.value ? {} : { readOnly: true }),
       children: data,
     },
   ];
@@ -1066,10 +1124,21 @@ async function openDialog(parentId?: string, deptId?: string): Promise<void> {
     RoleAPI.getOptions()
       .then((list) => (roleOptions.value = list))
       .catch(() => {});
-  dialogState.visible = true;
   if (deptId) {
+    let form: DeptForm;
+    try {
+      form = await DeptAPI.getFormData(deptId, { silent: true });
+    } catch (error) {
+      // 范围外部门后端回 A0404「部门不存在」：友好文案，不裸露技术码，也不开空抽屉
+      ElMessage.warning(
+        (error as ApiError)?.code === "A0404"
+          ? "这个部门不存在，或不在你的可见范围内"
+          : (error as Error)?.message || "部门信息加载失败"
+      );
+      return;
+    }
     dialogState.title = "修改部门";
-    const form = await DeptAPI.getFormData(deptId);
+    dialogState.visible = true;
     Object.assign(formData, form);
     if (form.leaderUserId) {
       leader.options = [
@@ -1081,9 +1150,17 @@ async function openDialog(parentId?: string, deptId?: string): Promise<void> {
         form.contact === form.leaderName && (form.phone || "") === (form.leaderMobile || "");
     }
   } else {
+    // scoped 用户建不了顶级部门：默认落到自己可管的第一个根；没有可管的就不开表单
+    const fallback =
+      parentId && parentId !== "0" ? parentId : scopeAll.value ? "0" : firstManageOption(data);
+    if (!fallback) {
+      ElMessage.warning("你的管理范围内没有可以新建下级的部门");
+      return;
+    }
     dialogState.title = "新增部门";
+    dialogState.visible = true;
     contactAuto = true;
-    formData.parentId = parentId || "0";
+    formData.parentId = fallback;
     formData.code = buildCode();
   }
   // 打开时不显示上一次的校验红字
@@ -1300,6 +1377,10 @@ onMounted(() => {
 }
 .node.off {
   color: var(--el-text-color-placeholder);
+}
+/* 祖先只读壳：弱化显示，和可管的本单位子树区分开 */
+.node.shell .node-name {
+  color: var(--el-text-color-secondary);
 }
 .node-name {
   overflow: hidden;

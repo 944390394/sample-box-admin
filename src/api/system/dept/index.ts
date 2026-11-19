@@ -38,9 +38,13 @@ const DeptAPI = {
   getOptions() {
     return request<unknown, OptionItem[]>({ url: `${DEPT_BASE_URL}/options`, method: "get" });
   },
-  /** 获取部门表单数据 */
-  getFormData(id: string) {
-    return request<unknown, DeptForm>({ url: `${DEPT_BASE_URL}/${id}/form`, method: "get" });
+  /** 获取部门表单数据。silent=true 时不弹全局提示，由调用方按码给友好文案（如范围外 A0404）。 */
+  getFormData(id: string, opts?: { silent?: boolean }) {
+    return request<unknown, DeptForm>({
+      url: `${DEPT_BASE_URL}/${id}/form`,
+      method: "get",
+      ...opts,
+    });
   },
   /** 新增部门 */
   create(data: DeptForm) {

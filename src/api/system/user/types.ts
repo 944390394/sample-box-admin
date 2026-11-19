@@ -20,6 +20,8 @@ export interface UserInfo {
   roles: string[];
   /** 权限集合 */
   perms: string[];
+  /** #26 B3：数据范围口径。all=全部数据（可建顶级部门）；scoped=本单位子树+祖先只读壳。 */
+  dataScope?: "all" | "scoped";
   /** 须先改密：required 管理员要求（新建、重置、强制），expired 超过更换周期。null 不需要。 */
   passwordChange?: "required" | "expired" | null;
   /** 当前密码规则说明。 */

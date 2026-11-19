@@ -1,4 +1,4 @@
-import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
+import { operationScope } from "./operationLog.js";
 import { formatTimestamp } from "../domain/Clock.js";
 import { listColumns } from "../store/schema.js";
 import { parseTimestamp } from "./timeRange.js";
@@ -65,7 +65,20 @@ function orgClause(scope, column = "org_id") {
       params: ids,
     };
   }
-  return { empty: false, where: [], params: [] };
+  // #26 B1：仅本人（rank4）也要收口——日志按 actor_id、人数按 id，不再落到无条件的全表
+  if (scope.kind === "actor") {
+    const actorCol = column === "dept_id" ? "id" : "actor_id";
+    const ids = (scope.actorIds || [scope.actorId]).map(String).filter(Boolean);
+    if (!ids.length) return { empty: true, where: [], params: [] };
+    return {
+      empty: false,
+      where: [`${actorCol} IN (${ids.map(() => "?").join(", ")})`],
+      params: ids,
+    };
+  }
+  if (scope.kind === "all") return { empty: false, where: [], params: [] };
+  // 未知口径一律按空范围处理（fail-closed），不能默认放行全表
+  return { empty: true, where: [], params: [] };
 }
 
 export function dailyStatsSql(dialect, scope) {
@@ -132,46 +145,9 @@ export function userNewSql(scope) {
   };
 }
 
-function mapDept(row) {
-  return {
-    id: String(row.id),
-    parentId: String(row.parentId ?? ""),
-    name: row.name,
-    code: row.code,
-    sort: Number(row.sort) || 0,
-    status: Number(row.status) || 0,
-  };
-}
-
-function rootDept(rows, deptId) {
-  const byId = new Map(rows.map((row) => [row.id, row]));
-  let current = byId.get(String(deptId));
-  const seen = new Set();
-  while (current && !seen.has(current.id)) {
-    seen.add(current.id);
-    const parentId = current.parentId;
-    if (!parentId || parentId === "0" || !byId.has(parentId)) return current;
-    current = byId.get(parentId);
-  }
-  return current;
-}
-
-function isHeadquarters(dept) {
-  return dept?.code === "HQ" || dept?.name === "总公司";
-}
-
 export async function analyticsScope(db, user) {
-  const deptId = String(user?.dept_id || "");
-  if (!deptId) return { kind: "none" };
-  const rows = (
-    await db.all("SELECT id, parent_id AS parentId, name, code, sort, status FROM sys_dept")
-  ).map(mapDept);
-  const root = rootDept(rows, deptId);
-  if (!root) return { kind: "none" };
-  if (isHeadquarters(root)) return { kind: "all" };
-  const ids = collectDeptIds(buildDeptTree(rows), root.id) || [];
-  if (!ids.length) return { kind: "none" };
-  return { kind: "depts", ids };
+  // #26 B1：废弃按顶级公司子树的旧口径（跨机构泄露），与操作日志同一 scope
+  return operationScope(db, user);
 }
 
 export function resolveTrendDates(query = {}) {

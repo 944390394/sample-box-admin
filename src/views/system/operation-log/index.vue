@@ -17,6 +17,19 @@
           value-format="YYYY-MM-DD HH:mm:ss"
           class="range"
         />
+        <el-tree-select
+          v-if="orgOptions.length"
+          v-model="orgId"
+          :data="orgOptions"
+          :props="{ disabled: 'readOnly' }"
+          check-strictly
+          filterable
+          clearable
+          placeholder="所属单位"
+          class="org"
+          :render-after-expand="false"
+          @change="search"
+        />
         <el-input
           v-model="actor"
           clearable
@@ -33,14 +46,35 @@
         />
         <el-button type="primary" @click="search">查询</el-button>
         <el-button @click="resetFilters">重置</el-button>
+        <el-tooltip
+          v-if="canExport"
+          content="按当前筛选导出 CSV，一次最多 50,000 行"
+          placement="top"
+        >
+          <el-button :loading="exporting" @click="exportCsv">导出 CSV</el-button>
+        </el-tooltip>
       </div>
 
-      <el-table
-        v-loading="loading"
-        :data="list"
-        class="log-table"
-        empty-text="这段时间没有操作记录"
-      >
+      <el-alert v-if="loadError" type="error" :closable="false" show-icon class="load-error">
+        <template #title>{{ loadError.title }}</template>
+        <template #default>
+          {{ loadError.detail }}
+          <el-button link type="primary" class="retry" @click="load">重试</el-button>
+        </template>
+      </el-alert>
+
+      <el-table v-loading="loading" :data="list" class="log-table">
+        <template #empty>
+          <el-empty>
+            <template #description>
+              <p>{{ loadError ? "加载失败，请重试" : "这段时间没有操作记录" }}</p>
+              <p v-if="!loadError" class="empty-hint">
+                仅显示您数据范围内的操作记录，可调整时间范围或单位筛选后再试。
+              </p>
+            </template>
+            <el-button v-if="loadError" type="primary" @click="load">重试</el-button>
+          </el-empty>
+        </template>
         <el-table-column label="时间" width="150">
           <template #default="{ row }">
             <span class="time" :title="row.createdAt">{{ logTime(row.createdAt) }}</span>
@@ -75,6 +109,11 @@
             <span class="mono">{{ row.ip || "—" }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="80" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+          </template>
+        </el-table-column>
       </el-table>
       <div class="pager">
         <span class="text-muted">第 {{ pageIndex + 1 }} 页 · 每页 20 条</span>
@@ -84,6 +123,27 @@
         </div>
       </div>
     </el-card>
+
+    <el-drawer v-model="detailOpen" title="操作日志详情" size="420px">
+      <el-descriptions v-if="detailRow" :column="1" border>
+        <el-descriptions-item label="时间">
+          {{ fullTime(detailRow.createdAt) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="单位">{{ detailRow.orgName || "—" }}</el-descriptions-item>
+        <el-descriptions-item label="操作者">
+          {{ detailRow.actorName || "—" }}
+          <span v-if="detailRow.actorId" class="text-muted">（{{ detailRow.actorId }}）</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="动作">{{ actionText(detailRow) }}</el-descriptions-item>
+        <el-descriptions-item label="对象">{{ targetText(detailRow) || "—" }}</el-descriptions-item>
+        <el-descriptions-item label="结果">{{ detailRow.result }}</el-descriptions-item>
+        <el-descriptions-item label="来源 IP">{{ detailRow.ip || "—" }}</el-descriptions-item>
+        <el-descriptions-item label="明细">
+          <pre v-if="detailText" class="detail-json">{{ detailText }}</pre>
+          <span v-else>—</span>
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-drawer>
   </div>
 </template>
 
@@ -94,20 +154,52 @@ import OperationLogAPI, {
   type OperationLogCursor,
   type OperationLogItem,
 } from "@/api/system/operation-log";
+import DeptAPI from "@/api/system/dept";
+import type { OptionItem } from "@/api/common";
+import { usePerm } from "@/composables/usePerm";
+import { downloadFile } from "@/utils/download";
+import type { ApiError } from "@/utils/request";
 
 defineOptions({
   name: "OperationLog",
   inheritAttrs: false,
 });
 
+const can = usePerm();
+/** 导出按钮仅有 sys:oplog:export 码才显示；无码调接口也会被服务端 A0301/403 拦住 */
+const canExport = computed(() => can("sys:oplog:export"));
+
 const loading = ref(false);
 const list = ref<OperationLogItem[]>([]);
 const actor = ref("");
 const targetId = ref("");
+const orgId = ref("");
+/** 单位选项来自 scoped /depts/options：祖先只读壳不可选（选了也会被服务端收敛为空） */
+const orgOptions = ref<(OptionItem & { readOnly?: boolean })[]>([]);
 const range = ref<[string, string]>(defaultRange());
 const cursors = ref<(OperationLogCursor | null)[]>([null]);
 const pageIndex = ref(0);
 const nextCursor = ref<OperationLogCursor | null>(null);
+const loadError = ref<{ title: string; detail: string } | null>(null);
+const exporting = ref(false);
+const detailOpen = ref(false);
+const detailRow = ref<OperationLogItem | null>(null);
+
+/** 明细多是 JSON（grant diff/scope 前后），能解析就格式化展示，否则原样给文本 */
+const detailText = computed(() => {
+  const raw = detailRow.value?.detail || "";
+  if (!raw) return "";
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+});
+
+function openDetail(row: unknown) {
+  detailRow.value = row as OperationLogItem;
+  detailOpen.value = true;
+}
 
 /** 日志精确到秒：今年的不写年份，悬停看完整时间。 */
 function logTime(time: string) {
@@ -140,6 +232,7 @@ const TARGET_TYPES: Record<string, string> = {
   labels: "字段名称",
   database: "数据库",
   "report-policy": "上报策略",
+  oplog: "操作日志",
 };
 function targetText(row: unknown) {
   const item = row as OperationLogItem;
@@ -159,34 +252,107 @@ function actionText(row: unknown) {
   return action;
 }
 
-async function load() {
+/** 错误态按码分流：无权限给授权指引，网络错误可重试，其余（如超 31 天）照服务端文案。 */
+function describeError(error: unknown): { title: string; detail: string } {
+  const err = error as ApiError;
+  const code = err?.code;
+  if (code === "A0301")
+    return {
+      title: "没有查看操作日志的权限",
+      detail: "当前角色未分配操作日志查看权限，请联系管理员授权后重试。",
+    };
+  if (!code || code === "ERR_NETWORK" || code === "ECONNABORTED" || code === "ETIMEDOUT")
+    return {
+      title: "网络连接失败",
+      detail: "未能加载操作日志，请检查网络后重试。",
+    };
+  return { title: "加载失败", detail: err?.message || "请稍后重试。" };
+}
+
+function currentFilter() {
   const [from, to] = range.value || [];
+  return {
+    from,
+    to,
+    orgId: orgId.value || undefined,
+    actor: actor.value.trim() || undefined,
+    targetId: targetId.value.trim() || undefined,
+  };
+}
+
+async function load() {
+  const { from, to } = currentFilter();
   if (!from || !to) {
     ElMessage.warning("请选择时间");
     return;
   }
   loading.value = true;
+  loadError.value = null;
   try {
     const cursor = cursors.value[pageIndex.value];
     const page = await OperationLogAPI.page({
-      from,
-      to,
+      ...currentFilter(),
       limit: 20,
-      actor: actor.value.trim() || undefined,
-      targetId: targetId.value.trim() || undefined,
       cursorTime: cursor?.time,
       cursorId: cursor?.id,
     });
     list.value = page.list;
     nextCursor.value = page.nextCursor;
+  } catch (error) {
+    list.value = [];
+    nextCursor.value = null;
+    loadError.value = describeError(error);
   } finally {
     loading.value = false;
   }
 }
 
-/** 回到默认：最近 7 天、不限操作者和对象。 */
+/** 导出当前筛选（不带翻页游标）；截断时响应头会标明，提示分批导出。 */
+async function exportCsv() {
+  const { from, to } = currentFilter();
+  if (!from || !to) {
+    ElMessage.warning("请选择时间");
+    return;
+  }
+  exporting.value = true;
+  try {
+    const res = await OperationLogAPI.export(currentFilter());
+    downloadFile(res);
+    if (String(res.headers["x-export-truncated"]) === "1") {
+      const max = Number(res.headers["x-export-max"]) || 50000;
+      ElMessage.warning(
+        `已达单次导出上限 ${max.toLocaleString()} 行，仅导出最近的 ${max.toLocaleString()} 行；其余请缩小时间范围后分批导出`
+      );
+    } else {
+      ElMessage.success("导出成功");
+    }
+  } catch (error) {
+    reportExportError(error);
+  } finally {
+    exporting.value = false;
+  }
+}
+
+/**
+ * 错误体（含 blob 包裹的 JSON）已由 request.ts 拦截器统一解析成带 code/msg/status 的 ApiError，
+ * 这里只按码分流：无权限给授权指引，400 超 31 天照服务端文案，网络错误可重试。
+ */
+function reportExportError(error: unknown) {
+  const code = (error as ApiError)?.code;
+  const msg = (error as ApiError)?.message;
+  if (code === "A0301") {
+    ElMessage.error("没有导出操作日志的权限，请联系管理员授权后重试");
+  } else if (!code || code === "ERR_NETWORK" || code === "ECONNABORTED" || code === "ETIMEDOUT") {
+    ElMessage.error("网络连接失败，导出未完成，请重试");
+  } else {
+    ElMessage.error(msg || "导出失败，请重试");
+  }
+}
+
+/** 回到默认：最近 7 天、不限单位/操作者和对象。 */
 function resetFilters() {
   range.value = defaultRange();
+  orgId.value = "";
   actor.value = "";
   targetId.value = "";
   search();
@@ -212,7 +378,14 @@ function prev() {
   load();
 }
 
-onMounted(load);
+onMounted(async () => {
+  void load();
+  try {
+    orgOptions.value = await DeptAPI.getOptions();
+  } catch {
+    orgOptions.value = [];
+  }
+});
 </script>
 
 <style lang="scss" scoped>
@@ -223,11 +396,24 @@ onMounted(load);
   width: 360px;
   max-width: 100%;
 }
+.org {
+  width: 220px;
+}
 .field {
   width: 200px;
 }
 .field.wide {
   width: 300px;
+}
+.load-error {
+  margin-bottom: 12px;
+}
+.retry {
+  margin-left: 8px;
+}
+.empty-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .time,
 .mono {
@@ -267,8 +453,17 @@ onMounted(load);
   justify-content: space-between;
   margin-top: 12px;
 }
+.detail-json {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  font-size: 12px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
 @media (max-width: 640px) {
   .range,
+  .org,
   .field,
   .field.wide {
     width: 100%;

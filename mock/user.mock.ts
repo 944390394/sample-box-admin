@@ -10,19 +10,19 @@ import {
 } from "../shared/org.js";
 
 const adminPerms = [
-  "sys:user:list",
+  "sys:user:view",
   "sys:user:create",
   "sys:user:update",
   "sys:user:delete",
   "sys:user:import",
   "sys:user:export",
   "sys:user:reset-password",
-  "sys:role:list",
+  "sys:role:view",
   "sys:role:create",
   "sys:role:update",
   "sys:role:delete",
-  "sys:role:assign",
-  "sys:dept:list",
+  "sys:role:grant",
+  "sys:dept:view",
   "sys:dept:create",
   "sys:dept:update",
   "sys:dept:delete",

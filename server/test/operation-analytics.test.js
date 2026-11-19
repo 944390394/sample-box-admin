@@ -132,11 +132,13 @@ test("按组织和日期汇总操作条数与不重复操作者", async () => {
     assert.equal(overview.pvGrowthRate, 3);
     assert.equal(overview.uvGrowthRate, 2);
 
+    // B1 scope 收敛（R4）：chen.ke 在 21 调度室（DISPATCH scope2），manage=[21]，
+    // 不再按顶级公司「华南分公司」子树统计——org 2 的那条（actor 20）不再计入
     const own = await queryVisitOverview(db, branch, NOW);
-    assert.equal(own.todayPvCount, 2);
-    assert.equal(own.todayUvCount, 2);
-    assert.equal(own.totalPvCount, 2);
-    assert.equal(own.totalUvCount, 2);
+    assert.equal(own.todayPvCount, 1);
+    assert.equal(own.todayUvCount, 1);
+    assert.equal(own.totalPvCount, 1);
+    assert.equal(own.totalUvCount, 1);
     assert.equal(own.pvGrowthRate, 0);
     assert.equal(own.uvGrowthRate, 0);
 
@@ -148,8 +150,9 @@ test("按组织和日期汇总操作条数与不重复操作者", async () => {
     assert.equal(agency.totalPvCount, 1);
     assert.equal(agency.totalUvCount, 1);
 
+    // B1：{dept_id:"31"} 没有 id/角色 → resolveAccess 无生效角色 → 空范围（旧口径按华东子树放行是泄露）
     const east = await queryVisitOverview(db, { dept_id: "31" }, NOW);
-    assert.equal(east.totalPvCount, 1);
+    assert.equal(east.totalPvCount, 0);
     assert.equal(east.todayPvCount, 0);
     assert.equal(east.pvGrowthRate, 0);
 
@@ -165,6 +168,7 @@ test("按组织和日期汇总操作条数与不重复操作者", async () => {
     assert.deepEqual(trend.pvList, [1, 4]);
     assert.deepEqual(trend.uvList, [1, 3]);
 
+    // B1：branchTrend 同口径收敛到 [21]，10-15 只剩 org 21 的一条
     const branchTrend = await queryVisitTrend(db, branch, {
       startDate: "2026-10-01",
       endDate: "2026-10-15",
@@ -172,11 +176,11 @@ test("按组织和日期汇总操作条数与不重复操作者", async () => {
     assert.equal(branchTrend.dates.length, 15);
     assert.equal(branchTrend.pvList[0], 0);
     assert.equal(branchTrend.pvList[13], 0);
-    assert.equal(branchTrend.pvList[14], 2);
-    assert.equal(branchTrend.uvList[14], 2);
+    assert.equal(branchTrend.pvList[14], 1);
+    assert.equal(branchTrend.uvList[14], 1);
     assert.equal(
       branchTrend.pvList.reduce((sum, value) => sum + value, 0),
-      2
+      1
     );
 
     const month = await queryVisitTrend(db, admin, {
@@ -341,7 +345,9 @@ test("在线人数取最近 15 分钟的操作者，用户增长率按今天相�
     const branch = await db.get("SELECT * FROM sys_user WHERE username = ?", ["chen.ke"]);
     const partner = await db.get("SELECT * FROM sys_user WHERE username = ?", ["lin.xia"]);
     assert.equal((await queryOnlineActors(db, admin, NOW)).count, 3);
-    assert.equal((await queryOnlineActors(db, branch, NOW)).count, 1);
+    // B1：branch 收敛到 [21]，org 21 那条在 11:44:59.999（窗口 11:45 起之前）→ 窗口内无人；
+    // 旧口径按 [2,21] 会算进 org 2 的 actor 20
+    assert.equal((await queryOnlineActors(db, branch, NOW)).count, 0);
     assert.equal((await queryOnlineActors(db, partner, NOW)).count, 0);
     assert.equal((await queryOnlineActors(db, { dept_id: "" }, NOW)).count, 0);
 
@@ -351,8 +357,9 @@ test("在线人数取最近 15 分钟的操作者，用户增长率按今天相�
     const south = await queryUserStats(db, branch, NOW);
     assert.equal(south.total, 2);
     assert.equal(south.growthRate, -1);
+    // B1：lin.xia 是采样员（仅本人）→ 人数只数自己（旧口径按顶级「合作采样机构」子树会数进机构乙的 zhao.heng）
     const agency = await queryUserStats(db, partner, NOW);
-    assert.equal(agency.total, 2);
+    assert.equal(agency.total, 1);
     assert.equal(agency.growthRate, 0);
     assert.deepEqual(await queryUserStats(db, { dept_id: "" }, NOW), {
       total: 0,
@@ -391,7 +398,15 @@ test("用户表没有创建时间时只返回人数", async () => {
     await db.run(
       "INSERT INTO sys_user (id, username, dept_id, status) VALUES ('2', 'admin', '1', 1), ('4', 'other', '1', 1)"
     );
-    assert.deepEqual(await queryUserStats(db, { dept_id: "1" }, NOW), {
+    // B1：统计 scope 改由 resolveAccess 派生，需要角色表；给 admin 一个 ADMIN 角色（全部数据），
+    // 保持本用例原意——用户表没有 create_time 时只点人数、不算增长率
+    await db.exec(
+      "CREATE TABLE sys_role (id TEXT PRIMARY KEY, code TEXT NOT NULL, data_scope INT NOT NULL, status INT NOT NULL)"
+    );
+    await db.exec("CREATE TABLE sys_user_role (user_id TEXT NOT NULL, role_id TEXT NOT NULL)");
+    await db.run("INSERT INTO sys_role (id, code, data_scope, status) VALUES ('1', 'ADMIN', 1, 1)");
+    await db.run("INSERT INTO sys_user_role (user_id, role_id) VALUES ('2', '1')");
+    assert.deepEqual(await queryUserStats(db, { id: "2", dept_id: "1" }, NOW), {
       total: 2,
       growthRate: null,
     });

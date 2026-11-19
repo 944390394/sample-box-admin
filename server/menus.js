@@ -5,6 +5,7 @@
  */
 
 import { boxPermTree, viewPermTree, LOG_PERMS } from "./src/auth/permCatalog.js";
+import { transferInspectEnabled } from "./src/settings/boxConfig.js";
 
 function menu(path, component, name, title, icon, hidden = false, extra = {}) {
   return {
@@ -249,6 +250,57 @@ export function menusFor(perms) {
   return menuRoutes
     .map((route) => ({ ...route, children: route.children.filter(allowed) }))
     .filter((route) => route.children.some((item) => !item.meta.hidden));
+}
+
+/**
+ * #26 m-06：调拨单/送检单目前由前端 local-menus 注入（src/router/local-menus.ts，
+ * gate = box.enableTransferInspect 开关 + device:box:task 权限，插在「任务单」组之后），
+ * server menuRoutes 不含这两组。预览在这里镜像同一口径，保证「预览 = 真实侧栏」：
+ * 开关开时列出这两组（on 按 device:box:task 判），开关关时功能不存在、预览不列。
+ * 组名/子项标题/hidden 与 local-menus.ts 保持一致；那边改菜单时这里要同步。
+ */
+const LOCAL_TRANSFER_INSPECT = [
+  {
+    group: "调拨单",
+    items: [
+      { title: "调拨单", hidden: false },
+      { title: "划拨单详情", hidden: true },
+    ],
+  },
+  { group: "送检单", items: [{ title: "送检单", hidden: false }] },
+];
+
+/**
+ * #26 B4：角色页「能看到的菜单」预览——与侧栏 menusFor 同一实现（直接拿它的裁剪结果标 on/off），
+ * 前端不再自抄一份菜单+权限表。列出全部菜单项（含隐藏的详情/创建页），on=侧栏实际可见。
+ * 分组被 menusFor 整组裁掉时，组内隐藏项也标 off（侧栏确实进不去）。
+ * #26 m-06：另镜像前端 local-menus 的调拨/送检注入（见 LOCAL_TRANSFER_INSPECT）。
+ */
+export function menuPreviewFor(perms) {
+  const visible = new Set(
+    menusFor(perms).flatMap((group) => group.children.map((item) => item.name))
+  );
+  const local = transferInspectEnabled()
+    ? LOCAL_TRANSFER_INSPECT.flatMap((g) =>
+        g.items.map((item) => ({
+          title: item.title === g.group ? item.title : `${g.group} · ${item.title}`,
+          on: perms.has("device:box:task"),
+          hidden: item.hidden,
+        }))
+      )
+    : [];
+  return menuRoutes.flatMap((group) => {
+    const items = group.children.map((item) => ({
+      title:
+        item.meta.title === group.meta.title
+          ? item.meta.title
+          : `${group.meta.title} · ${item.meta.title}`,
+      on: visible.has(item.name),
+      hidden: Boolean(item.meta.hidden),
+    }));
+    // 与 mergeLocalMenus 同位置：插在「任务单」组之后
+    return group.path === "/task" ? [...items, ...local] : items;
+  });
 }
 
 /**

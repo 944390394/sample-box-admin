@@ -21,6 +21,7 @@ import { MemoryStateCache } from "../src/cache/MemoryStateCache.js";
 import { ReportPolicy } from "../src/settings/ReportPolicy.js";
 import { ReportPolicyController } from "../src/http/ReportPolicyController.js";
 import { unbindWechat } from "../org-api.js";
+import { resolveAccess } from "../src/auth/boxAccess.js";
 import { packet } from "./fixture.js";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
@@ -167,14 +168,14 @@ test("小程序绑定：没绑先要账号密码，绑定后静默登录；换�
     assert.ok((await call("unbind", { user: admin })).ok);
     assert.deepEqual((await call("login")).data, { bound: false });
 
-    // 管理员在人员管理里解绑
+    // 管理员在人员管理里解绑（#26 m-01：isAdmin fail-closed，ctx 必须带 dispatcher 解析好的 access）
     await call("bind", { body: { code: "c", username: "admin", password: "123456" } });
     let out;
     await unbindWechat({
       db,
       user: admin,
       params: { id: String(admin.id) },
-      access: null,
+      access: await resolveAccess(db, admin),
       ok: (_d, m) => (out = m),
       fail: (m) => (out = m),
     });

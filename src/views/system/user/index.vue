@@ -31,7 +31,17 @@
           default-expand-all
           highlight-current
           @node-click="(data: OptionItem) => pickDept(String(data.value))"
-        />
+        >
+          <!-- #26 B3（D2）：树已由后端按范围收敛；祖先壳标「仅可见」，点它只是筛选，不提供任何写入口 -->
+          <template #default="{ data }">
+            <span class="tree-node" :class="{ shell: data.readOnly }">
+              <span class="tree-node__label">{{ data.label }}</span>
+              <el-tooltip v-if="data.readOnly" content="上级单位仅可见不可管" placement="top">
+                <el-tag size="small" type="info" effect="plain">仅可见</el-tag>
+              </el-tooltip>
+            </span>
+          </template>
+        </el-tree>
       </aside>
 
       <el-card shadow="never" class="main">
@@ -183,15 +193,22 @@
           <el-input v-model="form.data.nickname" maxlength="64" :disabled="!canProfile" />
         </el-form-item>
         <el-form-item label="部门" prop="deptId">
+          <!-- #26 B3：scoped options（后端已收敛＝本单位子树+祖先壳）；祖先壳禁用，不能把人挂到上级单位 -->
           <el-tree-select
             v-model="form.data.deptId"
             :data="deptTree"
+            :props="{ label: 'label', children: 'children', disabled: 'readOnly' }"
             check-strictly
             filterable
             :render-after-expand="false"
             style="width: 100%"
             :disabled="!canProfile"
-          />
+          >
+            <template #default="{ data }">
+              <span>{{ data.label }}</span>
+              <span v-if="data.readOnly" class="role-reason">上级单位仅可见不可管</span>
+            </template>
+          </el-tree-select>
         </el-form-item>
         <el-form-item label="角色">
           <el-select
@@ -505,10 +522,25 @@ async function onMore(cmd: string, input: Partial<UserItem>) {
 }
 
 const formRef = ref<FormInstance>();
+/** #26 B3：左树筛在祖先壳上时，新增人员不能默认挂到壳上——只有可管节点才作默认部门。 */
+function defaultDeptId(): string {
+  const id = query.deptId;
+  if (!id) return "";
+  const find = (nodes: OptionItem[]): OptionItem | undefined => {
+    for (const node of nodes) {
+      if (String(node.value) === id) return node;
+      const hit = node.children ? find(node.children) : undefined;
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  const node = find(deptTree.value);
+  return node && !node.readOnly ? id : "";
+}
 const blank = (): UserForm => ({
   username: "",
   nickname: "",
-  deptId: query.deptId || "",
+  deptId: defaultDeptId(),
   roleIds: [],
   mobile: "",
   email: "",
@@ -548,7 +580,13 @@ const rules: FormRules = {
 async function openForm(id = "") {
   Object.assign(form, { open: true, saving: false, id, origStatus: 1, data: blank() });
   if (id) {
-    form.data = { ...blank(), ...(await UserAPI.getFormData(id)) };
+    try {
+      form.data = { ...blank(), ...(await UserAPI.getFormData(id)) };
+    } catch {
+      // 范围外人员后端回 A0404「用户不存在」，全局提示已是友好文案；这里收起抽屉，不留空表单
+      form.open = false;
+      return;
+    }
     form.origStatus = Number(form.data.status ?? 1);
   }
 }
@@ -675,6 +713,23 @@ function rolesOf(names?: string) {
 .all.on {
   color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
+}
+.tree-node {
+  display: flex;
+  flex: 1;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  padding-right: 6px;
+}
+.tree-node__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 祖先只读壳：弱化显示，和可管的本单位子树区分开 */
+.tree-node.shell .tree-node__label {
+  color: var(--el-text-color-secondary);
 }
 .main {
   flex: 1;

@@ -20,7 +20,7 @@ import { AccountSecurity } from "./src/auth/AccountSecurity.js";
 import { migrate, openDatabase, seedOrg, testConnection } from "./db.js";
 import { menuOptions, menusFor } from "./menus.js";
 import * as org from "./org-api.js";
-import { resolveAccess, seedRolePerms } from "./src/auth/boxAccess.js";
+import { requireAccess, resolveAccess, seedRolePerms } from "./src/auth/boxAccess.js";
 import { startSampleRuntime } from "./src/createSampleApp.js";
 import { audit } from "./src/log/audit.js";
 import {
@@ -30,6 +30,7 @@ import {
   queryVisitTrend,
 } from "./src/log/operationAnalytics.js";
 import { queryOperationLogs } from "./src/log/operationLog.js";
+import { operationLogsExport } from "./src/log/operationLogExport.js";
 import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js";
 import { mergeDatabaseSettings, publicDatabase, scrub } from "./src/settings/databaseConfig.js";
 import { tcpPassthroughSettings } from "./src/tcpSettings.js";
@@ -306,8 +307,7 @@ const routes = [
     path: "/api/v1/menus/routes",
     auth: true,
     handler: async (ctx) => {
-      const access = await resolveAccess(ctx.db, ctx.user);
-      ctx.ok(menusFor(access.perms));
+      ctx.ok(menusFor(ctx.access.perms));
     },
   },
   {
@@ -316,6 +316,8 @@ const routes = [
     auth: true,
     handler: async (ctx) => ctx.ok(menuOptions),
   },
+  // #26 B1：部门选项不加 perm 门（箱子/任务/划拨页的筛选和划拨目标选择都拉它，调度员没有部门/人员查看权限），
+  // 改由 deptOptions 按 scope 裁剪：manage 子树 + 祖先只读壳，范围外的人拿到空树。
   { method: "GET", path: "/api/v1/depts/options", auth: true, handler: org.deptOptions },
   {
     method: "GET",
@@ -391,7 +393,13 @@ const routes = [
     perm: "sys:dept:delete",
     handler: org.deleteDepts,
   },
-  { method: "GET", path: "/api/v1/roles/options", auth: true, handler: org.roleOptions },
+  {
+    method: "GET",
+    path: "/api/v1/roles/options",
+    auth: true,
+    perm: ["sys:role:view", "sys:user:role", "sys:user:view", "sys:dept:view"],
+    handler: org.roleOptions,
+  },
   {
     method: "GET",
     path: "/api/v1/roles",
@@ -452,7 +460,37 @@ const routes = [
     method: "GET",
     path: "/api/v1/roles/:id/dept-ids",
     auth: true,
-    handler: async (ctx) => ctx.ok([]),
+    perm: ["sys:role:view", "sys:role:update", "sys:role:scope", "sys:role:grant"],
+    handler: org.roleDeptIds,
+  },
+  // #26 B4：菜单预览单源（menusFor 同一实现）；draft 预览未保存勾选，审计抽屉只读
+  {
+    method: "GET",
+    path: "/api/v1/roles/:id/menu-preview",
+    auth: true,
+    perm: ["sys:role:view", "sys:role:update", "sys:role:scope", "sys:role:grant"],
+    handler: org.roleMenuPreview,
+  },
+  {
+    method: "POST",
+    path: "/api/v1/roles/menu-preview",
+    auth: true,
+    perm: [
+      "sys:role:view",
+      "sys:role:update",
+      "sys:role:grant",
+      "sys:dept:limit",
+      "sys:dept:view",
+      "sys:user:view",
+    ],
+    handler: org.draftMenuPreview,
+  },
+  {
+    method: "GET",
+    path: "/api/v1/roles/:id/grant-audit",
+    auth: true,
+    perm: ["sys:role:view", "sys:role:update", "sys:role:scope", "sys:role:grant"],
+    handler: org.roleGrantAudit,
   },
   {
     method: "PUT",
@@ -973,6 +1011,15 @@ const routes = [
     perm: "sys:oplog:read",
     handler: operationLogs,
   },
+  // #26 B2（D4）：导出操作日志。路径与列表不同，matchRoute 精确匹配互不冲突；
+  // 范围/过滤与列表同口径（越权 orgId 收敛为空），上限 5 万行，无 sys:oplog:export 码走通用门禁 A0301/403
+  {
+    method: "GET",
+    path: "/api/v1/system/operation-logs/export",
+    auth: true,
+    perm: "sys:oplog:export",
+    handler: operationLogsExport,
+  },
   {
     method: "GET",
     path: "/api/v1/logs/analytics/overview",
@@ -1157,7 +1204,7 @@ async function refresh(ctx) {
 /** 系统管理的按钮权限只给系统管理员；采样箱和视角权限按角色页保存的授权算。 */
 async function me(ctx) {
   const roles = await roleCodes(ctx.user.id);
-  const access = await resolveAccess(state.db, ctx.user);
+  const access = ctx.access;
   const policy = publicSecurity(state.config);
   ctx.ok({
     userId: ctx.user.id,
@@ -1165,7 +1212,9 @@ async function me(ctx) {
     nickname: ctx.user.nickname,
     avatar: ctx.user.avatar || "",
     roles,
-    perms: [...legacyPerms(access.perms), ...access.perms],
+    // #26 B4：legacy 别名（sys:user:list / sys:role:list / sys:role:assign / sys:dept:list）已清理，
+    // 前端按钮全部改用新码（043 起），不再下发旧别名。
+    perms: [...access.perms],
     dataScope: access.scope.all ? "all" : "scoped",
     passwordChange: passwordChangeReason(ctx.user, policy),
     passwordRule: describePolicy(policy),
@@ -1175,20 +1224,6 @@ async function me(ctx) {
       ])
     ),
   });
-}
-
-/** 模板页面还在用的按钮权限码，由新的权限码推出来。 */
-function legacyPerms(granted) {
-  const out = [];
-  const map = {
-    // 增删改已经是独立的权限码（迁移 043），这里只剩列表和分配的旧别名
-    "sys:user:view": ["sys:user:list"],
-    "sys:role:view": ["sys:role:list"],
-    "sys:role:grant": ["sys:role:assign"],
-    "sys:dept:view": ["sys:dept:list"],
-  };
-  for (const [code, aliases] of Object.entries(map)) if (granted.has(code)) out.push(...aliases);
-  return out;
 }
 
 async function profile(ctx) {
@@ -1216,12 +1251,12 @@ async function profile(ctx) {
 
 async function useSample(ctx, run) {
   if (!sampleApi) return ctx.fail("请先完成数据库安装");
-  ctx.access = await resolveAccess(state.db, ctx.user);
+  await requireAccess(state.db, ctx);
   return run(sampleApi);
 }
 
 async function systemSettings(ctx) {
-  const access = await resolveAccess(state.db, ctx.user);
+  const access = await requireAccess(state.db, ctx);
   const has = (code) => access.perms.has(code);
   const certExpiresAt = await readServingCertExpiry();
   const view = has("sys:settings:view");
@@ -1600,7 +1635,8 @@ async function switchDatabase(nextConfig) {
 }
 
 async function operationLogs(ctx) {
-  const page = await queryOperationLogs(state.db, ctx.user, ctx.query);
+  // #26 B-01：按查看者设备标识权限读时打码（requireAccess 已统一解析 ctx.access）
+  const page = await queryOperationLogs(state.db, ctx.user, ctx.query, ctx.access?.perms ?? null);
   if (page.error) return ctx.fail(page.error);
   ctx.ok({ list: page.list, nextCursor: page.nextCursor });
 }
@@ -1643,13 +1679,15 @@ async function socketAccess(token) {
   return resolveAccess(state.db, user);
 }
 
-async function streamDownload(res, filename, chunks) {
+async function streamDownload(res, filename, chunks, extraHeaders = {}) {
   res.writeHead(200, {
     "Content-Type": "text/csv; charset=utf-8",
     "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    ...extraHeaders,
     ...corsHeaders(res.req?.headers?.origin, {
       ...corsOptions,
-      expose: ["Content-Disposition"],
+      // 导出附加头（行数/截断标记）也要暴露给跨域页面读取
+      expose: ["Content-Disposition", ...Object.keys(extraHeaders)],
     }),
   });
   for await (const chunk of chunks) {
@@ -1732,7 +1770,8 @@ const httpServer = createServer(async (req, res) => {
       invalidateSessions: (id) => sampleRuntime?.disconnectUser(id),
       ok: (data, msg) => ok(res, data, msg),
       fail: (msg, code, status, data) => fail(res, msg, code, status, data),
-      download: (filename, chunks) => streamDownload(res, filename, chunks),
+      download: (filename, chunks, extraHeaders) =>
+        streamDownload(res, filename, chunks, extraHeaders),
     };
     try {
       if (matched.route.path.startsWith("/api/v1/sample/boxes/:id") && ctx.params.id) {
@@ -1754,8 +1793,10 @@ const httpServer = createServer(async (req, res) => {
           return ctx.fail("请先修改密码", "A0240", 403);
         }
       }
+      // #26 B1：所有 auth 路由统一解析 ctx.access（requireAccess 已解析则复用），
+      // 消除「无 perm 路由 access=undefined → org-api isAdmin 恒真」的全量泄露
+      if (ctx.user) await requireAccess(state.db, ctx);
       if (matched.route.perm) {
-        ctx.access = await resolveAccess(state.db, ctx.user);
         const wanted = Array.isArray(matched.route.perm)
           ? matched.route.perm
           : [matched.route.perm];

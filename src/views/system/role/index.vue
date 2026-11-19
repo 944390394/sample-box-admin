@@ -47,7 +47,10 @@
               <template v-if="fixed">· 固定拥有全部权限</template>
             </p>
           </div>
-          <div v-if="canUpdate || canScope || canDelete" class="ops">
+          <div v-if="canUpdate || canScope || canDelete || canAudit" class="ops">
+            <el-button v-if="canAudit" data-test="role-audit-open" @click="openAudit">
+              授权审计
+            </el-button>
             <el-button
               v-if="(canUpdate || canScope) && (!fixed || isAdmin)"
               @click="openForm(current.id)"
@@ -89,6 +92,21 @@
             </li>
           </ul>
         </el-alert>
+
+        <!-- #26 B4：数据范围也是授权的一部分——和权限一起草稿、一起确认保存。
+             选 5（自定义）时出部门多选树（scoped options，壳节点禁选）。 -->
+        <div v-if="!fixed" class="scope-row" data-test="scope-row">
+          <span class="scope-label">数据范围</span>
+          <RoleScopePicker
+            v-model="scopeDraft"
+            v-model:dept-ids="deptDraft"
+            :options="deptOptions"
+            :disabled="!canScope"
+            :my-scope="myScope"
+            class="scope-picker"
+          />
+          <el-tag v-if="scopeDirty" size="small" type="warning" effect="plain">未保存</el-tag>
+        </div>
 
         <div v-if="!fixed" class="toolbar">
           <template v-if="editable">
@@ -145,7 +163,7 @@
           />
 
           <aside class="preview" data-test="perm-preview">
-            <div class="pv">
+            <div v-loading="previewLoading" class="pv">
               <h4>能看到的菜单</h4>
               <ul>
                 <li v-for="menu in menuPreview" :key="menu.title" :class="{ off: !menu.on }">
@@ -153,6 +171,9 @@
                   {{ menu.title }}
                 </li>
               </ul>
+              <p v-if="!menuPreview.length && !previewLoading" class="text-muted small">
+                菜单预览暂不可用（服务端菜单接口未就绪）
+              </p>
             </div>
             <div class="pv">
               <h4>工作台卡片</h4>
@@ -188,12 +209,15 @@
           </aside>
         </div>
 
-        <div v-if="editable" class="save-bar" data-test="save-bar">
+        <div v-if="editable || canScope" class="save-bar" data-test="save-bar">
           <span v-if="dirty" class="diff">
             <span v-if="diff.added.length" class="add">新增 {{ diff.added.length }} 项</span>
             <span v-if="diff.removed.length" class="del">收回 {{ diff.removed.length }} 项</span>
             <span v-if="diff.grantChanged.length" class="pass">
               可转授变化 {{ diff.grantChanged.length }} 项
+            </span>
+            <span v-if="scopeDirty" class="pass">
+              数据范围 {{ scopeLabel(originalScope) }} → {{ scopeLabel(scopeDraft) }}
             </span>
           </span>
           <span v-else class="text-muted">没有改动</span>
@@ -205,39 +229,22 @@
             data-test="save-perms"
             @click="confirmOpen = true"
           >
-            保存权限
+            保存授权
           </el-button>
         </div>
       </el-card>
       <el-empty v-else class="panel" description="选一个角色查看权限" />
     </div>
 
-    <!-- 保存前确认：按模块列出这次的增减，收回的标红 -->
+    <!-- 保存前确认：按模块列出这次的增减，收回的标红；数据范围变化单列 -->
     <el-dialog
       v-model="confirmOpen"
-      title="确认保存权限"
+      title="确认保存授权"
       width="560px"
       style="max-width: 94vw"
       data-test="confirm-perms"
     >
-      <p class="confirm-lead">
-        「{{ current?.name }}」这次
-        <template v-if="diff.added.length">
-          新增
-          <b class="add">{{ diff.added.length }}</b>
-          项
-        </template>
-        <template v-if="diff.added.length && diff.removed.length">、</template>
-        <template v-if="diff.removed.length">
-          收回
-          <b class="del">{{ diff.removed.length }}</b>
-          项
-        </template>
-        <template v-if="diff.grantChanged.length">
-          ，可转授变化 {{ diff.grantChanged.length }} 项
-        </template>
-        。
-      </p>
+      <p class="confirm-lead">「{{ current?.name }}」这次{{ changeSummary }}。</p>
       <el-alert
         v-if="diff.removed.length && (current?.userCount || 0) > 0"
         type="warning"
@@ -246,11 +253,26 @@
         class="confirm-warn"
       >
         拥有这个角色的
-        {{
-          current?.userCount
-        }}
+        {{ current?.userCount }}
         个人会失去标红的项（他们别的角色里有的不受影响），下一次操作起生效。
       </el-alert>
+      <div v-if="scopeDirty" class="confirm-scope" data-test="confirm-scope">
+        <h5>数据范围</h5>
+        <p>
+          {{ scopeLabel(originalScope) }} →
+          <b class="hl">{{ scopeLabel(scopeDraft) }}</b>
+          <template v-if="scopeDraft === 5">
+            <template v-if="deptDraft.length">
+              ：{{
+                draftDeptNames.join("、")
+              }}（各单位含其下级，再被所在部门的「最大数据范围」封顶）
+            </template>
+            <template v-else>
+              ：没勾选任何单位，拥有这个角色的将看不到任何单位的箱子、任务和人员。
+            </template>
+          </template>
+        </p>
+      </div>
       <div class="confirm-list">
         <section v-for="mod in diffByModule" :key="mod.key">
           <h5>{{ mod.label }}</h5>
@@ -297,28 +319,15 @@
           <p v-if="!form.data.id" class="text-muted small">建好后不能改。</p>
         </el-form-item>
         <el-form-item label="数据范围">
-          <el-select
+          <RoleScopePicker
             v-model="form.data.dataScope"
-            style="width: 100%"
-            :disabled="!canScope || formIsAdmin"
-          >
-            <el-option
-              v-for="(label, value) in SCOPES"
-              :key="value"
-              :label="`${label}：${SCOPE_HINTS[Number(value)]}`"
-              :value="Number(value)"
-            />
-          </el-select>
-          <p class="text-muted small">
-            <template v-if="formIsAdmin">系统管理员固定是全部数据。</template>
-            <template v-else-if="!canScope">
-              改数据范围要有「设置角色数据范围」。
-              <template v-if="!form.data.id">新角色先是「仅本人」。</template>
-            </template>
-            <template v-else>
-              决定能看到哪些单位的采样箱、任务和人员；不能比你自己的宽，还会被所在部门的「最大数据范围」封顶。
-            </template>
-          </p>
+            v-model:dept-ids="form.data.deptIds"
+            :options="deptOptions"
+            :disabled="!canScope"
+            :my-scope="myScope"
+            :admin-fixed="formIsAdmin"
+            :creating="!form.data.id"
+          />
         </el-form-item>
         <el-row :gutter="12">
           <el-col :span="12">
@@ -349,6 +358,9 @@
         <el-button type="primary" :loading="form.saving" @click="saveForm">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- #26 B4：授权审计抽屉（只读）——谁在何时把哪些权限/可转授/范围授给该角色 -->
+    <RoleAuditDrawer v-model="audit.open" :role-id="audit.roleId" :role-name="audit.roleName" />
   </div>
 </template>
 
@@ -358,97 +370,49 @@ defineOptions({ name: "Role" });
 import type { FormInstance, FormRules } from "element-plus";
 import { ArrowDown, Check, Close, Plus, Search } from "@element-plus/icons-vue";
 import { onBeforeRouteLeave } from "vue-router";
-import RoleAPI, { type PermGroup, type RoleTemplate } from "@/api/system/role";
+import RoleAPI, {
+  type PermGroup,
+  type RoleTemplate,
+  type MenuPreviewItem,
+} from "@/api/system/role";
 import type { RoleForm, RoleItem } from "@/api/system/role/types";
+import DeptAPI from "@/api/system/dept";
+import type { OptionItem } from "@/api/common";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import PermEditor from "@/components/biz/PermEditor.vue";
+import RoleScopePicker from "./components/RoleScopePicker.vue";
+import RoleAuditDrawer from "./components/RoleAuditDrawer.vue";
 import { usePerm } from "@/composables/usePerm";
 import { useUserStore } from "@/stores/user";
 import { buildIndex, fillNeeds, needsMet } from "@/utils/permDeps";
 
 /**
  * 角色与权限：左边角色列表，右边用授权编辑器勾权限（按页面分模块、每模块 能进这页 → 能看到什么 → 能做什么），
- * 右侧实时预览这个角色能看到的菜单、工作台卡片、采样箱详情标签和任务详情内容。
+ * 右侧实时预览这个角色能看到的菜单（#26 B4：预览走服务端 menusFor 同一实现，不再前端自抄菜单表）、
+ * 工作台卡片、采样箱详情标签和任务详情内容。
+ * 数据范围（1–4 预设 + 5 自定义部门多选树）和权限一起草稿、一起 diff 确认保存；
+ * 套用模板时一键带入 suggestedScope；「授权审计」抽屉只读回看谁在何时授了什么。
  * 底部保存栏显示这次改了几项，保存前弹确认框按模块列出增减，收回的标红并写明影响几个人。
  *
  * 一个动作一个权限：新增、编辑、删除角色（sys:role:create/update/delete）、给角色分配权限（sys:role:grant）、
  * 设置角色数据范围（sys:role:scope）、给人员分配角色（sys:user:role，在人员页）各自单独授予。
  * 每项权限另有「可转授」：非管理员只能动自己可转授的权限，服务端会再校验。
+ * 自定义范围 D3：orgIds ⊆ 自己 manageOrgIds，仅 scope≤2 的角色可授 5，与部门上限取交集封顶（服务端兜底）。
  */
 const SCOPES: Record<number, string> = {
   1: "全部数据",
   2: "本单位及下级",
   3: "本单位",
   4: "仅本人",
+  5: "自定义部门数据",
 };
 const SCOPE_HINTS: Record<number, string> = {
   1: "所有单位的箱子、任务和人员",
   2: "自己单位和下属单位的",
   3: "只有自己单位的",
   4: "只有自己保管的箱子和经手的任务",
+  5: "只看勾选的单位（含其下级）",
 };
-const SETTINGS = [
-  "sys:settings:view",
-  "sys:settings:map",
-  "sys:settings:branding",
-  "sys:settings:labels",
-  "sys:settings:db",
-  "sys:settings:password",
-  "sys:settings:lockout",
-  "sys:settings:smtp",
-  "sys:settings:video",
-  "sys:settings:wechat",
-  "device:box:policyDefault",
-  "sys:settings:battery-reserve",
-  "sys:settings:arrive-radius",
-];
-/** 菜单和看到它需要的权限（任意一个即可），和服务端 menus.js 一致。 */
-const MENUS: { title: string; perms: string[] }[] = [
-  { title: "工作台", perms: [] },
-  { title: "总览", perms: ["monitor:overview"] },
-  { title: "任务单", perms: ["device:box:task"] },
-  { title: "创建任务单", perms: ["task:create:transfer", "task:create:sample"] },
-  { title: "采样箱", perms: ["device:box:list"] },
-  { title: "实时地图", perms: ["device:box:list"] },
-  {
-    title: "组织 · 部门",
-    perms: [
-      "sys:dept:view",
-      "sys:dept:create",
-      "sys:dept:update",
-      "sys:dept:type",
-      "sys:dept:address",
-      "sys:dept:camera",
-      "sys:dept:leader",
-      "sys:dept:delete",
-    ],
-  },
-  {
-    title: "组织 · 人员",
-    perms: [
-      "sys:user:view",
-      "sys:user:create",
-      "sys:user:update",
-      "sys:user:disable",
-      "sys:user:enable",
-      "sys:user:delete",
-    ],
-  },
-  {
-    title: "组织 · 角色与权限",
-    perms: [
-      "sys:role:view",
-      "sys:role:create",
-      "sys:role:update",
-      "sys:role:delete",
-      "sys:role:grant",
-      "sys:role:scope",
-    ],
-  },
-  { title: "系统 · 系统设置", perms: SETTINGS },
-  { title: "系统 · 操作日志", perms: ["sys:oplog:read"] },
-  { title: "系统 · 系统日志", perms: ["sys:runtime-log:read"] },
-];
 /** 有这几项之一，「可转授」才有意义：能把权限再授给别人。 */
 const GRANTING = ["sys:role:grant", "sys:user:role", "sys:dept:limit"];
 const FORMULA_KEY = "role-formula-closed";
@@ -461,6 +425,10 @@ const canUpdate = computed(() => can("sys:role:update"));
 const canDelete = computed(() => can("sys:role:delete"));
 const canGrant = computed(() => can("sys:role:grant"));
 const canScope = computed(() => can("sys:role:scope"));
+/** 授权审计抽屉入口：能看角色（view/update/scope/grant 任一）就能看审计。 */
+const canAudit = computed(
+  () => can("sys:role:view") || canUpdate.value || canScope.value || canGrant.value
+);
 const roles = ref<RoleItem[]>([]);
 const loading = ref(false);
 const keyword = ref("");
@@ -480,6 +448,21 @@ const reasons = ref<Record<string, string>>({});
 const saving = ref(false);
 const confirmOpen = ref(false);
 const formulaClosed = ref(readFlag());
+
+/* ---- #26 B4：数据范围草稿 + 菜单预览单源 + 授权审计 ---- */
+/** 自己最宽的数据范围（permCatalog.myScope）：D3 前端预校验用。 */
+const myScope = ref(4);
+/** 部门多选树选项：后端 scoped options（manage 子树+祖先壳，壳带 readOnly）。 */
+const deptOptions = ref<OptionItem[]>([]);
+const scopeDraft = ref(4);
+const deptDraft = ref<string[]>([]);
+const originalScope = ref(4);
+const originalDeptIds = ref<string[]>([]);
+/** 菜单预览：服务端 menusFor 同一实现。savedPreview 是已保存状态的缓存。 */
+const menuPreview = ref<MenuPreviewItem[]>([]);
+const savedPreview = ref<MenuPreviewItem[]>([]);
+const previewLoading = ref(false);
+const audit = reactive({ open: false, roleId: "", roleName: "" });
 
 const index = computed(() => buildIndex(catalog.value));
 const shownRoles = computed(() =>
@@ -520,9 +503,53 @@ const diff = computed(() => {
   }
   return { added, removed, grantChanged };
 });
-const dirty = computed(() =>
+const permDirty = computed(() =>
   Boolean(diff.value.added.length || diff.value.removed.length || diff.value.grantChanged.length)
 );
+/** 数据范围草稿和已保存的是否不一样（自定义部门按集合比）。 */
+const scopeDirty = computed(() => {
+  if (fixed.value) return false;
+  if (scopeDraft.value !== originalScope.value) return true;
+  if (scopeDraft.value !== 5) return false;
+  const was = new Set(originalDeptIds.value);
+  return deptDraft.value.length !== was.size || deptDraft.value.some((id) => !was.has(id));
+});
+const dirty = computed(() => permDirty.value || scopeDirty.value);
+/** 可管部门 id 集合（scoped options 里非壳节点）：D3 预校验「自定义部门 ⊆ 自己 manage」。 */
+const manageOptionIds = computed(() => {
+  const ids = new Set<string>();
+  const walk = (list: OptionItem[]) => {
+    for (const item of list) {
+      if (!item.readOnly) ids.add(String(item.value));
+      if (item.children?.length) walk(item.children);
+    }
+  };
+  walk(deptOptions.value);
+  return ids;
+});
+const optionLabels = computed(() => {
+  const map = new Map<string, string>();
+  const walk = (list: OptionItem[]) => {
+    for (const item of list) {
+      map.set(String(item.value), item.label);
+      if (item.children?.length) walk(item.children);
+    }
+  };
+  walk(deptOptions.value);
+  return map;
+});
+const draftDeptNames = computed(() =>
+  deptDraft.value.map((id) => optionLabels.value.get(id) || id)
+);
+const changeSummary = computed(() => {
+  const parts: string[] = [];
+  if (diff.value.added.length) parts.push(`新增 ${diff.value.added.length} 项`);
+  if (diff.value.removed.length) parts.push(`收回 ${diff.value.removed.length} 项`);
+  if (diff.value.grantChanged.length) parts.push(`可转授变化 ${diff.value.grantChanged.length} 项`);
+  if (scopeDirty.value)
+    parts.push(`数据范围 ${scopeLabel(originalScope.value)} → ${scopeLabel(scopeDraft.value)}`);
+  return parts.join("、") || "没有改动";
+});
 const diffByModule = computed(() =>
   catalog.value
     .map((group) => {
@@ -544,12 +571,26 @@ const diffByModule = computed(() =>
     .filter((mod) => mod.rows.length)
 );
 
-const scopeLabel = (value?: number) => SCOPES[Number(value) === 5 ? 3 : Number(value)] || "—";
+const scopeLabel = (value?: number) => SCOPES[Number(value)] || "—";
 const has = (code: string) => fixed.value || codes.value.has(code);
 const any = (...list: string[]) => list.some(has);
-const menuPreview = computed(() =>
-  MENUS.map((m) => ({ title: m.title, on: !m.perms.length || any(...m.perms) }))
-);
+/**
+ * D3 前端预校验（服务端 checkCustomDeptIds 兜底）：
+ * 范围不能比自己的宽；自定义 5 仅 scope≤2 可授；自定义部门只能选自己 manage 内的。
+ * options 还没拉到时不做子集检查（避免误拦），交给服务端。
+ */
+function scopeProblem(scope: number, deptIds: string[]): string {
+  if (scope === 5) {
+    if (myScope.value > 2) return "只有「本单位及下级」以上数据范围的角色能设置自定义部门";
+    if (deptOptions.value.length) {
+      const outside = deptIds.filter((id) => !manageOptionIds.value.has(String(id)));
+      if (outside.length) return "自定义部门只能选自己管理范围内的部门";
+    }
+    return "";
+  }
+  if (scope < myScope.value) return "数据范围不能比你自己的宽";
+  return "";
+}
 /** 卡片要「勾了这张」且有看里面内容的权限（目录里的前置）才显示，和服务端一致。 */
 const cardPreview = computed(() =>
   (catalog.value.find((g) => g.key === "workbench")?.items || [])
@@ -643,21 +684,96 @@ async function copyFrom(id: string) {
   if (!source) return;
   const result = await RoleAPI.getPerms(id);
   const skipped = applyCodes(result.codes, result.grantOption);
+  // 数据范围也是授权的一部分：有「设置角色数据范围」时一起带入（D3 预校验在保存时把关）
+  let scopeNote = "";
+  if (canScope.value && !fixed.value) {
+    const scope = Number(source.dataScope ?? 4);
+    scopeDraft.value = scope;
+    deptDraft.value = scope === 5 ? await RoleAPI.getRoleDeptIds(id).catch(() => []) : [];
+    scopeNote = `，数据范围带入「${scopeLabel(scope)}」`;
+  }
   ElMessage.success(
-    `已带入「${source.name}」的勾选${skipped ? `，其中 ${skipped} 项你不能改，保持原样` : ""}。没保存前可以撤销`
+    `已带入「${source.name}」的勾选${skipped ? `，其中 ${skipped} 项你不能改，保持原样` : ""}${scopeNote}。没保存前可以撤销`
   );
 }
 function applyTemplate(key: string) {
   const tpl = templates.value.find((t) => t.key === key);
   if (!tpl) return;
   const skipped = applyCodes(tpl.codes);
+  // #26 B4：模板的建议数据范围一键带入（没保存前可以撤销）
+  let scopeNote = "";
+  if (canScope.value && !fixed.value && tpl.suggestedScope != null) {
+    scopeDraft.value = Number(tpl.suggestedScope);
+    if (scopeDraft.value !== 5) deptDraft.value = [];
+    scopeNote = `，数据范围带入「${scopeLabel(scopeDraft.value)}」`;
+  }
   ElMessage.success(
-    `已套用模板「${tpl.label}」${skipped ? `，其中 ${skipped} 项你不能改，保持原样` : ""}。没保存前可以撤销`
+    `已套用模板「${tpl.label}」${skipped ? `，其中 ${skipped} 项你不能改，保持原样` : ""}${scopeNote}。没保存前可以撤销`
   );
 }
 function reset() {
   codes.value = new Set(original.value);
   passed.value = new Set(originalPassed.value);
+  scopeDraft.value = originalScope.value;
+  deptDraft.value = [...originalDeptIds.value];
+}
+
+/** 部门多选树选项：后端已按 scope 裁剪（manage 子树+祖先壳），前端不再拉全量树。 */
+async function loadDeptOptions() {
+  try {
+    deptOptions.value = await DeptAPI.getOptions();
+  } catch {
+    deptOptions.value = [];
+  }
+}
+/** 选中角色后把数据范围草稿同步成已保存的样子（自定义 5 还要拉 sys_role_dept）。 */
+async function syncScopeDraft(role?: RoleItem | null) {
+  const scope = Number(role?.dataScope ?? 4);
+  scopeDraft.value = scope;
+  originalScope.value = scope;
+  let ids: string[] = [];
+  if (scope === 5 && role?.id) ids = await RoleAPI.getRoleDeptIds(role.id).catch(() => []);
+  deptDraft.value = [...ids];
+  originalDeptIds.value = [...ids];
+}
+/** 已保存状态的菜单预览（GET，服务端 menusFor）。 */
+async function loadSavedPreview(id: string) {
+  previewLoading.value = true;
+  try {
+    const result = await RoleAPI.getMenuPreview(id);
+    if (currentId.value !== id) return;
+    savedPreview.value = result.menus;
+    if (!permDirty.value) menuPreview.value = result.menus;
+  } catch {
+    if (currentId.value === id) {
+      savedPreview.value = [];
+      menuPreview.value = [];
+    }
+  } finally {
+    if (currentId.value === id) previewLoading.value = false;
+  }
+}
+/** 勾选变化时预览未保存状态：POST 同一 menusFor 实现；防抖 250ms，失败静默保留上次。 */
+const refreshDraftPreview = useDebounceFn(async () => {
+  if (!currentId.value) return;
+  if (!permDirty.value) {
+    menuPreview.value = savedPreview.value;
+    return;
+  }
+  const id = currentId.value;
+  try {
+    const result = await RoleAPI.previewMenus([...codes.value]);
+    if (currentId.value === id && permDirty.value) menuPreview.value = result.menus;
+  } catch {
+    /* 静默：保留上一次预览 */
+  }
+}, 250);
+watch(codes, () => refreshDraftPreview());
+function openAudit() {
+  if (!current.value) return;
+  audit.roleId = current.value.id!;
+  audit.roleName = current.value.name || "";
+  audit.open = true;
 }
 
 async function loadRoles() {
@@ -671,9 +787,9 @@ async function loadRoles() {
   }
 }
 async function confirmDiscard(title: string) {
-  if (!dirty.value || !editable.value) return true;
+  if (!dirty.value || !(editable.value || canScope.value)) return true;
   try {
-    await ElMessageBox.confirm("当前角色的权限还没保存，离开后会丢失。", title, {
+    await ElMessageBox.confirm("当前角色的权限/数据范围还没保存，离开后会丢失。", title, {
       type: "warning",
       confirmButtonText: "不保存，离开",
       cancelButtonText: "留下",
@@ -694,18 +810,40 @@ async function pick(id: string) {
   codes.value = new Set(result.codes);
   originalPassed.value = result.grantOption || [];
   passed.value = new Set(originalPassed.value);
+  await syncScopeDraft(roles.value.find((r) => r.id === id));
+  savedPreview.value = [];
+  menuPreview.value = [];
+  await loadSavedPreview(id);
 }
 async function save() {
   if (!current.value) return;
+  // D3 前端预校验（服务端兜底）：范围不能比自己宽、自定义部门 ⊆ 自己 manage
+  if (scopeDirty.value) {
+    const problem = scopeProblem(scopeDraft.value, deptDraft.value);
+    if (problem) {
+      ElMessage.warning(problem);
+      return;
+    }
+  }
   saving.value = true;
   try {
-    await RoleAPI.savePerms(
-      current.value.id!,
-      [...codes.value],
-      [...passed.value].filter((code) => codes.value.has(code))
-    );
-    original.value = [...codes.value];
-    originalPassed.value = [...passed.value];
+    if (scopeDirty.value) {
+      const payload: RoleForm = { dataScope: scopeDraft.value };
+      if (scopeDraft.value === 5) payload.deptIds = [...deptDraft.value];
+      await RoleAPI.update(current.value.id!, payload);
+      originalScope.value = scopeDraft.value;
+      originalDeptIds.value = [...deptDraft.value];
+      await loadRoles();
+    }
+    if (permDirty.value) {
+      await RoleAPI.savePerms(
+        current.value.id!,
+        [...codes.value],
+        [...passed.value].filter((code) => codes.value.has(code))
+      );
+      original.value = [...codes.value];
+      originalPassed.value = [...passed.value];
+    }
     confirmOpen.value = false;
     ElMessage.success("已保存，相关人员下一次操作就按新权限");
   } finally {
@@ -759,26 +897,47 @@ const rules: FormRules = {
 };
 async function openForm(id = "") {
   form.data = id
-    ? await RoleAPI.getFormData(id)
+    ? { ...(await RoleAPI.getFormData(id)), deptIds: [] }
     : {
         name: "",
         code: "",
         dataScope: canScope.value ? 3 : 4,
+        deptIds: [],
         sort: roles.value.length + 1,
         status: 1,
       };
-  if (Number(form.data.dataScope) === 5) form.data.dataScope = 3;
+  // 自定义范围（5）：回显已勾选的部门（不再把 5 折成 3）
+  if (id && Number(form.data.dataScope) === 5)
+    form.data.deptIds = await RoleAPI.getRoleDeptIds(id).catch(() => []);
   form.open = true;
 }
 async function saveForm() {
   if (!(await formRef.value?.validate().catch(() => false))) return;
+  const scope = Number(form.data.dataScope ?? 4);
+  const deptIds = form.data.deptIds || [];
+  // 系统管理员固定全部数据，不参与 D3 校验
+  if (!formIsAdmin.value) {
+    const problem = scopeProblem(scope, deptIds);
+    if (problem) {
+      ElMessage.warning(problem);
+      return;
+    }
+  }
   form.saving = true;
   try {
-    if (form.data.id) await RoleAPI.update(form.data.id, form.data);
-    else await RoleAPI.create(form.data);
+    const payload: RoleForm = { ...form.data, dataScope: scope };
+    // deptIds 只在自定义范围时提交（其他范围提交会被后端拒绝）
+    if (scope === 5) payload.deptIds = [...deptIds];
+    else delete payload.deptIds;
+    const savedId = form.data.id;
+    if (savedId) await RoleAPI.update(savedId, payload);
+    else await RoleAPI.create(payload);
     ElMessage.success("已保存");
     form.open = false;
     await loadRoles();
+    // 弹窗里改了当前角色的范围：主面板草稿同步成已保存的样子
+    if (savedId && savedId === currentId.value)
+      await syncScopeDraft(roles.value.find((r) => r.id === savedId));
   } finally {
     form.saving = false;
   }
@@ -789,6 +948,8 @@ onMounted(async () => {
   catalog.value = result.groups;
   tiers.value = result.tiers || {};
   templates.value = result.templates || [];
+  myScope.value = result.myScope ?? (isAdmin.value ? 1 : 4);
+  void loadDeptOptions();
   await loadRoles();
 });
 </script>
@@ -881,6 +1042,38 @@ onMounted(async () => {
 }
 .toolbar .tip {
   font-size: 12px;
+}
+.scope-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+.scope-label {
+  flex: none;
+  padding-top: 6px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.scope-picker {
+  flex: 1;
+  min-width: 260px;
+  max-width: 560px;
+}
+.confirm-scope {
+  margin-bottom: 10px;
+}
+.confirm-scope h5 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+}
+.confirm-scope p {
+  margin: 0;
+  font-size: 13px;
+}
+.hl {
+  color: var(--el-color-primary);
 }
 .tpl {
   max-width: 320px;

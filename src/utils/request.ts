@@ -20,16 +20,38 @@ declare module "axios" {
 /**
  * 带业务码和 data 的错误：划拨提交/撤销的 409 会把逐台拦截原因放在 data 里
  * （blocked[] / boxes[]），调用方要按码渲染弹窗，不能只拿到一句 msg。
+ * status 是 HTTP 状态码：blob 错误体在拦截器里解析后也带码带状态（#26 M-01）。
  */
 export interface ApiError extends Error {
   code?: string;
   data?: unknown;
+  status?: number;
 }
-export function apiError(msg: string, code?: string, data?: unknown): ApiError {
+export function apiError(msg: string, code?: string, data?: unknown, status?: number): ApiError {
   const error = new Error(msg) as ApiError;
   error.code = code;
   error.data = data;
+  error.status = status;
   return error;
+}
+
+/**
+ * #26 M-01：responseType=blob/arraybuffer 时，错误体也是二进制包裹的 JSON。
+ * 按 content-type 判定后解出 {code,msg,data}；真 CSV 等非 JSON 体返回 null，照旧透传。
+ */
+async function readBinaryJson(data: unknown, contentType: string): Promise<ApiResult | null> {
+  const isBlob = data instanceof Blob;
+  const isBuffer = data instanceof ArrayBuffer;
+  if (!isBlob && !isBuffer) return null;
+  const type = contentType || (isBlob ? data.type : "");
+  if (type && !type.includes("application/json")) return null;
+  try {
+    const text = isBlob ? await data.text() : new TextDecoder("utf-8").decode(data);
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? (parsed as ApiResult) : null;
+  } catch {
+    return null;
+  }
 }
 
 // 防止同一请求在 token 刷新后重复进入重试，导致死循环
@@ -75,7 +97,7 @@ http.interceptors.request.use(
 );
 
 http.interceptors.response.use(
-  (response: AxiosResponse<ApiResult>): AxiosResponse | any => {
+  async (response: AxiosResponse<ApiResult>): Promise<AxiosResponse | any> => {
     const { responseType } = response.config;
     const duration = performance.now() - (response.config.diagnosticStart || performance.now());
     if (duration >= 2000)
@@ -88,9 +110,14 @@ http.interceptors.response.use(
         requestId: response.headers["x-request-id"],
       });
 
-    // 二进制数据直接透传
+    // 二进制数据直接透传；但混进 JSON 业务错误体（如导出超 31 天）时先解出业务码，
+    // 走下面同一套按码分流/reject，调用方不会把错误文本当文件下载（#26 M-01）
     if (responseType === "blob" || responseType === "arraybuffer") {
-      return response;
+      const contentType = String(response.headers["content-type"] || "");
+      if (!contentType.includes("application/json")) return response;
+      const body = await readBinaryJson(response.data, contentType);
+      if (!body) return response;
+      response.data = body;
     }
 
     const { code, data, msg } = response.data;
@@ -115,11 +142,20 @@ http.interceptors.response.use(
       ElMessage.error(
         `${msg || "系统出错"}${response.headers["x-request-id"] ? `（请求编号 ${response.headers["x-request-id"]}）` : ""}`
       );
-    return Promise.reject(apiError(msg || "系统出错", code, data));
+    return Promise.reject(apiError(msg || "系统出错", code, data, response.status));
   },
 
   async (error) => {
     const { config, response } = error;
+    // #26 M-01：blob/arraybuffer 请求的 HTTP 错误体（403/401/400）也是二进制 JSON，
+    // 先解出业务码再走下面的按码分流（令牌过期刷新、A0301 授权指引等），不再落「网络错误」
+    if (response && (config?.responseType === "blob" || config?.responseType === "arraybuffer")) {
+      const parsed = await readBinaryJson(
+        response.data,
+        String(response.headers?.["content-type"] || "")
+      );
+      if (parsed) response.data = parsed;
+    }
     const businessCode = response?.data?.code;
     if (
       businessCode === ApiCodeEnum.ACCESS_TOKEN_INVALID ||
@@ -149,7 +185,7 @@ http.interceptors.response.use(
     if (code === "A0240") {
       if (!window.location.hash.startsWith("#/force-password"))
         window.location.hash = "#/force-password";
-      return Promise.reject(apiError(msg || "请先修改密码", code, data));
+      return Promise.reject(apiError(msg || "请先修改密码", code, data, response.status));
     }
 
     // 权限不足
@@ -157,12 +193,12 @@ http.interceptors.response.use(
       const permissionStore = usePermissionStoreHook();
       await permissionStore.refreshPermissions();
       ElMessage.error(msg || "权限不足");
-      return Promise.reject(apiError(msg || "权限不足", code, data));
+      return Promise.reject(apiError(msg || "权限不足", code, data, response.status));
     }
 
     if (!config?.silent)
       ElMessage.error(`${msg || "请求失败"}${requestId ? `（请求编号 ${requestId}）` : ""}`);
-    return Promise.reject(apiError(msg || "请求失败", code, data));
+    return Promise.reject(apiError(msg || "请求失败", code, data, response.status));
   }
 );
 

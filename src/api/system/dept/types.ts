@@ -45,6 +45,8 @@ export interface DeptItem {
   leaderUserId?: string;
   leaderName?: string;
   leaderMobile?: string;
+  /** #26 B3（D2）：祖先只读壳。上级单位仅可见不可管：明细被后端清空，页面不给写操作入口。 */
+  readOnly?: boolean;
 }
 
 /** 提交时的负责人：选已有用户，或在这个部门下新建账号；null 清空，不传不改。 */
@@ -93,6 +95,8 @@ export interface DeptForm {
   leader?: DeptLeaderInput;
   /** 采样机构的监控通道（1–8 路）。 */
   cameras?: DeptCamera[];
+  /** #26 B3：表单接口对祖先壳返回 readOnly=true（明细清空）；范围外部门直接 A0404。 */
+  readOnly?: boolean;
 }
 
 /** 一路监控：名称必填；平台通道号、直播地址、回放地址模板选填。 */

@@ -7,6 +7,7 @@ import { openDatabase, migrate, seedOrg } from "../db.js";
 import { AccountSecurity } from "../src/auth/AccountSecurity.js";
 import { sessionMatches, sessionClaims, verifyPassword } from "../auth.js";
 import { resetPassword } from "../org-api.js";
+import { resolveAccess } from "../src/auth/boxAccess.js";
 
 test("自助改密校验、限流、并发保护和会话撤销；管理员重置仍可恢复", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "account-security-"));
@@ -26,6 +27,8 @@ test("自助改密校验、限流、并发保护和会话撤销；管理员重�
       await handler({
         db,
         user,
+        // #26 m-01：isAdmin fail-closed——org handler 的 ctx 必须带 access（dispatcher 统一 requireAccess）
+        access: await resolveAccess(db, user),
         body,
         params: { id: user.id },
         query: { password: "admin-reset-test-1" },

@@ -13,6 +13,7 @@
           @click="jump(item.id)"
         >
           {{ item.title }}
+          <i v-if="dirtySections.some((d) => d.id === item.id)" class="dirty-dot" title="未保存" />
         </a>
       </nav>
       <div class="settings-main">
@@ -128,7 +129,14 @@
           </el-form>
         </el-card>
 
-        <BrandingCard v-if="settings" :value="settings.branding" :can="can.branding" />
+        <BrandingCard
+          v-if="settings"
+          ref="brandingCard"
+          :value="settings.branding"
+          :can="can.branding"
+          @dirty="brandingDirty = $event"
+          @saved="onBrandingSaved"
+        />
 
         <el-card
           id="sec-labels"
@@ -444,11 +452,17 @@
           </el-form>
         </el-card>
       </div>
+      <div v-if="dirtyCount" class="save-bar">
+        <span class="save-bar-text">{{ dirtyCount }} 个分区未保存</span>
+        <el-button size="small" @click="discardDirty">放弃更改</el-button>
+        <el-button size="small" type="primary" @click="saveAllDirty">保存全部</el-button>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { onBeforeRouteLeave } from "vue-router";
 import SettingsAPI, {
   type SecuritySettings,
   type SmtpSettings,
@@ -457,6 +471,13 @@ import SettingsAPI, {
   type WechatSettings,
 } from "@/api/system/settings";
 import BrandingCard from "./BrandingCard.vue";
+import {
+  dirtyIntegrationParts,
+  integrationKey,
+  sectionIsDirty,
+  snapshotKeys,
+  syncSectionSpy,
+} from "./sections";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import InfoList, { type InfoItem } from "@/components/biz/InfoList.vue";
 import { refreshBoxFeatures } from "@/composables/useBoxFeatures";
@@ -521,6 +542,114 @@ function jump(id: string) {
   activeSection.value = id;
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+// #settings-refactor：分区脏状态 + sticky 保存条 + 离开守卫 + scrollspy
+const savedSnap = ref<Record<string, string>>({});
+const brandingDirty = ref(false);
+const brandingCard = ref<InstanceType<typeof BrandingCard> | null>(null);
+function onBrandingSaved(v: unknown) {
+  if (settings.value) settings.value.branding = v as typeof settings.value.branding;
+}
+function snapOf(id: string): string {
+  switch (id) {
+    case "sec-map":
+      return JSON.stringify(mapForm);
+    case "sec-box":
+      return JSON.stringify(boxForm);
+    case "sec-labels":
+      return JSON.stringify(labelForm);
+    case "sec-security":
+      return JSON.stringify(secForm);
+    // #26 m-04：集成区按子表单隔离快照（smtp/video/wechat 各一把），存一个不吞掉其余的未保存改动
+    case "sec-integration:smtp":
+      return JSON.stringify(smtpForm);
+    case "sec-integration:video":
+      return JSON.stringify(videoForm);
+    case "sec-integration:wechat":
+      return JSON.stringify(wechatForm);
+    case "sec-db":
+      return JSON.stringify(form);
+    default:
+      return "";
+  }
+}
+function snapshotAll() {
+  for (const key of snapshotKeys(sections.value.map((sec) => sec.id)))
+    savedSnap.value[key] = snapOf(key);
+}
+function markSaved(id: string) {
+  savedSnap.value[id] = snapOf(id);
+}
+const dirtySections = computed(() =>
+  sections.value.filter((sec) =>
+    sectionIsDirty(sec.id, snapOf, savedSnap.value, brandingDirty.value)
+  )
+);
+const dirtyCount = computed(() => dirtySections.value.length);
+async function saveAllDirty() {
+  for (const sec of dirtySections.value) {
+    if (sec.id === "sec-map") await saveMap();
+    else if (sec.id === "sec-box") await saveBox();
+    else if (sec.id === "sec-labels") await saveLabels();
+    else if (sec.id === "sec-security") await saveSecurity();
+    else if (sec.id === "sec-integration") {
+      // #26 m-04：只保存脏的子表单（快照隔离后各自独立判脏），没改的不重复提交
+      for (const part of dirtyIntegrationParts(snapOf, savedSnap.value)) {
+        if (part === "smtp") await saveSmtp();
+        else if (part === "video") await saveVideo();
+        else await saveWechat();
+      }
+    } else if (sec.id === "sec-branding") await brandingCard.value?.save();
+    else if (sec.id === "sec-db") await save();
+  }
+}
+function discardDirty() {
+  load();
+}
+let spy: IntersectionObserver | null = null;
+const observedSections = new Map<string, Element>();
+function syncSpy() {
+  if (spy)
+    syncSectionSpy(
+      spy,
+      observedSections,
+      sections.value.map((sec) => sec.id),
+      (id) => document.getElementById(id)
+    );
+}
+function warnUnsaved(e: BeforeUnloadEvent) {
+  if (dirtyCount.value) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+}
+onMounted(() => {
+  spy = new IntersectionObserver(
+    (es) => {
+      for (const e of es) if (e.isIntersecting) activeSection.value = e.target.id;
+    },
+    { rootMargin: "-20% 0px -70% 0px" }
+  );
+  syncSpy();
+  window.addEventListener("beforeunload", warnUnsaved);
+});
+// #26 m-04：branding/security/integration/db 四区依赖 settings 异步加载后才渲染，
+// onMounted 时 getElementById 取不到、永不被 observe。分区列表变化后补挂（flush post 保证 DOM 已更新）。
+watch(sections, syncSpy, { flush: "post" });
+onBeforeUnmount(() => {
+  spy?.disconnect();
+  observedSections.clear();
+  window.removeEventListener("beforeunload", warnUnsaved);
+});
+onBeforeRouteLeave(() => {
+  if (!dirtyCount.value) return true;
+  return ElMessageBox.confirm(
+    "有 " + dirtyCount.value + " 个分区未保存，离开将丢失修改。",
+    "未保存的修改",
+    { confirmButtonText: "放弃修改离开", cancelButtonText: "留下保存", type: "warning" }
+  )
+    .then(() => true)
+    .catch(() => false);
+});
 const secForm = reactive<SecuritySettings>({
   minLength: 8,
   classes: ["letter", "digit"],
@@ -557,6 +686,7 @@ async function saveSecurity() {
   try {
     await SettingsAPI.saveSecurity({ ...secForm });
     ElMessage.success("已保存");
+    markSaved("sec-security");
   } finally {
     savingSec.value = false;
   }
@@ -566,6 +696,7 @@ async function saveSmtp() {
   try {
     Object.assign(smtpForm, await SettingsAPI.saveSmtp({ ...smtpForm }), { password: "" });
     ElMessage.success("已保存");
+    markSaved(integrationKey("smtp"));
   } finally {
     savingSmtp.value = false;
   }
@@ -586,6 +717,8 @@ async function saveWechat() {
   try {
     Object.assign(wechatForm, await SettingsAPI.saveWechat({ ...wechatForm }), { appSecret: "" });
     ElMessage.success("已保存");
+    // #26 m-04：wechat 子表单同样纳入脏快照（原先整区快照不含它，改了也不计脏）
+    markSaved(integrationKey("wechat"));
   } finally {
     savingWechat.value = false;
   }
@@ -595,6 +728,7 @@ async function saveVideo() {
   try {
     Object.assign(videoForm, await SettingsAPI.saveVideo({ ...videoForm }), { token: "" });
     ElMessage.success("已保存");
+    markSaved(integrationKey("video"));
   } finally {
     savingVideo.value = false;
   }
@@ -663,12 +797,23 @@ async function load() {
       setLabels(settings.value.labels);
       fillLabels(settings.value.labels as Labels);
     }
+    snapshotAll();
   } finally {
     loading.value = false;
   }
 }
 
 async function save() {
+  // #settings-refactor audit-5：数据库切换不可逆影响，二次确认
+  try {
+    await ElMessageBox.confirm(
+      "切换数据库会改变全部业务数据的存放位置，保存后需重启服务生效；请确认已备份原库。继续？",
+      "切换数据库",
+      { confirmButtonText: "确认切换", cancelButtonText: "取消", type: "warning" }
+    );
+  } catch {
+    return;
+  }
   saving.value = true;
   try {
     const saved = await SettingsAPI.saveDatabase({
@@ -682,12 +827,28 @@ async function save() {
     passwordSet.value = saved.passwordSet;
     await load();
     ElMessage.success("已保存");
+    markSaved("sec-db");
   } finally {
     saving.value = false;
   }
 }
 
 async function saveBox() {
+  // #settings-refactor audit-5：功能开关影响全局流程，变更时二次确认
+  const flagBefore = Boolean(settings.value?.box?.enableTransferInspect);
+  if (boxForm.enableTransferInspect !== flagBefore) {
+    try {
+      await ElMessageBox.confirm(
+        boxForm.enableTransferInspect
+          ? "开启后启用「调拨单/送检单」独立页与建单入口，任务单页只放采样。确认开启？"
+          : "关闭后调拨/送检新端点报未开通，仅旧流程可用。确认关闭？",
+        "划拨/送检功能开关",
+        { confirmButtonText: "确认", cancelButtonText: "取消", type: "warning" }
+      );
+    } catch {
+      return;
+    }
+  }
   savingBox.value = true;
   try {
     await SettingsAPI.saveBox({
@@ -703,6 +864,7 @@ async function saveBox() {
     // 让全站徽标/菜单立刻按新宽限与新开关走
     await refreshBoxFeatures();
     ElMessage.success("已保存");
+    markSaved("sec-box");
   } finally {
     savingBox.value = false;
   }
@@ -715,6 +877,7 @@ async function saveMap() {
     mapForm.sk = "";
     await load();
     ElMessage.success("已保存");
+    markSaved("sec-map");
   } finally {
     savingMap.value = false;
   }
@@ -727,7 +890,17 @@ function fillLabels(source: Labels) {
   }
 }
 
-function resetLabels() {
+async function resetLabels() {
+  // #settings-refactor audit-5：恢复默认覆盖当前编辑，二次确认
+  try {
+    await ElMessageBox.confirm("全部显示名称恢复默认，当前未保存的修改将丢失。继续？", "恢复默认", {
+      confirmButtonText: "恢复默认",
+      cancelButtonText: "取消",
+      type: "warning",
+    });
+  } catch {
+    return;
+  }
   fillLabels(defaultLabelSet());
 }
 
@@ -738,6 +911,7 @@ async function saveLabels() {
     setLabels(saved);
     fillLabels(saved as Labels);
     ElMessage.success("已保存");
+    markSaved("sec-labels");
   } finally {
     savingLabels.value = false;
   }
@@ -827,6 +1001,36 @@ const accessItems = computed<InfoItem[]>(() => [
 }
 .database-card {
   margin-top: 16px;
+}
+/* #settings-refactor：脏点 + sticky 保存条 */
+.dirty-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  vertical-align: middle;
+  background: var(--el-color-warning);
+  border-radius: 50%;
+}
+.save-bar {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  z-index: 60;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--el-bg-color-overlay, #fff);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+  transform: translateX(-50%);
+}
+.save-bar-text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--el-color-warning);
 }
 
 .database-tip {

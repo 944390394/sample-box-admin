@@ -238,14 +238,21 @@ test("激活、停用、恢复按生命周期校验，分配只能给范围内�
 test("角色页保存的权限覆盖默认值，未知的码丢掉，系统管理员不能改", async () => {
   const env = await openFresh();
   try {
+    // #26 m-01：isAdmin fail-closed——ctx 必须带 dispatcher 解析好的 access，不再靠缺 access 恒真兜底
+    const adminAccess = await resolveAccess(env.db, await userOf(env.db, "admin"));
     const role = await env.db.get("SELECT id FROM sys_role WHERE code = ?", ["VERIFY"]);
-    const before = await call(rolePerms, { db: env.db, params: { id: String(role.id) } });
+    const before = await call(rolePerms, {
+      db: env.db,
+      access: adminAccess,
+      params: { id: String(role.id) },
+    });
     assert.ok(before.data.codes.includes(BOX.detail));
     assert.ok(before.data.codes.includes(BOX.track));
     assert.equal(before.data.assignable, null);
 
     const saved = await call(saveRolePerms, {
       db: env.db,
+      access: adminAccess,
       params: { id: String(role.id) },
       body: { codes: [BOX.list, BOX.location, "device:box:nope"] },
     });
@@ -256,6 +263,7 @@ test("角色页保存的权限覆盖默认值，未知的码丢掉，系统管�
     const admin = await env.db.get("SELECT id FROM sys_role WHERE code = ?", ["ADMIN"]);
     const locked = await call(saveRolePerms, {
       db: env.db,
+      access: adminAccess,
       params: { id: String(admin.id) },
       body: { codes: [] },
     });

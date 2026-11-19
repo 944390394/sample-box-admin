@@ -59,7 +59,7 @@ export default defineMock([
                   visible: 1,
                   icon: "",
                   redirect: null,
-                  perm: "sys:user:list",
+                  perm: "sys:user:view",
                   children: [],
                 },
                 {

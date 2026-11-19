@@ -295,8 +295,8 @@ export const TASK_PERMS = [
     "do",
     TASK_ENTER
   ),
-  item(9420, "task:sample-start", "开始采样", "采样单位开始采样", "task", "do", TASK_ENTER),
-  item(9421, "task:seal", "封箱", "样品装好后封箱", "task", "do", TASK_ENTER),
+  item(9425, "task:sample-start", "开始采样", "采样单位开始采样", "task", "do", TASK_ENTER),
+  item(9426, "task:seal", "封箱", "样品装好后封箱", "task", "do", TASK_ENTER),
   item(9422, "task:finish", "完成采样任务", "单向采样单在封箱后结束任务", "task", "do", TASK_ENTER),
   item(9423, "task:send-back", "寄回", "双向采样单封箱后寄回寄出单位", "task", "do", TASK_ENTER),
   item(
@@ -830,6 +830,9 @@ export const LOG_PERMS = [
     "log",
     "enter"
   ),
+  item(9608, "sys:oplog:export", "导出操作日志", "按当前数据范围导出操作日志 CSV", "log", "do", [
+    "sys:oplog:read",
+  ]),
   item(9301, "sys:runtime-log:read", "查看系统日志", "服务端运行日志，排查故障用", "log", "enter"),
   item(9302, "sys:runtime-log:detail", "查看脱敏堆栈", "系统日志里的脱敏错误堆栈", "log", "see", [
     "sys:runtime-log:read",
@@ -1009,7 +1012,23 @@ export function cardsFor(codes) {
   return [...new Set(cards)].filter((code) => !have.has(code));
 }
 
-/** 老码列表升级成现在的码：043、045 拆分，去掉卡片组，补逐张卡片。新库默认值、模板都走这里。 */
+/**
+ * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
+ * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
+ */
+export const GRANT_055 = { "sys:oplog:read": ["sys:oplog:export"] };
+/** 在 current 上套 GRANT_055：返回要补的码（不含已有的）。 */
+export function grant055(current) {
+  const have = new Set(current);
+  const add = new Set();
+  for (const [need, codes] of Object.entries(GRANT_055)) {
+    if (!have.has(need)) continue;
+    for (const code of codes) if (!have.has(code)) add.add(code);
+  }
+  return [...add];
+}
+
+/** 老码列表升级成现在的码：043、045 拆分，去掉卡片组，补逐张卡片，055 补导出码。新库默认值、模板都走这里。 */
 export function upgradeCodes(codes) {
   let current = [...new Set(codes)];
   for (const table of [SPLIT_043, SPLIT_045]) {
@@ -1017,7 +1036,7 @@ export function upgradeCodes(codes) {
     current = current.filter((code) => !remove.includes(code)).concat(add);
   }
   current = current.filter((code) => !DROPPED_045.includes(code));
-  return [...new Set([...current, ...cardsFor(current)])];
+  return [...new Set([...current, ...cardsFor(current), ...grant055(current)])];
 }
 
 /**
@@ -1098,12 +1117,23 @@ const LEGACY_DEFAULTS = {
     "sys:user:write",
     "sys:user:role",
     "sys:user:security",
+    // #26：本单位操作日志（scoped 由数据范围强制）
+    "sys:oplog:read",
+    "sys:oplog:export",
   ],
   AGENCY_LEAD: [
     ...OLD(["list", "detail", "status", "location", "track", "event", "task"]),
     "task:sign",
     "task:video",
     "sys:user:view",
+    // #26 D5：本机构操作日志 + 本机构人员管理（scoped 由数据范围强制）
+    "sys:oplog:read",
+    "sys:oplog:export",
+    "sys:dept:view",
+    "sys:user:create",
+    "sys:user:update",
+    "sys:user:disable",
+    "sys:user:enable",
   ],
   SAMPLER: [...OLD(["list", "detail", "status", "location", "track"])],
   HOME_SWITCH: [],
@@ -1116,27 +1146,69 @@ export const DEFAULT_ROLE_PERMS = {
     Object.entries(LEGACY_DEFAULTS).map(([code, list]) => [code, upgradeCodes(list)])
   ),
 };
+// #26/截图核对批2：现场采样员仅本人范围，不应有集团总览入口。旧 device:box:list 经升级
+// 映射会扩出 monitor:overview，这里对 SAMPLER 显式剔除（存量库的收回见迁移 055c）。
+DEFAULT_ROLE_PERMS.SAMPLER = DEFAULT_ROLE_PERMS.SAMPLER.filter(
+  (code) => code !== "monitor:overview"
+);
 
-/** 角色页「常用模板」：一键套用后再改。 */
+/** 角色页「常用模板」：一键套用后再改。suggestedScope 是建议数据范围（B4 范围选择器一键带入），与种子角色一致。 */
 export const ROLE_TEMPLATES = [
-  { key: "SAMPLER", label: "现场采样员", hint: "看自己保管的箱子：电量、箱盖、位置、轨迹" },
-  { key: "DISPATCH", label: "调度员", hint: "建调拨和采样任务、推进流转、分配箱子" },
-  { key: "VERIFY", label: "核验员", hint: "签收核验、看开关箱记录和任务期间上报" },
-  { key: "DUTY", label: "值班员", hint: "盯告警、离线、低电量，看任务期间上报" },
-  { key: "ASSET", label: "资产管理员", hint: "激活、改名、停用、分配、导出采样箱" },
-  { key: "AGENCY_LEAD", label: "机构负责人", hint: "采样机构的签收、采样推进和开箱录像" },
+  {
+    key: "SAMPLER",
+    label: "现场采样员",
+    hint: "看自己保管的箱子：电量、箱盖、位置、轨迹",
+    suggestedScope: 4,
+  },
+  {
+    key: "DISPATCH",
+    label: "调度员",
+    hint: "建调拨和采样任务、推进流转、分配箱子",
+    suggestedScope: 2,
+  },
+  {
+    key: "VERIFY",
+    label: "核验员",
+    hint: "签收核验、看开关箱记录和任务期间上报",
+    suggestedScope: 1,
+  },
+  {
+    key: "DUTY",
+    label: "值班员",
+    hint: "盯告警、离线、低电量，看任务期间上报",
+    suggestedScope: 1,
+  },
+  {
+    key: "ASSET",
+    label: "资产管理员",
+    hint: "激活、改名、停用、分配、导出采样箱",
+    suggestedScope: 1,
+  },
+  {
+    key: "AGENCY_LEAD",
+    label: "机构负责人",
+    hint: "本机构签收/采样推进/开箱录像＋本单位操作日志与人员管理",
+    suggestedScope: 2,
+  },
   {
     key: "BRANCH_ADMIN",
     label: "分公司管理员",
-    hint: "本单位的人员、账号安全、分配角色，和日常任务",
+    hint: "本单位的人员、账号安全、分配角色、操作日志，和日常任务",
+    suggestedScope: 2,
   },
-  { key: "LEADER", label: "只读领导", hint: "只看不改：箱子状态、任务、操作日志" },
+  {
+    key: "LEADER",
+    label: "只读领导",
+    hint: "只看不改：箱子状态、任务、操作日志",
+    suggestedScope: 1,
+  },
 ].map((template) => ({ ...template, codes: DEFAULT_ROLE_PERMS[template.key] || [] }));
 
 /* ---------------- 老迁移用的函数（保持原样） ---------------- */
 
 /**
  * 迁移 029：补进已有角色的权限（当年的兼容规则）。现在新库没有老角色，这里只给更老的库升级用。
+ * #26 B1：链尾追加 GRANT_055（持日志读补导出），与 upgradeCodes 同口径。
  */
 export function upgradeRolePerms(code, current) {
   const have = new Set(current);
@@ -1144,6 +1216,7 @@ export function upgradeRolePerms(code, current) {
   if (have.has("device:box:task")) add.add("task:sign").add("task:video");
   if (have.has("device:box:policyTask")) add.add("task:cancel");
   if (have.has("device:box:log")) add.add("task:log");
+  for (const perm of grant055([...have, ...add])) add.add(perm);
   return [...add].filter((perm) => !have.has(perm));
 }
 

@@ -46,6 +46,8 @@ export interface OptionItem {
   label: string;
   /** 子选项 */
   children?: OptionItem[];
+  /** #26 B3（D2）：祖先只读壳——上级单位仅可见不可管，不能选为归属/上级，也不提供写操作入口。 */
+  readOnly?: boolean;
 }
 
 /**

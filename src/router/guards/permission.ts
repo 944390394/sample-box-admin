@@ -1,3 +1,4 @@
+import { createRouterMatcher } from "vue-router";
 import type { RouteRecordRaw } from "vue-router";
 import NProgress from "@/plugins/nprogress";
 import router from "@/router";
@@ -75,19 +76,7 @@ export function setupPermissionGuard() {
 
       // 动态路由生成
       if (!permissionStore.isRouteGenerated) {
-        if (!userStore.userInfo?.roles?.length) {
-          await userStore.getUserInfo();
-        }
-        void loadLabels();
-
-        // 加载用户租户列表（VITE_APP_TENANT_ENABLED=true 时生效）
-        await initTenantContext();
-
-        const dynamicRoutes = await permissionStore.generateRoutes();
-        dynamicRoutes.forEach((route: RouteRecordRaw) => {
-          router.addRoute(route);
-        });
-
+        await ensureRoutesGenerated();
         return { ...to, replace: true };
       }
 
@@ -126,5 +115,68 @@ async function initTenantContext(): Promise<void> {
     await useTenantStoreHook().loadTenant();
   } catch {
     // 静默失败，不影响主流程
+  }
+}
+
+/**
+ * 按当前登录角色生成并注册动态路由（幂等）。
+ * 守卫首次导航与登录落地校验共用这一份，保证用户信息、标签、租户上下文
+ * 与路由注册的先后顺序只有一处定义。
+ */
+export async function ensureRoutesGenerated(): Promise<void> {
+  const permissionStore = usePermissionStore();
+  const userStore = useUserStore();
+  if (permissionStore.isRouteGenerated) return;
+  if (!userStore.userInfo?.roles?.length) {
+    await userStore.getUserInfo();
+  }
+  void loadLabels();
+
+  // 加载用户租户列表（VITE_APP_TENANT_ENABLED=true 时生效）
+  await initTenantContext();
+
+  const dynamicRoutes = await permissionStore.generateRoutes();
+  dynamicRoutes.forEach((route: RouteRecordRaw) => {
+    router.addRoute(route);
+  });
+}
+
+/** 登录落地兜底地址：工作台。 */
+const LOGIN_FALLBACK = "/monitor/home";
+
+/**
+ * 登录成功后的落地地址清洗。
+ * 退出登录会把上一角色的当前页带进 redirect（如领导的 /system/user），
+ * 换角色登录后该地址可能不在新角色的路由表里：直接 push 会 no-match
+ * （VUE_ROUTER_R0004），不可路由地址还会留在 history.back 里，把页头
+ * 「返回」的 router.back() 带进死胡同。这里先按新角色生成路由，再校验
+ * 目标可达（能匹配到已注册路由＝菜单/权限允许），不可达回落工作台。
+ * 探测用路由器同款匹配器工厂而不是 router.resolve，避免对不可达地址
+ * 触发 no-match 警告；干净流程（redirect 可路由）原样落地。
+ */
+export async function resolveLoginRedirect(redirect: unknown): Promise<string> {
+  const raw = typeof redirect === "string" ? redirect.trim() : "";
+  if (!raw) return LOGIN_FALLBACK;
+  let target: string;
+  try {
+    target = decodeURIComponent(raw).trim();
+  } catch {
+    return LOGIN_FALLBACK;
+  }
+  // 只接受站内绝对路径；外链与协议相对地址（//host）一律回落
+  if (!target.startsWith("/") || target.startsWith("//")) return LOGIN_FALLBACK;
+  try {
+    await ensureRoutesGenerated();
+    const path = target.split("#")[0].split("?")[0];
+    // getRoutes() 返回规范化记录，喂回匹配器工厂时按原始记录类型适配
+    const matcher = createRouterMatcher(router.getRoutes() as unknown as RouteRecordRaw[], {});
+    const { matched } = matcher.resolve(
+      { path },
+      { name: undefined, path: "/", params: {}, matched: [], meta: {} }
+    );
+    return matched.length > 0 ? target : LOGIN_FALLBACK;
+  } catch {
+    // 路由生成/校验失败不挡登录：先落工作台，守卫会重试或兜底
+    return LOGIN_FALLBACK;
   }
 }

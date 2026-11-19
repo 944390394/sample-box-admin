@@ -54,6 +54,10 @@ import type { UploadFile } from "element-plus";
 
 /** 系统设置 › 名称与图标。上传的图标在浏览器里缩到最长边 256 像素再存，保存后网页立即换上。 */
 const props = defineProps<{ value?: BrandingSettings; can: boolean }>();
+const emit = defineEmits<{
+  (e: "dirty", v: boolean): void;
+  (e: "saved", v: BrandingSettings): void;
+}>();
 const form = reactive<BrandingSettings>({ title: "", slogan: "", logo: "" });
 const saving = ref(false);
 
@@ -62,6 +66,11 @@ watch(
   (value) => value && Object.assign(form, value),
   { immediate: true }
 );
+// #settings-refactor：向父级暴露脏状态，纳入统一保存条
+watch(form, () => emit("dirty", JSON.stringify(form) !== JSON.stringify(props.value ?? form)), {
+  deep: true,
+});
+defineExpose({ save });
 
 /** 读图片 → 缩到 256 以内 → PNG data URL。 */
 function shrink(file: File): Promise<string> {
@@ -105,6 +114,8 @@ async function save() {
     const saved = await SettingsAPI.saveBranding({ ...form });
     Object.assign(form, saved);
     applyBranding(saved);
+    emit("saved", saved);
+    emit("dirty", false);
     ElMessage.success("已保存，小程序下次打开时生效");
   } finally {
     saving.value = false;

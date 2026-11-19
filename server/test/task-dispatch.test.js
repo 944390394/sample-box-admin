@@ -33,6 +33,18 @@ const ctxOf = (orgIds, perms = ALL, user = { id: "9", nickname: "测试员" }) =
     scope: orgIds ? { all: false, orgIds, ownerIds: [] } : { all: true, orgIds: [], ownerIds: [] },
   },
 });
+// #26 m-01：isAdmin fail-closed——管理员 ctx 必须带 access（等价 requireAccess 对 ADMIN 的解析结果），
+// 不再靠「缺 access 恒真」兜底
+const adminCtx = (db) => ({
+  db,
+  user: { id: "1", nickname: "admin" },
+  access: {
+    roles: ["ADMIN"],
+    perms: new Set(),
+    grantable: new Set(),
+    scope: { all: true, orgIds: [], ownerIds: [], manageOrgIds: [] },
+  },
+});
 async function call(fn, ctx) {
   let out;
   await fn({ ...ctx, ok: (d) => (out = d), fail: (m) => (out = { error: m }) });
@@ -96,7 +108,7 @@ test("调拨：选单位带出地址，寄出方寄出，接收方看得到并�
       "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('30','e1','华东签收员','x','3',1)"
     );
     // 部门接口保存位置；不带位置字段的旧表单不清掉原值
-    const admin = { db, user: { id: "1", nickname: "admin" } };
+    const admin = adminCtx(db);
     await call(org.updateDept, {
       ...admin,
       params: { id: "2" },
@@ -425,7 +437,7 @@ test("部门负责人：新建账号（随机或手填密码）、选已有用�
     await db.run(
       "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status,mobile) VALUES ('7','old','老员工','x','1',1,'139')"
     );
-    const admin = { db, user: { id: "1", nickname: "admin" } };
+    const admin = adminCtx(db);
     const { verifyPassword } = await import("../auth.js");
     // 随机密码：只在这次返回一次
     const made = await call(org.createDept, {

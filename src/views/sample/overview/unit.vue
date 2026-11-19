@@ -1,6 +1,6 @@
 <template>
   <div class="page-container page-flow">
-    <PageHeader :title="data?.unit.name || '单位总览'" back="/monitor/overview">
+    <PageHeader :title="data?.unit.name || '单位总览'" :back="backTarget">
       <template #tags>
         <el-tag
           v-if="data"
@@ -167,6 +167,14 @@ import StationBoard, { type StationQuery } from "./components/StationBoard.vue";
 const route = useRoute();
 const router = useRouter();
 const orgId = computed(() => String(route.params.orgId || ""));
+/**
+ * 「返回」目标：集团总览对单单位范围会自动 replace 进来（带 from=auto），
+ * 此时再回集团总览会被立刻 replace 回来形成回环，改回工作台；
+ * 多单位用户从集团总览手动进来时保持原目标不变。
+ */
+const backTarget = computed(() =>
+  route.query.from === "auto" ? "/monitor/home" : "/monitor/overview"
+);
 const data = ref<UnitOverview | null>(null);
 
 const today = todayStr();
@@ -214,9 +222,10 @@ async function load(): Promise<boolean> {
 }
 const { updatedAt, error, errorCode, loading, refresh } = useOverviewPolling(load, 5000);
 
-/** 404/范围外错态的出口：回总览入口，由它按数据范围落到自己有权看的单位（R4）。 */
+/** 404/范围外错态的出口：回总览入口，由它按数据范围落到自己有权看的单位（R4）。
+ * 自动跳转进来（from=auto）时同样分流回工作台，避免再被集团总览 replace 回来。 */
 function backToMyOverview() {
-  void router.replace("/monitor/overview");
+  void router.replace(backTarget.value);
 }
 
 function percent(value: number, total: number) {

@@ -199,11 +199,10 @@ export async function resolveGrantable(db, roles) {
   return new Set(rows.map((row) => String(row.perm)));
 }
 
-/** 数据范围：1 全部、2 本单位及下级、3 本单位、4 仅本人，数字越小越宽。老数据里的 5 按本单位算。 */
+/** 数据范围：1 全部、2 本单位及下级、3 本单位、4 仅本人、5 自定义(sys_role_dept)，数字越小越宽。旧数据 5 已由 055b 转 3。 */
 export function scopeRank(value) {
   const n = Number(value);
-  if (n === 5) return 3;
-  return n >= 1 && n <= 4 ? n : 4;
+  return n >= 1 && n <= 5 ? n : 4;
 }
 
 async function loadDepts(db) {
@@ -281,9 +280,14 @@ export async function resolveDeptLimit(db, deptId, depts = null) {
  */
 export async function resolveScope(db, user, roles, cap = null, depts = null) {
   const isAdmin = roles.some((role) => role.code === "ADMIN");
-  const ranks = roles.map((role) =>
-    cap == null || isAdmin ? scopeRank(role.data_scope) : Math.max(scopeRank(role.data_scope), cap)
-  );
+  const capEff = cap === 5 ? 3 : cap;
+  const ranks = roles.map((role) => {
+    const rk = scopeRank(role.data_scope);
+    if (cap == null || isAdmin) return rk;
+    // 自定义宽度在 rank5 分支内与 cap 取交集；被封顶到「仅本人」时直接按 rank4 算
+    if (rk === 5) return capEff >= 4 ? 4 : 5;
+    return Math.max(rk, capEff);
+  });
   if (isAdmin || ranks.includes(1))
     return { all: true, orgIds: [], ownerIds: [], manageOrgIds: [] };
   const rows = depts || (await loadDepts(db));
@@ -293,9 +297,39 @@ export async function resolveScope(db, user, roles, cap = null, depts = null) {
   const orgIds = new Set();
   const manage = new Set();
   const ownerIds = new Set();
+  // #26 D3：自定义部门一次查齐（055b 建 sys_role_dept；更老的库没有这张表时按空算）
+  let customRows = [];
+  const customRoleIds = roles.filter((_, i) => ranks[i] === 5).map((role) => String(role.id));
+  if (customRoleIds.length) {
+    try {
+      customRows = await db.all(
+        `SELECT role_id, dept_id FROM sys_role_dept WHERE role_id IN (${customRoleIds.map(() => "?").join(",")})`,
+        customRoleIds
+      );
+    } catch {
+      customRows = [];
+    }
+  }
   for (const rank of ranks) {
     if (rank === 4) {
       ownerIds.add(String(user.id));
+      continue;
+    }
+    if (rank === 5) {
+      // 自定义范围 = sys_role_dept 各单位子树并集，再按部门上限封顶
+      let union = new Set();
+      for (const c of customRows)
+        for (const id of collectDeptIds(tree, String(c.dept_id)) || [String(c.dept_id)])
+          union.add(id);
+      if (capEff != null && capEff !== 1) {
+        const capIds =
+          capEff === 2 ? collectDeptIds(tree, deptId) || [deptId] : capEff === 3 ? [deptId] : [];
+        union = new Set([...union].filter((id) => capIds.includes(id)));
+      }
+      for (const id of union) {
+        orgIds.add(id);
+        manage.add(id);
+      }
       continue;
     }
     if (!deptId) continue;
@@ -479,4 +513,31 @@ export function flagMatch(box, flag, limits) {
     return box.life === "未使用" && !box.alert && online && mv >= limits.readyMv;
   }
   return true;
+}
+
+/**
+ * #26 B1：组织维度 scope 的单一 SQL 片段（部门/日志/统计共用），与 scopeSql 同族。
+ * mode='manage' 用 manageOrgIds（管人/管部门/日志 actor 口径），'view' 用 orgIds（看箱口径含祖先+HQ""）。
+ * 列名显式传入并校验（沿用 L-P2-2 防正则改 SQL 教训）；空范围→1=0 不泄露；不限→1=1。
+ * 手工构造的 scope 可能没有 manageOrgIds（如总览测试），manage 口径退回 orgIds，再退回空。
+ */
+export function orgScopeSql(scope, { col = "org_id", mode = "manage" } = {}) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(col))
+    throw new Error("非法标识符");
+  if (!scope || scope.all) return { sql: "1=1", params: [] };
+  const ids = ((mode === "manage" ? (scope.manageOrgIds ?? scope.orgIds) : scope.orgIds) || [])
+    .map(String)
+    .filter(Boolean);
+  if (!ids.length) return { sql: "1=0", params: [] };
+  return { sql: `${col} IN (${ids.map(() => "?").join(",")})`, params: ids };
+}
+
+/**
+ * #26 B1：所有 auth 路由统一解析 ctx.access（消除「无 perm 路由 access=undefined → isAdmin 恒真」）。
+ * 已解析则复用（per-request 缓存），未解析则 resolveAccess 并挂到 ctx。
+ */
+export async function requireAccess(db, ctx) {
+  if (ctx.access) return ctx.access;
+  ctx.access = await resolveAccess(db, ctx.user);
+  return ctx.access;
 }

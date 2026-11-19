@@ -1,0 +1,212 @@
+{
+  "skill": "audit",
+  "generated_at": "2026-11-20T01:05:00+08:00",
+  "project_name": "samplebox-admin-settings",
+  "target": {
+    "type": "code",
+    "reference": "src/views/system/settings/index.vue (dev http://127.0.0.1:3000 /#/system/settings, admin)",
+    "pages_audited": ["系统设置（接入信息/地图/采样箱策略/品牌/显示名称/账号安全/外部集成/数据库）"]
+  },
+  "audit_framework": ["Nielsen-10", "responsive", "performance"],
+  "findings": [
+    {
+      "id": "audit-1",
+      "heuristic": "visibility",
+      "severity": "major",
+      "description": "无脏状态标记与统一保存条；长页滚动后保存按钮不在视口，用户不知道哪个分区未保存",
+      "evidence": "index.vue:53/126/165/227 各 card 内独立保存按钮；nav(8-17) 无 dirty badge",
+      "suggestion": "sticky 保存条 + 分区脏标记 + 未保存计数",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-2",
+      "heuristic": "visibility",
+      "severity": "minor",
+      "description": "保存成功仅全局 toast「已保存」，无分区级成功态/时间戳，多区连保存易混",
+      "evidence": "index.vue:559/568/588/597/684/705/717/740 ElMessage.success",
+      "suggestion": "分区级 saved-at 徽标 + toast 带分区名",
+      "effort": "quick-win"
+    },
+    {
+      "id": "audit-3",
+      "heuristic": "user-control",
+      "severity": "major",
+      "description": "离开页面无未保存守卫，误跳丢失编辑",
+      "evidence": "grep 无 beforeunload/onBeforeRouteLeave",
+      "suggestion": "路由离开守卫 + beforeunload 提示",
+      "effort": "quick-win"
+    },
+    {
+      "id": "audit-4",
+      "heuristic": "user-control",
+      "severity": "minor",
+      "description": "除显示名称外无恢复默认/撤销通道",
+      "evidence": "仅 resetLabels index.vue:166",
+      "suggestion": "各分区「恢复本区默认」+ 确认",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-5",
+      "heuristic": "error-prevention",
+      "severity": "major",
+      "description": "危险操作无二次确认：数据库切换、全部恢复默认、划拨/送检功能开关",
+      "evidence": "grep 无 ElMessageBox/confirm",
+      "suggestion": "危险操作 typed-confirm + 影响说明",
+      "effort": "quick-win"
+    },
+    {
+      "id": "audit-6",
+      "heuristic": "error-prevention",
+      "severity": "minor",
+      "description": "跨字段约束无 inline 校验（宽限 vs 周期、锁定次数/分钟联动），仅 min/max",
+      "evidence": "index.vue:105-124/207-225",
+      "suggestion": "inline 校验提示 + 提交前阻断",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-7",
+      "heuristic": "consistency",
+      "severity": "major",
+      "description": "保存按钮位置不一（form 末 item vs label-ops 行）；label-width 96/88/140/110 混用",
+      "evidence": "index.vue:20/33/69/181/242",
+      "suggestion": "统一 sticky 保存条 + 统一 label-width",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-8",
+      "heuristic": "consistency",
+      "severity": "minor",
+      "description": "分区卡片 header 纯文本 vs BrandingCard 自定义头，视觉不统一",
+      "evidence": "index.vue:19 vs 131",
+      "suggestion": "统一 SectionCard 头（标题+描述+脏标记+操作）",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-9",
+      "heuristic": "real-world-match",
+      "severity": "minor",
+      "description": "天地图 tk/sk 行话无解释",
+      "evidence": "index.vue:34/42 placeholder",
+      "suggestion": "label 旁 ? tooltip 解释用途与获取方式",
+      "effort": "quick-win"
+    },
+    {
+      "id": "audit-10",
+      "heuristic": "recognition",
+      "severity": "minor",
+      "description": "左导航无图标/未保存标记/搜索，长页定位靠记忆",
+      "evidence": "nav index.vue:8-17",
+      "suggestion": "导航加图标+脏点+scrollspy 高亮",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-11",
+      "heuristic": "aesthetic",
+      "severity": "major",
+      "description": "单位/说明长段落 inline 挤占表单行（宽限说明 3 行），信息密度失衡",
+      "evidence": "index.vue:113-117/101-103",
+      "suggestion": "说明移入 tooltip/二级灰字行，表单行只留单位",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-12",
+      "heuristic": "error-recovery",
+      "severity": "minor",
+      "description": "保存失败仅 toast，无 inline 重试/字段定位",
+      "evidence": "request.ts apiError → toast",
+      "suggestion": "分区 inline 错误条 + 重试按钮",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-13",
+      "heuristic": "help-docs",
+      "severity": "minor",
+      "description": "复杂设置无 ? inline 帮助/文档链接",
+      "evidence": "仅 database-tip 段落",
+      "suggestion": "关键项 ? tooltip + 文档深链",
+      "effort": "quick-win"
+    },
+    {
+      "id": "audit-14",
+      "heuristic": "responsive",
+      "severity": "minor",
+      "description": "窄屏 nav 横滑标签无 scrollspy 同步当前分区",
+      "evidence": "CSS 813-826",
+      "suggestion": "IntersectionObserver scrollspy 同步 nav",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-15",
+      "heuristic": "performance",
+      "severity": "minor",
+      "description": "全分区一次性渲染（含 SMTP/视频/数据库重表单），无折叠/懒渲染",
+      "evidence": "单 GET + 全 card 渲染",
+      "suggestion": "分区折叠/懒渲染重表单",
+      "effort": "medium"
+    },
+    {
+      "id": "audit-16",
+      "heuristic": "flexibility",
+      "severity": "minor",
+      "description": "无折叠/展开与键盘导航，老手重复滚动",
+      "evidence": "nav anchor only",
+      "suggestion": "分区可折叠 + 键盘上下导航",
+      "effort": "medium"
+    }
+  ],
+  "opportunities": [
+    {
+      "title": "统一保存体验：sticky 保存条 + 分区脏标记 + 离开守卫",
+      "addresses_findings": ["audit-1", "audit-2", "audit-3", "audit-7"],
+      "priority": "high",
+      "rationale": "4 个 finding 集中 visibility/user-control/consistency，3  major；设置页核心任务=改+保存，保存体验是首要改版主题"
+    },
+    {
+      "title": "危险操作防错：数据库切换/恢复默认/功能开关二次确认 + inline 校验",
+      "addresses_findings": ["audit-5", "audit-6", "audit-4"],
+      "priority": "high",
+      "rationale": "不可逆操作无确认=blocker 级风险降为 major；防错是设置页底线"
+    },
+    {
+      "title": "表单可读性重构：说明移 tooltip/二级行 + 统一 SectionCard + inline 帮助",
+      "addresses_findings": ["audit-11", "audit-9", "audit-13", "audit-8"],
+      "priority": "medium",
+      "rationale": "信息密度与一致性直接影响可读与信任"
+    },
+    {
+      "title": "导航与响应式：图标+脏点+scrollspy+折叠+键盘",
+      "addresses_findings": ["audit-10", "audit-14", "audit-16"],
+      "priority": "medium",
+      "rationale": "长页定位效率与移动适配"
+    },
+    {
+      "title": "错误恢复与性能细节：inline 错误重试 + 重表单懒渲染",
+      "addresses_findings": ["audit-12", "audit-15"],
+      "priority": "low",
+      "rationale": "细节包，随主重构顺带"
+    }
+  ],
+  "summary": {
+    "total_findings": 16,
+    "by_severity": { "blocker": 0, "major": 5, "minor": 11 },
+    "by_heuristic": {
+      "visibility": 2,
+      "user-control": 2,
+      "error-prevention": 2,
+      "consistency": 2,
+      "real-world-match": 1,
+      "recognition": 1,
+      "aesthetic": 1,
+      "error-recovery": 1,
+      "help-docs": 1,
+      "responsive": 1,
+      "performance": 1,
+      "flexibility": 1
+    },
+    "top_opportunities": [
+      "统一保存体验：sticky 保存条 + 分区脏标记 + 离开守卫",
+      "危险操作防错：二次确认 + inline 校验",
+      "表单可读性重构：tooltip/二级行 + SectionCard + inline 帮助"
+    ]
+  }
+}

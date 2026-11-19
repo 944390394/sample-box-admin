@@ -334,8 +334,20 @@ test("给角色分配权限：要单独的权限，只能授予或收回自己�
       (await call(org.updateRole, { ...granter, params: { id: "1" }, body: { name: "x" } })).error,
       /只有系统管理员/
     );
+    // #26 m-01：isAdmin fail-closed——「谁也不能停用」要用带 ADMIN access 的 ctx 验证（同下方管理员 ctx 写法）
+    const stopAdmin = {
+      db,
+      user: { id: "1" },
+      access: {
+        roles: ["ADMIN"],
+        perms: new Set(),
+        grantable: new Set(),
+        scope: { all: true, orgIds: [], ownerIds: [] },
+      },
+    };
     assert.match(
-      (await call(org.updateRole, { db, params: { id: "1" }, body: { status: 0 } })).error,
+      (await call(org.updateRole, { ...stopAdmin, params: { id: "1" }, body: { status: 0 } }))
+        .error,
       /不能停用/
     );
 

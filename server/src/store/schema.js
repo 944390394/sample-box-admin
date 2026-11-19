@@ -121,6 +121,8 @@ const OPERATION_LOG_COLUMNS = {
     target_type: "TEXT NOT NULL DEFAULT ''",
     target_id: "TEXT NOT NULL DEFAULT ''",
     result: "TEXT NOT NULL DEFAULT ''",
+    detail: "TEXT NOT NULL DEFAULT ''",
+    target_org_id: "TEXT NOT NULL DEFAULT ''",
     created_at: "TEXT NOT NULL DEFAULT ''",
     ip: "TEXT NOT NULL DEFAULT ''",
   },
@@ -133,6 +135,8 @@ const OPERATION_LOG_COLUMNS = {
     target_type: "VARCHAR(32) NOT NULL DEFAULT ''",
     target_id: "VARCHAR(64) NOT NULL DEFAULT ''",
     result: "VARCHAR(16) NOT NULL DEFAULT ''",
+    detail: "TEXT NULL",
+    target_org_id: "VARCHAR(32) NOT NULL DEFAULT ''",
     created_at: "DATETIME(3) NOT NULL DEFAULT '1970-01-01 00:00:00.000'",
     ip: "VARCHAR(64) NOT NULL DEFAULT ''",
   },
@@ -257,6 +261,8 @@ function operationLogDdl(dialect) {
       target_type VARCHAR(32) NOT NULL DEFAULT '',
       target_id VARCHAR(64) NOT NULL DEFAULT '',
       result VARCHAR(16) NOT NULL DEFAULT '',
+      detail TEXT NULL,
+      target_org_id VARCHAR(32) NOT NULL DEFAULT '',
       created_at DATETIME(3) NOT NULL,
       ip VARCHAR(64) NOT NULL DEFAULT '',
       PRIMARY KEY (id)
@@ -272,6 +278,8 @@ function operationLogDdl(dialect) {
     target_type TEXT NOT NULL DEFAULT '',
     target_id TEXT NOT NULL DEFAULT '',
     result TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    target_org_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT '',
     ip TEXT NOT NULL DEFAULT ''
   )`;

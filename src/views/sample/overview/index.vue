@@ -379,6 +379,7 @@ import type { ComponentPublicInstance } from "vue";
  * 单位几千家公司时列表在服务端分页，页面只拿一页；每 5 秒轮询，后台暂停、失败退避。
  */
 const router = useRouter();
+const route = useRoute();
 const data = ref<GroupOverview | null>(null);
 const palette = useChartPalette();
 /** 单位列表卡片：点 Top 分公司柱状图后滚到这里，用模板引用而不是查 data-test（U-P2-4）。 */
@@ -402,14 +403,23 @@ async function load(): Promise<boolean> {
     pageSize: pageSize.value,
   });
   if (mine !== token) return false;
-  // 数据范围里只有一个单位时直接进它的总览
+  // 页面已被 keep-alive 缓存（用户切去了别的页签）时迟到的结果一律丢弃：
+  // 不更新后台页签的数据/时间戳，更不能触发下面的单单位自动 replace，
+  // 把用户从当前页面（如工作台）拽回单位总览（P2 延迟回环）。
+  // 轮询本身已在 useOverviewPolling 的 onDeactivated 暂停，这里兜住在途请求的竞态。
+  if (route.name !== "SampleOverview") return false;
+  // 数据范围里只有一个单位时直接进它的总览。带 from=auto 标记：
+  // 单位总览的「返回」据此回工作台，而不是回集团总览又被 replace 回来（回环陷阱）。
   if (
     result.unitTotal === 1 &&
     result.units.length === 1 &&
     !debouncedKeyword.value.trim() &&
     !typeFilter.value
   ) {
-    void router.replace(`/monitor/overview/${result.units[0].id}`);
+    void router.replace({
+      path: `/monitor/overview/${result.units[0].id}`,
+      query: { from: "auto" },
+    });
     return false;
   }
   data.value = result;

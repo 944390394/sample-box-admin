@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { openDatabase, migrate, seedOrg } from "../db.js";
 import { createUser, updateUser, resetPassword } from "../org-api.js";
+import { resolveAccess } from "../src/auth/boxAccess.js";
 import { verifyPassword } from "../auth.js";
 
 test("avatar writes are rejected while user edits and administrator password reset still work", async () => {
@@ -22,6 +23,8 @@ test("avatar writes are rejected while user edits and administrator password res
       await handler({
         db,
         user: admin,
+        // #26 m-01：isAdmin fail-closed——org handler 的 ctx 必须带 access（dispatcher 统一 requireAccess）
+        access: await resolveAccess(db, admin),
         body,
         query,
         params: { id },
