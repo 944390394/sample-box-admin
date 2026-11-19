@@ -1,3 +1,4 @@
+import { badRequest } from "../domain/AppError.js";
 /**
  * 采样箱的默认运行参数。周期和「只在充电时定时上报」要等固件 1.0.2 在确认包里收下。
  * 电量预留只影响网页上的可用电量，保存后立刻生效。
@@ -9,9 +10,24 @@ const DEFAULTS = {
   batteryReserve: 20,
   /** 箱子离任务目的地多近算「到达附近」，米。基站定位误差常有一两公里，所以默认 2 公里。 */
   arriveRadiusM: 2000,
+  /** 划拨/送检（B1）功能开关：默认关。关时 /sample/transfers* 报未开通，/sample/tasks 保持旧行为。 */
+  enableTransferInspect: false,
+  /** 建单后未上线的离线宽限，秒（B3/#18）。默认 1 小时；设置页以分钟展示（1–1440）。 */
+  taskOfflineGraceSec: 3600,
 };
 
-const applied = { ...DEFAULTS };
+// applied 只放运行参数（进策略版本哈希的那几项）；功能开关不在其中。
+const applied = {
+  reportPeriodSec: DEFAULTS.reportPeriodSec,
+  reportOnlyWhenCharging: DEFAULTS.reportOnlyWhenCharging,
+  batteryReserve: DEFAULTS.batteryReserve,
+  arriveRadiusM: DEFAULTS.arriveRadiusM,
+};
+// 开关单独存放，不进 applied：currentBoxSettings() 参与上报策略版本哈希（resolvePolicy），
+// 混进去会让所有「系统默认」策略的版本号变化、触发全网重新下发。
+let transferInspect = DEFAULTS.enableTransferInspect;
+// 宽限同样不进 applied：它只影响离线判定，不参与上报策略版本哈希。
+let offlineGrace = DEFAULTS.taskOfflineGraceSec;
 
 function radiusOf(value, fallback) {
   const radius = Number(value);
@@ -23,6 +39,12 @@ function periodOf(value, fallback) {
   const period = Number(value);
   if (!Number.isInteger(period) || period < 5 || period > 3600) return fallback;
   return period;
+}
+
+function graceOf(value, fallback) {
+  const sec = Number(value);
+  if (!Number.isInteger(sec) || sec < 60 || sec > 86400) return fallback;
+  return sec;
 }
 
 function reserveOf(value, fallback) {
@@ -38,6 +60,8 @@ export function publicBox(config) {
     reportOnlyWhenCharging: Boolean(box.reportOnlyWhenCharging),
     batteryReserve: reserveOf(box.batteryReserve, DEFAULTS.batteryReserve),
     arriveRadiusM: radiusOf(box.arriveRadiusM, DEFAULTS.arriveRadiusM),
+    enableTransferInspect: Boolean(box.enableTransferInspect),
+    taskOfflineGraceSec: graceOf(box.taskOfflineGraceSec, DEFAULTS.taskOfflineGraceSec),
   };
 }
 
@@ -47,6 +71,8 @@ export function applyBoxSettings(config) {
   applied.reportOnlyWhenCharging = next.reportOnlyWhenCharging;
   applied.batteryReserve = next.batteryReserve;
   applied.arriveRadiusM = next.arriveRadiusM;
+  transferInspect = next.enableTransferInspect;
+  offlineGrace = next.taskOfflineGraceSec;
   return { ...applied };
 }
 
@@ -54,15 +80,25 @@ export function currentBoxSettings() {
   return { ...applied };
 }
 
+/** 划拨/送检功能是否开通（B1 开关，默认关）。新端点与新语义都先问这里。 */
+export function transferInspectEnabled() {
+  return transferInspect;
+}
+
+/** 建单后未上线的离线宽限（秒，B3/#18）。offlineSql / flagMatch 唯一读取点。 */
+export function offlineGraceSec() {
+  return offlineGrace;
+}
+
 export function mergeBoxSettings(current, input) {
   const base = current && typeof current === "object" ? current : {};
   const period = Number(input?.reportPeriodSec);
   if (!Number.isInteger(period) || period < 5 || period > 3600) {
-    throw new Error("上报周期要在 5 到 3600 秒之间");
+    throw badRequest("上报周期要在 5 到 3600 秒之间");
   }
   const reserve = Number(input?.batteryReserve);
   if (!Number.isInteger(reserve) || reserve < 0 || reserve > 80) {
-    throw new Error("电量预留要在 0 到 80 之间");
+    throw badRequest("电量预留要在 0 到 80 之间");
   }
   // 旧页面不带这个字段时保留原值
   const radius =
@@ -70,8 +106,24 @@ export function mergeBoxSettings(current, input) {
       ? radiusOf(base.box?.arriveRadiusM, DEFAULTS.arriveRadiusM)
       : Number(input.arriveRadiusM);
   if (!Number.isInteger(radius) || radius < 100 || radius > 50000) {
-    throw new Error("到达半径要在 100 到 50000 米之间");
+    throw badRequest("到达半径要在 100 到 50000 米之间");
   }
+  // 功能开关：旧页面不带这个字段时保留原值；两边都没设过就不写键（读取时按默认关）。
+  const flag =
+    input?.enableTransferInspect != null
+      ? Boolean(input.enableTransferInspect)
+      : base.box?.enableTransferInspect != null
+        ? Boolean(base.box.enableTransferInspect)
+        : null;
+  // 离线宽限：旧页面不带时保留原值；两边都没设过不写键（读取按默认 3600）。带值时校验 1–1440 分钟。
+  const grace =
+    input?.taskOfflineGraceSec != null
+      ? Number(input.taskOfflineGraceSec)
+      : base.box?.taskOfflineGraceSec != null
+        ? Number(base.box.taskOfflineGraceSec)
+        : null;
+  if (grace != null && (!Number.isInteger(grace) || grace < 60 || grace > 86400))
+    throw badRequest("离线宽限要在 1 到 1440 分钟之间");
   return {
     ...base,
     box: {
@@ -79,6 +131,8 @@ export function mergeBoxSettings(current, input) {
       reportOnlyWhenCharging: Boolean(input?.reportOnlyWhenCharging),
       batteryReserve: reserve,
       arriveRadiusM: radius,
+      ...(flag == null ? {} : { enableTransferInspect: flag }),
+      ...(grace == null ? {} : { taskOfflineGraceSec: grace }),
     },
   };
 }

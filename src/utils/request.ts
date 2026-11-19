@@ -17,6 +17,21 @@ declare module "axios" {
   }
 }
 
+/**
+ * 带业务码和 data 的错误：划拨提交/撤销的 409 会把逐台拦截原因放在 data 里
+ * （blocked[] / boxes[]），调用方要按码渲染弹窗，不能只拿到一句 msg。
+ */
+export interface ApiError extends Error {
+  code?: string;
+  data?: unknown;
+}
+export function apiError(msg: string, code?: string, data?: unknown): ApiError {
+  const error = new Error(msg) as ApiError;
+  error.code = code;
+  error.data = data;
+  return error;
+}
+
 // 防止同一请求在 token 刷新后重复进入重试，导致死循环
 async function handleExpired(config: InternalAxiosRequestConfig | undefined, code: string) {
   if (code === ApiCodeEnum.REFRESH_TOKEN_INVALID || !config || config.authRetried) {
@@ -100,7 +115,7 @@ http.interceptors.response.use(
       ElMessage.error(
         `${msg || "系统出错"}${response.headers["x-request-id"] ? `（请求编号 ${response.headers["x-request-id"]}）` : ""}`
       );
-    return Promise.reject(new Error(msg || "系统出错"));
+    return Promise.reject(apiError(msg || "系统出错", code, data));
   },
 
   async (error) => {
@@ -128,13 +143,13 @@ http.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    const { code, msg } = response.data as ApiResult;
+    const { code, msg, data } = response.data as ApiResult;
 
     // 须先改密：管理员要求或密码到期，跳到改密页
     if (code === "A0240") {
       if (!window.location.hash.startsWith("#/force-password"))
         window.location.hash = "#/force-password";
-      return Promise.reject(new Error(msg || "请先修改密码"));
+      return Promise.reject(apiError(msg || "请先修改密码", code, data));
     }
 
     // 权限不足
@@ -142,12 +157,12 @@ http.interceptors.response.use(
       const permissionStore = usePermissionStoreHook();
       await permissionStore.refreshPermissions();
       ElMessage.error(msg || "权限不足");
-      return Promise.reject(new Error(msg || "权限不足"));
+      return Promise.reject(apiError(msg || "权限不足", code, data));
     }
 
     if (!config?.silent)
       ElMessage.error(`${msg || "请求失败"}${requestId ? `（请求编号 ${requestId}）` : ""}`);
-    return Promise.reject(new Error(msg || "请求失败"));
+    return Promise.reject(apiError(msg || "请求失败", code, data));
   }
 );
 

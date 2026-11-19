@@ -1,3 +1,4 @@
+import { badRequest } from "../domain/AppError.js";
 /**
  * 天地图浏览器端密钥。tk、sk 都要下发给大屏，瓦片请求才能通过。
  * 保存时安全密钥留空表示不改原来的值。
@@ -17,6 +18,6 @@ export function mergeMapSettings(current, input) {
   const tk = String(input?.tk || "").trim();
   const typed = String(input?.sk || "").trim();
   const sk = typed || String(previous.sk || "");
-  if (tk.length > 128 || sk.length > 128) throw new Error("密钥过长");
+  if (tk.length > 128 || sk.length > 128) throw badRequest("密钥过长");
   return { ...base, tianditu: { tk, sk } };
 }

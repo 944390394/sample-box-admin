@@ -2,10 +2,18 @@ export type BoxLife = "待激活" | "未使用" | "在途" | "停用";
 export type ActivateStep = "等待激活" | "待设备确认" | "已确认";
 
 export interface SampleBox {
-  /** 编号就是 IMEI。 */
+  /**
+   * 箱子主键。目前它就是 IMEI（换成独立代理键是后续计划），所以页面上要显示 IMEI 一律读 imei 字段，
+   * 别拿 id 当显示值——没有「设备标识」权限时服务端只把 imei 打码，id 还得留给路由和二维码。
+   */
   id: string;
-  /** 显示名称，激活时可改，默认「采样箱_00000001」。 */
+  /**
+   * 显示名称，激活时可改，默认「采样箱_00000001」。
+   * 注意：库里名称为空时服务端 toJSON 会把编号回显进来，而现在的编号就是整串 IMEI（M-1），
+   * 所以页面上显示名称一律走 boxName()，别直接写 name 或 name || id。
+   */
   name: string;
+  /** 要显示给用户的 IMEI：有「设备标识」权限是整串，没有是打码的（这个字段不会被删掉）。 */
   imei: string;
   iccid: string;
   imsi: string;
@@ -22,7 +30,7 @@ export interface SampleBox {
   owner: string;
   ownerId?: string;
   /** 服务端按权限拿掉的几块：status 工况、location 位置、identity 设备标识。 */
-  /** 没有权限、服务端拿掉的字段组：power、lid、opens、signal、charging、powerLog、storage、location、iccid、imsi、firmware；全遮时另有 status、identity。 */
+  /** 没有权限、服务端拿掉的字段组：power、lid、opens、signal、charging、powerLog、storage、location、iccid、imsi、firmware；全遮时另有 status、identity。设备标识权限不够时还有 imei（这一项只打码、不删字段）。 */
   masked?: string[];
   /** 设备固件支不支持远程抹除、读本机日志。不受「查看固件版本」影响。 */
   remote?: boolean;
@@ -69,6 +77,10 @@ export interface SampleBox {
     time?: string;
     at?: string;
   } | null;
+  /** GPS 定位时间。位置卡请直接用下面的 lastGpsAt / lastLbsAt。 */
+  lastGpsAt?: string;
+  /** 基站定位时间，没有基站记录时为空（位置卡写「无记录」）。 */
+  lastLbsAt?: string;
   /** GD25Q32 剩余字节。还没上报时为空。 */
   storageFree?: number | null;
   /** 扣掉预留后的可用电量，0–100。 */
@@ -88,7 +100,27 @@ export interface SampleBox {
   charge?: number | null;
   activateStep: ActivateStep;
   poweredAt: string;
+  /** 占用这张箱子的未结束单 id（建单事务里写，多单取最早）；划拨占用不写，空串表示无占用。 */
+  boundTaskId?: string;
+  /** 那张单的建单时间（ISO 原样）。与 taskOfflineGraceSec 一起渲染「建单后未上线」宽限徽标。 */
+  boundTaskAt?: string;
 }
+
+/**
+ * 采样箱称谓（M-1）的统一口径放在 @/utils/boxLabel，公共组件（TrackMap、UplinkLog）也在用；
+ * 这里转出一层，页面继续沿用从 ../data 引的写法。规则见 boxLabel.ts 顶部注释。
+ */
+export {
+  boxFileName,
+  boxName,
+  boxNameHint,
+  boxTitle,
+  imeiText,
+  isImeiLike,
+  maskImeiText,
+  realBoxName,
+  UNNAMED_BOX,
+} from "@/utils/boxLabel";
 
 export const boxes: SampleBox[] = [
   {
@@ -328,9 +360,21 @@ export function shortStamp(value: string) {
   return value || "—";
 }
 
-export type TaskType = "采样" | "调拨";
+/**
+ * 单据类型（kind 是权威来源，单号前缀只是显示）：采样 TK- / 送检 IN- / 划拨 AL-。
+ * 旧存储值「调拨」只读保留（历史物流单），不在新建枚举内。口径同 shared/taskFlow.js 的 DOC_KINDS。
+ */
+export type TaskType = "采样" | "送检" | "划拨" | "调拨";
 
-export type TransferStatus = "待寄出" | "运送中" | "待签收" | "已签收" | "已取消" | "已拒收";
+/** 划拨单持久状态：恰好两个终态（提交即生效、无物流）。口径同 shared/taskFlow.js ENDED_OK/ENDED_VOID 的划拨两态。 */
+export type TransferStatus = "已划拨" | "已撤销";
+
+/**
+ * 送检单 9 个持久状态；「已签收」不是持久状态（待签收上签收直接落待检测）。
+ * 口径同 shared/taskFlow.js 的 INSPECT_FLOW ∪ INSPECT_RETURN_FLOW ∪ {已拒收, 已取消}。
+ */
+export type InspectStatus =
+  "待寄出" | "运送中" | "待签收" | "待检测" | "已检测" | "退回中" | "已退回" | "已拒收" | "已取消";
 
 export interface SampleTask {
   no: string;
@@ -674,8 +718,17 @@ export const BOX_PERM = {
 } as const;
 /** 开关箱、上电、充电记录：任意一项就能进「事件」。 */
 export const EVENT_PERMS = [BOX_PERM.eventLid, BOX_PERM.eventBoot, BOX_PERM.eventCharge];
-/** 新建任务：调拨、采样分开授权。 */
-export const TASK_CREATE = ["task:create:transfer", "task:create:sample"];
+/**
+ * 「设备标识」这一项：老库里是一项 device:box:identity，服务端拆成了 iccid / imsi / firmware 三项，
+ * 三项都有才算有（和服务端 identityGranted 同一口径）。IMEI 显示和按 IMEI 搜索都归它管。
+ */
+export const IMEI_PERMS = [BOX_PERM.iccid, BOX_PERM.imsi, BOX_PERM.firmware];
+/** 新建任务单（采样/送检）入口授权；划拨走独立的划拨页向导（task:create:transfer）。 */
+export const TASK_CREATE = ["task:create:sample", "task:create:inspect"];
+/** 批量划拨入口授权（提交即生效，独立页）。 */
+export const TRANSFER_CREATE = "task:create:transfer";
+/** 撤销划拨授权。 */
+export const TRANSFER_REVOKE = "task:transfer:revoke";
 
 export const reports = [
   {

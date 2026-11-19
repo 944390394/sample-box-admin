@@ -1,0 +1,35 @@
+digraph {
+  compound=true
+  graph [fontname="Microsoft YaHei", rankdir=TB, ranksep=1.0, nodesep=1.0]
+  node [fontname="Microsoft YaHei", shape=box, margin="0.4,0.3"]
+  edge [fontname="Microsoft YaHei"]
+  label=<<br /><font point-size="34">System Context View: 智采 · 采样箱监测管理系统</font><br /><font point-size="24">系统上下文：角色、客户端、设备与外部依赖</font>>
+
+  1 [id=1,shape=rect, label=<<font point-size="34">集团级用户</font><br /><font point-size="19">[Person]</font><br /><br /><font point-size="24">系统管理员 / 资产管理员 / 核验员 / 值班员 /<br />领导查看（数据范围：全集团）</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+  2 [id=2,shape=rect, label=<<font point-size="34">分公司 / 机构用户</font><br /><font point-size="19">[Person]</font><br /><br /><font point-size="24">分公司管理员 / 调度员 /<br />机构负责人（数据范围：本单位及下级）</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+  25 [id=25,shape=rect, label=<<font point-size="34">采样箱固件</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">STM32L051 遥测（电量/箱盖/开箱）+<br />M100MG-C2 DTU Lua 脚本：周期 TCP<br />JSON 上报、离线补传、低功耗休眠</font>>, style=filled, color="#204d37", fillcolor="#2f6f4f", fontcolor="#ffffff"]
+  26 [id=26,shape=rect, label=<<font point-size="34">微信小程序</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">移动端采样/扫码/签收客户端；仓库外（WeChatProjects/miniprogram-1），走同一套<br />HTTP API 与微信登录</font>>, style=filled, color="#60646a", fillcolor="#8a8f98", fontcolor="#ffffff"]
+  27 [id=27,shape=rect, label=<<font point-size="34">天地图开放平台</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">网页地图 JS API + 服务端逆地理编码</font>>, style=filled, color="#60646a", fillcolor="#8a8f98", fontcolor="#ffffff"]
+  28 [id=28,shape=rect, label=<<font point-size="34">微信开放接口</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">jscode2session / 获取手机号 /<br />stable_token</font>>, style=filled, color="#60646a", fillcolor="#8a8f98", fontcolor="#ffffff"]
+  29 [id=29,shape=rect, label=<<font point-size="34">SMTP 邮件服务</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">系统邮件发送（系统设置可配）</font>>, style=filled, color="#60646a", fillcolor="#8a8f98", fontcolor="#ffffff"]
+  3 [id=3,shape=rect, label=<<font point-size="34">现场采样员</font><br /><font point-size="19">[Person]</font><br /><br /><font point-size="24">采样员（数据范围：本人）</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+  30 [id=30,shape=rect, label=<<font point-size="34">视频平台（未定）</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">开箱录像请求：通用 POST + Bearer<br />适配器占位，未接入时记「平台未接入」</font>>, style=filled, color="#8c8e92", fillcolor="#c9ccd1", fontcolor="#333333"]
+  31 [id=31,shape=rect, label=<<font point-size="34">Redis（可选）</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">设置 REDIS_URL<br />时用作最新状态缓存；默认不部署，用进程内存缓存</font>>, style=filled, color="#60646a", fillcolor="#8a8f98", fontcolor="#ffffff"]
+  4 [id=4,shape=rect, label=<<font point-size="34">智采 · 采样箱监测管理系统</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">采样箱资产与遥测监测、采样/调拨/送检单据、集团/分公司/检测站总览、系统管理</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+
+  1 -> 4 [id=33, label=<<font point-size="24">HTTPS 操作（RBAC 权限码 +<br />集团数据范围）</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  2 -> 4 [id=35, label=<<font point-size="24">HTTPS 操作（本单位及下级数据范围）</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  3 -> 4 [id=37, label=<<font point-size="24">HTTPS 工作台 / 箱子查看（本人数据范围）</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  1 -> 26 [id=38, label=<<font point-size="24">移动端操作（推断，小程序在仓库外）</font><br /><font point-size="19">[HTTPS]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  3 -> 26 [id=39, label=<<font point-size="24">扫码采样 / 签收（推断）</font><br /><font point-size="19">[HTTPS]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 27 [id=43, label=<<font point-size="24">地图瓦片与标注</font><br /><font point-size="19">[JS API]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  26 -> 4 [id=46, label=<<font point-size="24">HTTP /api/v1/*（含<br />/auth/wechat/login）</font><br /><font point-size="19">[JSON/HTTP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  25 -> 4 [id=49, label=<<font point-size="24">TCP :9000 JSON 上行：遥测 / 位置<br />/ 开箱 / 补传</font><br /><font point-size="19">[TCP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 25 [id=52, label=<<font point-size="24">下行：上报策略 / 补传确认 / 抹除指令</font><br /><font point-size="19">[TCP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 28 [id=75, label=<<font point-size="24">登录凭证 / 手机号 / token</font><br /><font point-size="19">[HTTPS]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 29 [id=78, label=<<font point-size="24">发信</font><br /><font point-size="19">[SMTP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 30 [id=83, label=<<font point-size="24">POST box.opened（未接入，占位）</font><br /><font point-size="19">[HTTPS]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 31 [id=86, label=<<font point-size="24">REDIS_URL 设置时</font><br /><font point-size="19">[RESP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  4 -> 26 [id=89, label=<<font point-size="24">实时推送（消费者未验证）</font><br /><font point-size="19">[WebSocket]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+
+}

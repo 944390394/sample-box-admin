@@ -28,6 +28,13 @@
         >
           创建任务单
         </el-button>
+        <el-button
+          v-if="enableTransferInspect && can(TRANSFER_CREATE)"
+          :icon="Plus"
+          @click="router.push('/sample/transfers')"
+        >
+          批量划拨
+        </el-button>
       </template>
     </PageHeader>
 
@@ -205,15 +212,18 @@ import WorkbenchAPI, {
   type TaskBrief,
   type Workbench,
 } from "@/api/sample/workbench";
+import SampleBoxAPI from "@/api/sample/box";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import StatTiles, { type StatTile } from "@/components/biz/StatTiles.vue";
 import TimeText from "@/components/biz/TimeText.vue";
 import { usePerm } from "@/composables/usePerm";
+import { useBoxFeatures } from "@/composables/useBoxFeatures";
 import { useUserStore } from "@/stores/user";
 import { lifeLabel } from "@/utils/labels";
 import { ago, toDate } from "@/utils/time";
 import { lifeTone, taskTone } from "@/utils/tone";
-import { BOX_PERM, TASK_CREATE } from "../data";
+import { BOX_PERM, TASK_CREATE, TRANSFER_CREATE } from "../data";
+import { graceHint, graceState } from "../boxes/grace";
 import TodoCard from "./TodoCard.vue";
 
 /**
@@ -224,6 +234,7 @@ import TodoCard from "./TodoCard.vue";
 const router = useRouter();
 const can = usePerm();
 const userStore = useUserStore();
+const { enableTransferInspect, taskOfflineGraceSec, loadBoxFeatures } = useBoxFeatures();
 const data = ref<Workbench | null>(null);
 const loading = ref(false);
 const updatedAt = ref<Date | null>(null);
@@ -420,8 +431,8 @@ const cards = computed<Card[]>(() => {
   push(
     {
       key: "offline",
-      title: "在途但离线",
-      hint: "超过 3 个上报周期没上报",
+      title: "离线",
+      hint: `超过 3 个上报周期未上报 · ${graceHint(taskOfflineGraceSec.value)}`,
       tone: "warning",
       more: { path: "/device/boxes", query: { tile: "flag:offline" } },
     },
@@ -476,7 +487,12 @@ function routeOf(task: TaskBrief) {
 function boxLine(box: BoxBrief, key: string) {
   if (key === "alert") return box.alert;
   if (key === "low") return `可用电量 ${box.batteryUsable ?? "—"}%`;
-  if (key === "offline") return `最后上报 ${box.last ? ago(box.last) : "从未上报"}`;
+  if (key === "offline") {
+    // 从未上报但有占用单建单时间 → 宽限已过「建单后 X未上线」（相对+绝对）；否则回落周期口径
+    const grace = graceState(box.boundTaskAt, box.last, taskOfflineGraceSec.value);
+    if (grace) return `${grace.text}（${grace.abs}）`;
+    return `最后上报 ${box.last ? ago(box.last) : "从未上报"}`;
+  }
   if (key === "pending") return box.last ? `最近上报 ${ago(box.last)}` : "等待上报";
   return [box.address, box.last ? `${ago(box.last)}上报` : ""].filter(Boolean).join(" · ");
 }
@@ -489,7 +505,23 @@ function openFeed(item: FeedItem) {
 async function load() {
   loading.value = true;
   try {
-    data.value = await WorkbenchAPI.get();
+    const next = await WorkbenchAPI.get();
+    // 工作台 brief 不带 boundTaskAt：离线卡要渲染「建单后 X未上线」宽限徽标，
+    // 按 id 从箱子列表（flag=offline，含 boundTaskAt）补齐这一字段。无箱子列表权限时静默跳过。
+    const offline = next.boxTodo?.offline;
+    if (offline?.list?.length && can(BOX_PERM.list)) {
+      try {
+        const page = await SampleBoxAPI.page({ flag: "offline", page: 1, pageSize: 5 });
+        const atOf = new Map(page.list.map((b) => [b.id, b.boundTaskAt || ""]));
+        offline.list = offline.list.map((b) => ({
+          ...b,
+          boundTaskAt: atOf.get(b.id) || b.boundTaskAt,
+        }));
+      } catch {
+        /* 补齐失败不影响离线卡主体（仍按周期口径显示） */
+      }
+    }
+    data.value = next;
     updatedAt.value = new Date();
   } finally {
     loading.value = false;
@@ -497,6 +529,7 @@ async function load() {
 }
 let poll = 0;
 onMounted(() => {
+  void loadBoxFeatures();
   void load();
   poll = window.setInterval(() => void load(), 30000);
 });

@@ -1,7 +1,8 @@
-import { BOX } from "../auth/boxAccess.js";
+import { BOX, boxNameCell } from "../auth/boxAccess.js";
 import { buildDeptTree } from "../../../shared/org.js";
 import { ENDED, ENDED_SQL } from "../settings/taskFlow.js";
 import { limits } from "./SampleController.js";
+import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 
 /**
  * 总览（补充协议 1.2.8–1.2.10）。
@@ -11,7 +12,9 @@ import { limits } from "./SampleController.js";
  *   检测站三类明细（在途单、待检测、已检测）永远分页并带总数，不再因为超出上限整表清空。
  *
  * 单位的箱子按部门子树算（总公司还包括没分配单位的箱子），子树里另有检测站的，那部分算在检测站名下，不重复算。
- * 只列在自己数据范围内的单位；统计也只算范围内的部门。
+ * 只列在自己数据范围内的单位；统计也只算范围内的部门。范围落在科室/机构下级时，沿 parent 链
+ * 把最近的单位锚点（一级公司或采样机构）纳入，保证有权角色至少落到一个匹配其范围的单位页；
+ * 仅本人等没有单位范围时 units 为空，group 返回 myUnitId=null，由前端渲染带引导的空态。
  */
 
 /** 运到检测站途中的状态：调拨寄出后、双向采样单寄回后。 */
@@ -101,12 +104,30 @@ export class OverviewController {
       return ids;
     };
     const scope = ctx.access.scope;
+    const scoped = Boolean(scope && !scope.all);
+    const scopeIds = scoped ? new Set(scope.orgIds) : null;
+    // 范围落在科室/机构下级时，沿 parent 链向上找最近的单位锚点（一级公司或采样机构）。
+    // resolveScope 通常会把祖先补进 orgIds，但范围只给科室、或祖先单位被停用时这里兜底：
+    // 锚点单位即使自身不在 scope.orgIds 里也纳入，统计仍只算范围覆盖的部门（R4）。
+    const anchors = new Set();
+    if (scoped) {
+      for (const id of scopeIds) {
+        const seen = new Set();
+        for (let cur = byId.get(id); cur && !seen.has(cur.id); cur = byId.get(cur.parentId)) {
+          seen.add(cur.id);
+          if (cur.status !== 0 && (cur.type === "采样机构" || !byId.has(cur.parentId))) {
+            anchors.add(cur.id);
+            break;
+          }
+        }
+      }
+    }
     const units = [];
     for (const node of chosen) {
       let ids = subtree(node);
-      if (scope && !scope.all) {
-        if (!scope.orgIds.includes(node.id)) continue;
-        ids = ids.filter((id) => scope.orgIds.includes(id));
+      if (scoped) {
+        if (!scopeIds.has(node.id) && !anchors.has(node.id)) continue;
+        ids = ids.filter((id) => scopeIds.has(id));
       }
       units.push({
         id: node.id,
@@ -165,8 +186,8 @@ export class OverviewController {
 
     const active = await this.db.all(
       `SELECT t.id, t.kind, t.status, t.body, t.from_org_id, t.to_org_id FROM sample_task t
-        WHERE t.status NOT IN (${ENDED_SQL}) AND t.body LIKE ? ORDER BY t.created_at DESC`,
-      ['%"inspect":true%']
+        WHERE t.status NOT IN (${ENDED_SQL}) AND t.body LIKE ? ${ESCAPE_SQL} ORDER BY t.created_at DESC`,
+      [likePattern('"inspect":true')]
     );
     const waitingTasks = [];
     for (const row of active) {
@@ -212,7 +233,7 @@ export class OverviewController {
    * 单位页用：检测站的三个数，按来源公司汇总，三类明细各自分页。
    * 不选公司时给全部公司的第一页；选了公司只给那一家。总数随筛选口径，翻页不丢数据。
    */
-  async #station(orgIds, day, withList, query = {}) {
+  async #station(orgIds, day, withList, query = {}, perms = null) {
     const companyFilter = String(query.company || "");
     const pages = {
       waiting: pageNum(query.waitingPage ?? query.boxPage),
@@ -221,8 +242,8 @@ export class OverviewController {
     };
     const active = await this.db.all(
       `SELECT t.id, t.name, t.kind, t.status, t.body, t.from_org_id, t.to_org_id, t.created_at FROM sample_task t
-        WHERE t.status NOT IN (${ENDED_SQL}) AND t.body LIKE ? ORDER BY t.created_at DESC`,
-      ['%"inspect":true%']
+        WHERE t.status NOT IN (${ENDED_SQL}) AND t.body LIKE ? ${ESCAPE_SQL} ORDER BY t.created_at DESC`,
+      [likePattern('"inspect":true')]
     );
     const inbound = [];
     const waitingTasks = [];
@@ -293,7 +314,8 @@ export class OverviewController {
               );
         keep("waiting", item.source, waiting, {
           boxId: link.box_id,
-          boxName: link.name || link.box_id,
+          // 名称为空时不能把编号原样写进 boxName——现在的编号就是整串 IMEI（M-1）
+          boxName: boxNameCell({ id: link.box_id, name: link.name }, perms),
           taskId: item.row.id,
           taskName: item.body.name,
           from: item.source.name,
@@ -323,7 +345,8 @@ export class OverviewController {
           : Math.max(0, Number(row.opens_end ?? row.opens_start) - Number(row.opens_start));
       keep("done", source, done, {
         boxId: row.box_id,
-        boxName: row.name || row.box_id,
+        // 同上：没起名的箱子不把编号当名称下发（M-1）
+        boxName: boxNameCell({ id: row.box_id, name: row.name }, perms),
         taskId: row.task_id,
         taskName: body.name,
         from: source.name,
@@ -340,11 +363,19 @@ export class OverviewController {
           b.moving + b.arrived + b.inspected - (a.moving + a.arrived + a.inspected) ||
           a.name.localeCompare(b.name, "zh")
       );
-    const counts = {
-      moving: companyList.reduce((n, item) => n + item.moving, 0),
-      arrived: companyList.reduce((n, item) => n + item.arrived, 0),
-      inspected: companyList.reduce((n, item) => n + item.inspected, 0),
-    };
+    // 管线的三个数以前不分来源公司：选中一家时下面的三个列表只给那一家，管线还是全站的，
+    // 同屏两个口径并排（L-P0-3）。现在 counts 跟着 company 筛选走：没选是全站，选了只算那一家，
+    // 和 StationBoard 页签徽章用的是同一份数（moving 按台、arrived/inspected 按台）。
+    const scoped = companyFilter
+      ? companies.get(companyFilter) || { moving: 0, arrived: 0, inspected: 0 }
+      : null;
+    const counts = scoped
+      ? { moving: scoped.moving, arrived: scoped.arrived, inspected: scoped.inspected }
+      : {
+          moving: companyList.reduce((n, item) => n + item.moving, 0),
+          arrived: companyList.reduce((n, item) => n + item.arrived, 0),
+          inspected: companyList.reduce((n, item) => n + item.inspected, 0),
+        };
     if (!withList) return counts;
     // 来源公司也可能上千：搜索 + 分页只传一页
     const companyQ = String(query.companyQ || "")
@@ -389,7 +420,7 @@ export class OverviewController {
     const marks = orgIds.map(() => "?").join(",");
     const likes = orgIds
       .filter(Boolean)
-      .map(() => "t.body LIKE ?")
+      .map(() => `t.body LIKE ? ${ESCAPE_SQL}`)
       .join(" OR ");
     const rows = await this.db.all(
       `SELECT t.id, t.name, t.kind, t.status, t.body, t.created_at FROM sample_task t
@@ -399,7 +430,11 @@ export class OverviewController {
         monthEnd.toISOString(),
         ...orgIds,
         ...orgIds,
-        ...orgIds.filter(Boolean).map((id) => `%"orgId":"${id.replace(/[%_"]/g, "")}"%`),
+        // 单位编号是服务端的，不带通配符；% _ 一律按 ! 转义（不再靠删字符防注入），
+        // 双引号还是先去掉：它不是通配符，但会提前结束 JSON 片段，删掉才安全（L-P2-5）。
+        ...orgIds
+          .filter(Boolean)
+          .map((id) => likePattern(`"orgId":"${String(id).replace(/"/g, "")}"`)),
       ]
     );
     const ended = rows.filter((row) => ENDED.includes(row.status));
@@ -539,6 +574,10 @@ export class OverviewController {
           (sort === "name" ? 0 : metric(b) - metric(a)) || a.name.localeCompare(b.name, "zh")
       );
     }
+    // 「本单位」：非全量范围且恰好只有一个单位时给出它的编号，供前端空态/筛选空结果跳转；
+    // 全量范围（管理员）或范围内有多个单位时给 null，页面留在集团板。仅本人等没有单位范围时也是 null。
+    const scope = ctx.access.scope;
+    const myUnitId = scope && !scope.all && units.length === 1 ? units[0].id : null;
     ctx.ok({
       day: today,
       total,
@@ -546,6 +585,7 @@ export class OverviewController {
       branchTotal: list.filter((unit) => !unit.station).length,
       stationCount: stationUnits.length,
       unitTotal: matched.length,
+      myUnitId,
       page,
       pageSize,
       top,
@@ -578,14 +618,20 @@ export class OverviewController {
       stats: await this.#stats(unit.orgIds),
       station:
         unit.type === "采样机构"
-          ? await this.#station(unit.orgIds, day, true, {
-              company: String(ctx.query.company || ""),
-              companyQ: ctx.query.companyQ,
-              companyPage: ctx.query.companyPage,
-              waitingPage: ctx.query.waitingPage ?? ctx.query.boxPage,
-              donePage: ctx.query.donePage,
-              inboundPage: ctx.query.inboundPage,
-            })
+          ? await this.#station(
+              unit.orgIds,
+              day,
+              true,
+              {
+                company: String(ctx.query.company || ""),
+                companyQ: ctx.query.companyQ,
+                companyPage: ctx.query.companyPage,
+                waitingPage: ctx.query.waitingPage ?? ctx.query.boxPage,
+                donePage: ctx.query.donePage,
+                inboundPage: ctx.query.inboundPage,
+              },
+              ctx.access?.perms
+            )
           : null,
       tasks: null,
       calendar: null,

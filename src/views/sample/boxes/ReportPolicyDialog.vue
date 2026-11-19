@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="open"
-    :title="boxId ? `${boxName || boxId} · 上报策略` : '批量设置上报策略'"
+    :title="boxId ? `${boxName || '这台箱子'} · 上报策略` : '批量设置上报策略'"
     width="600px"
     style="max-width: 94vw"
     destroy-on-close

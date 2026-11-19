@@ -1,0 +1,50 @@
+digraph {
+  compound=true
+  graph [fontname="Microsoft YaHei", rankdir=TB, ranksep=1.0, nodesep=1.0]
+  node [fontname="Microsoft YaHei", shape=box, margin="0.4,0.3"]
+  edge [fontname="Microsoft YaHei"]
+  label=<<br /><font point-size="34">Component View: 智采 · 采样箱监测管理系统 - Node 后端（单进程）</font><br /><font point-size="24">设备上行链路组件：TCP 接入 → 事务入库 → 缓存 / 推送 → 下行策略</font>>
+
+  25 [id=25,shape=rect, label=<<font point-size="34">采样箱固件</font><br /><font point-size="19">[Software System]</font><br /><br /><font point-size="24">STM32L051 遥测（电量/箱盖/开箱）+<br />M100MG-C2 DTU Lua 脚本：周期 TCP<br />JSON 上报、离线补传、低功耗休眠</font>>, style=filled, color="#204d37", fillcolor="#2f6f4f", fontcolor="#ffffff"]
+
+  subgraph cluster_4 {
+    margin=25
+    label=<<font point-size="24"><br />智采 · 采样箱监测管理系统</font><br /><font point-size="19">[Software System]</font>>
+    labelloc=b
+    color="#444444"
+    fontcolor="#444444"
+    fillcolor="#444444"
+
+    subgraph cluster_6 {
+      margin=25
+      label=<<font point-size="24"><br />Node 后端（单进程）</font><br /><font point-size="19">[Container: Node.js 原生 http/net + ws，ESM（server/）]</font>>
+      labelloc=b
+      color="#444444"
+      fontcolor="#444444"
+      fillcolor="#444444"
+
+      12 [id=12,shape=rect, label=<<font point-size="34">设备 TCP 接入</font><br /><font point-size="19">[Component: server/src/transport/TcpIngestServer.js]</font><br /><br /><font point-size="24">监听 :9000（SAMPLE_TCP_PORT），JSON<br />切帧；按箱会话串行下行</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      13 [id=13,shape=rect, label=<<font point-size="34">上报处理服务</font><br /><font point-size="19">[Component: server/src/service/IngestService.js:41-90]</font><br /><br /><font point-size="24">设备上报唯一入口：IMEI 级串行，箱子状态 +<br />原始报文同事务提交，成功后进事件流</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      14 [id=14,shape=rect, label=<<font point-size="34">箱子 / 报文存储</font><br /><font point-size="19">[Component: server/src/store/]</font><br /><br /><font point-size="24">SqlBoxStore +<br />UplinkBatch：sample_box、sample_uplink、补传事务入库<br />commitQueuedUplink</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      15 [id=15,shape=rect, label=<<font point-size="34">上报策略</font><br /><font point-size="19">[Component: server/src/settings/ReportPolicy.js; createSampleApp.js:64]</font><br /><br /><font point-size="24">box_report_policy 版本化策略；变更时经<br />TCP 会话主动下行推送</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      16 [id=16,shape=rect, label=<<font point-size="34">设备指令 / 抹除</font><br /><font point-size="19">[Component: server/src/settings/DeviceCommands.js; IngestService.js:56-74]</font><br /><br /><font point-size="24">待抹除下行附指令、设备确认后删档重建；板子日志 dump<br />回收</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      17 [id=17,shape=rect, label=<<font point-size="34">补传队列确认</font><br /><font point-size="19">[Component: server/src/settings/QueueAck.js]</font><br /><br /><font point-size="24">离线补传记录查重、入库、累计确认同一事务（box_ack*）</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      18 [id=18,shape=rect, label=<<font point-size="34">最新状态缓存</font><br /><font point-size="19">[Component: server/src/cache/; createSampleApp.js:42]</font><br /><br /><font point-size="24">REDIS_URL 为空时内存缓存，否则 Redis</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      19 [id=19,shape=rect, label=<<font point-size="34">实时事件分发</font><br /><font point-size="19">[Component: server/src/transport/RealtimeHub.js; IngestService.js:34-38]</font><br /><br /><font point-size="24">EventStream 提交后发布 → 缓存写入 +<br />RealtimeHub 广播</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+      20 [id=20,shape=rect, label=<<font point-size="34">WebSocket 服务</font><br /><font point-size="19">[Component: server/src/transport/SampleSocketServer.js:20-24]</font><br /><br /><font point-size="24">路径 /api/v1/sample/stream，token<br />鉴权；Web 端 src/<br />未发现消费者（疑似小程序使用，未验证）</font>>, style=filled, color="#444444", fillcolor="#ffffff", fontcolor="#444444"]
+    }
+
+  }
+
+  25 -> 12 [id=47, label=<<font point-size="24">TCP :9000 JSON 上行：遥测 / 位置<br />/ 开箱 / 补传</font><br /><font point-size="19">[TCP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  12 -> 25 [id=50, label=<<font point-size="24">下行：上报策略 / 补传确认 / 抹除指令</font><br /><font point-size="19">[TCP]</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  12 -> 13 [id=58, label=<<font point-size="24">切帧后的报文</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  13 -> 14 [id=59, label=<<font point-size="24">箱子状态 + 原始报文同事务提交</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  13 -> 17 [id=60, label=<<font point-size="24">补传查重 / 累计确认（同事务）</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  13 -> 16 [id=61, label=<<font point-size="24">抹除判定 / dump 回收</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  13 -> 18 [id=62, label=<<font point-size="24">写最新状态</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  13 -> 19 [id=63, label=<<font point-size="24">提交成功后发布事件</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  19 -> 20 [id=64, label=<<font point-size="24">广播箱子最新状态</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+  15 -> 12 [id=65, label=<<font point-size="24">策略变更主动下行</font>>, style="dashed", color="#444444", fontcolor="#444444"]
+
+}

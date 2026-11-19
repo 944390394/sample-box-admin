@@ -1,3 +1,4 @@
+import { badRequest } from "../domain/AppError.js";
 /**
  * 账号安全策略：密码长度、字符类别、定期更换、连续输错锁定。存在 db.config.json 的 security 里。
  */
@@ -41,7 +42,7 @@ export function mergeSecuritySettings(current, input) {
   const num = (value, min, max, label) => {
     const n = Number(value);
     if (!Number.isInteger(n) || n < min || n > max)
-      throw new Error(`${label}要在 ${min}–${max} 之间`);
+      throw badRequest(`${label}要在 ${min}–${max} 之间`);
     return n;
   };
   const classes = Array.isArray(body.classes)

@@ -8,8 +8,8 @@
   >
     <div class="label">
       <img v-if="image" :src="image" alt="箱码" />
-      <b>{{ box.name || box.id }}</b>
-      <span>IMEI {{ box.id }}</span>
+      <b>{{ boxTitle(box) }}</b>
+      <span>IMEI {{ imeiText(box) }}</span>
       <small>微信扫码查看箱子状态、签收、建任务单</small>
     </div>
     <p class="tip">
@@ -26,9 +26,14 @@
 
 <script setup lang="ts">
 import QRCode from "qrcode";
+import { boxFileName, boxTitle, imeiText } from "@/utils/boxLabel";
 
 /** 箱码：贴在箱子上的二维码标签。内容是固定链接 + IMEI，换小程序、换服务器都不用重印。 */
-const props = defineProps<{ modelValue: boolean; box: { id: string; name?: string } }>();
+const props = defineProps<{
+  modelValue: boolean;
+  // 二维码要按编号导航，所以 id 原样传进来；显示给用户的标识一律走 imeiText 按权限出
+  box: { id: string; name?: string; imei?: string; masked?: string[] };
+}>();
 const emit = defineEmits<{ "update:modelValue": [open: boolean] }>();
 const image = ref("");
 const link = computed(() => boxQrLink(props.box.id));
@@ -76,15 +81,16 @@ async function download() {
   g.fillStyle = "#111";
   g.textAlign = "center";
   g.font = "bold 40px sans-serif";
-  g.fillText(props.box.name || props.box.id, 280, 570, 500);
+  g.fillText(boxTitle(props.box), 280, 570, 500);
   g.font = "26px monospace";
-  g.fillText(`IMEI ${props.box.id}`, 280, 615, 500);
+  g.fillText(`IMEI ${imeiText(props.box)}`, 280, 615, 500);
   g.fillStyle = "#666";
   g.font = "22px sans-serif";
   g.fillText("微信扫码查看箱子状态", 280, 660, 500);
   const a = document.createElement("a");
   a.href = canvas.toDataURL("image/png");
-  a.download = `箱码_${props.box.name || props.box.id}.png`;
+  // 文件名里不能出现打码串的星号，称谓统一走 boxFileName
+  a.download = `箱码_${boxFileName(props.box)}.png`;
   a.click();
 }
 </script>

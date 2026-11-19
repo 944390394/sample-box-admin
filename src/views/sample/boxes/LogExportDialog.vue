@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="open"
-    :title="`${boxId} · 导出日志`"
+    :title="`${label} · 导出日志`"
     width="620px"
     style="max-width: 94vw"
     destroy-on-close
@@ -137,13 +137,19 @@ import { ElMessage } from "element-plus";
 import SampleBoxAPI, { type DumpState } from "@/api/sample/box";
 import { useUserStore } from "@/stores/user";
 import { BOX_PERM } from "../data";
+import { boxFileName, boxTitle } from "@/utils/boxLabel";
 
 const open = defineModel<boolean>({ required: true });
 /** remote：服务端给的「设备支持读本机日志」，不靠固件版本号（看不到固件版本的人也能用）。 */
-const props = defineProps<{ boxId: string; remote?: boolean }>();
+/** name：调用方给的显示称谓（boxTitle）。箱号就是 IMEI，标题和文件名都不能直接用 boxId（M-1）。 */
+const props = defineProps<{ boxId: string; remote?: boolean; name?: string }>();
 const user = useUserStore();
 const allow = (perm: string) => !!user.userInfo.perms?.includes(perm);
 const remote = computed(() => Boolean(props.remote));
+/** 标题用的显示称谓：调用方没给就按箱号打码（15 位纯数字才打，BOX-001 那种老编号照原样）。 */
+const label = computed(() => props.name || boxTitle({ id: props.boxId }));
+/** 服务端没给 content-disposition 时的兜底文件名。打码串里的星号在 Windows 上不能做文件名，走 boxFileName。 */
+const stem = computed(() => boxFileName({ id: props.boxId, name: label.value }));
 const source = ref<"server" | "device">("server");
 const today = () => new Date().toISOString().slice(0, 10);
 const range = ref<[string, string]>([
@@ -207,7 +213,7 @@ async function exportServer() {
   try {
     save(
       await SampleBoxAPI.exportLogs(props.boxId, { from: range.value[0], to: range.value[1] }),
-      `${props.boxId}-上报日志.csv`
+      `${stem.value}-上报日志.csv`
     );
   } finally {
     busy.value = false;
@@ -248,7 +254,7 @@ async function download() {
   if (!state.value) return;
   save(
     await SampleBoxAPI.dumpDownload(props.boxId, state.value.id),
-    `${props.boxId}-设备本机日志.csv`
+    `${stem.value}-设备本机日志.csv`
   );
 }
 </script>

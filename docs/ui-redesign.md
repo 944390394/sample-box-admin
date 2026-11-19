@@ -148,7 +148,7 @@ pnpm accept                 # 全部检查，Edge 不显示窗口
 pnpm accept -- --headed     # 显示浏览器，看它点
 pnpm accept -- --only=采样箱  # 只跑名称里带「采样箱」的检查
 ```
-- 端口：服务端 8100、设备接入 9100、网页 3100，不和开发用的 8000/9000/3000 冲突。
+- 端口：服务端 8100、设备接入 9100、网页 3200，不和开发用的 8000/9000/3000 及演示 vite 3100 冲突。
 - 验证码只在 `SAMPLE_HOME` + `SAMPLE_ACCEPTANCE=1` 同时设置时才跳过，这两个变量只有机器人会设。
 - 检查清单在 `tools/acceptance/checks.mjs`，测试数据在 `tools/acceptance/seed.mjs`。改了页面行为先改清单。
 
@@ -172,7 +172,26 @@ pnpm accept -- --only=采样箱  # 只跑名称里带「采样箱」的检查
   - 个人中心：页头显示全部角色；删掉和个人资料重复的「账号概览」「角色权限」「账号状态」三张卡片。
 - 验收机器人加到 27 项检查（新增任务单列表、创建任务单摘要、统一页头、人员角色标签、个人中心五项）。天地图外部脚本偶尔加载不完整会抛错，机器人不把这类报错算失败，我们自己代码的报错照样算。
 
+## 六、总览 ov 组件标准与受控月历（2026-11-17 世界一流重构）
+- 新目录 `src/components/ov/` + `types.ts` 冻结契约：KpiCard（数字 300ms 滚动+等宽+占比 hint）、InsightChart（内嵌骨架/空/错三态+透传 click）、EntityList（桌面表格/移动卡片+分页+行 hover 箭头）、FlowPipeline（在途→待检→已检，点段切页签）、EmptyState/ErrorState、`biz/FreshnessMeta`（更新于 x+旧+自动刷新 pulse）。
+- 令牌增补 `--focus-ring/--motion-fast/--motion-num/--skeleton-bg`；状态色只表状态、单主色、等宽数字、暗色全走变量。
+- **受控月历 `ov/ControlledCalendar.vue` + `composables/useCalendarGrid.ts`**：零内部 state，选中日/显示月/角标全由父级 props 驱动；轮询只换 counts 不重置选中日（根治「5 秒刷新跳回今天」）；翻月只发 monthChange；role=grid/gridcell+aria-selected+roving tabindex+方向键/PageUp/Down。取代 el-calendar 桥接（旧 UnitCalendar 弃用）。
+- ECharts 改浅 watch + `setOption(o,{lazyUpdate:true})` + 透传 click；轮询不重建实例。
+- 三页：集团=KPI×6+异常 chips+环图/Top 联动+EntityList；分公司=KPI×4+分布+受控月历|DayTasks 时间线；检测站=FlowPipeline+来源公司主从+三页签分页+超限/作废语义+受控月历。
+- 规模化：集团/明细/来源公司全部服务端分页，前端只渲染当前页；小程序镜像同标准（触底 load-more、搜索 debounce、setData 增量）。
+- 演示数据 `tools/seed-demo.mjs`（虚构业务，本地 SAMPLE_HOME，非线上）；截图清单 `docs/screenshot-checklist.md`（P01–P72+M01–M33，编号命名、逐张审核）。
+
 **还差**
-- 深色模式没有逐页看过。
 - 工作台、角色与权限两页只换了全局样式，没有再逐页调整。
+
+### 验收与截图收尾（2026-11-18）
+- 全量验收二轮 **46/46 通过**（`reports/accept-worldclass2.log`、`reports/acceptance/latest/index.html`）。首轮 0/46 是端口冲突：accept web 与演示 vite 同抢 3100，accept web 改 3200 后复跑全过。
+- 日期回归双重确认：验收项「选过去日期后 5 秒轮询不重置选中日」通过；截图脚本独立断言（选 11-15 → 等 15s → 选中日与 URL `day=` 均保持）PASS。
+- 深色模式已逐页看过：集团总览、单位总览（检测站）、工作台、实时地图暗色截图见 `reports/电脑端/P72-暗色-*.png`，指标卡/图表/列表/地图侧栏均随主题换色。
+- 演示库修正：种子原把华南/华东/鹏城挂在集团下（二级），而总览按「顶级公司 + 任意层级检测站」列单位，导致单位总览 404、集团条形图只剩集团一根。已把三家提为顶级（`tools/seed-demo.mjs` 同步修正，live 库经 PUT `/api/v1/depts/:id` 调整），集团总览恢复 6 家单位、Top 图三根条。
+- 演示数据保鲜：静态库隔夜后全部箱子判离线（阈值=上报周期×3）。`tools/freshen-demo.tmp.mjs` 把在线箱（csq>0）最后上报时间刷到当前，保留 2 台故意离线；恢复 14 在线/2 离线/1 告警/5 低电/1 开盖。
+- 截图产出：网页总览 P08/P09（华南·选过去日·检测站）/P72 三张暗色在 `reports/电脑端/`；小程序 M31–M33 明暗+下半屏矩阵在 `reports/小程序/`（演示库 8002 + 注入 demo token，`tools/shoot-mini-overview.tmp.mjs`）。逐张审核结论回填 `docs/screenshot-checklist.md`。
+- 小程序截图改走**官方 wechatide CLI**（ELECTRON_RUN_AS_NODE 直调 skill-index.js，数组传参）；MCP stdio 桥因 IDE `mcpTokenRequired` 已不可用。harness 每页先 `simulator_refresh` 再 `wx.reLaunch`：前者保证 canvas 节点干净（同运行时跨页 reLaunch 切主题会画到已销毁页节点，环图/Top 整块空白），后者避开 entryPagePath=login 自动回首页冲掉导航。拍完已把 `utils/config.ts` LOCAL 恢复 8000 并清掉注入的 demo storage。
+- 本轮修掉两个小程序真缺陷：检测站来源公司 chips 被 `scroll-view enable-flex` 拉伸成整屏竖条（改 inline-block 横排）；ov-donut/ov-topbar observer 先于 canvas 节点就绪且签名缓存导致不重绘（补 `lifetimes.ready`）。
+- 全量逐张审核回填（2026-11-18）：11-13 基线套 105 张 + 11-18 重拍 19 张逐张过；返工 7 行（P23/P24/P66、M09/M16/M17/M27），缺拍 26 行（P06/07/31–48/61/65/68–71、M02/03/04/06/07）单列待补；产品问题 W1–W7 / N1–N7 见 `docs/screenshot-checklist.md` 文末。
 

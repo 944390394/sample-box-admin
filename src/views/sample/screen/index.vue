@@ -4,6 +4,14 @@
       <div class="title">
         <h1>{{ wall ? "智采 · 采样箱实时监测" : "实时地图" }}</h1>
         <span class="text-muted">{{ updatedText }}</span>
+        <!-- 后台刷新失败：按设计约定标「旧」并给重试，不把已经看到的列表清空 -->
+        <span v-if="stale" class="stale" data-test="screen-stale">
+          <span class="stale__dot" aria-hidden="true" />
+          刷新失败，列表可能不是最新
+          <el-button link type="primary" size="small" :loading="loading" @click="load()">
+            重试
+          </el-button>
+        </span>
       </div>
       <div class="kpis">
         <span v-for="item in kpis" :key="item.label" class="kpi" :class="item.tone">
@@ -12,7 +20,7 @@
         </span>
       </div>
       <div class="ops">
-        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
         <el-button :icon="FullScreen" @click="toggleWall">
           {{ wall ? "退出大屏" : "大屏模式" }}
         </el-button>
@@ -22,7 +30,12 @@
     <div class="body">
       <aside class="side">
         <div class="filter-bar">
-          <el-input v-model="keyword" :prefix-icon="Search" placeholder="名称或 IMEI" clearable />
+          <el-input
+            v-model="keyword"
+            :prefix-icon="Search"
+            :placeholder="canImei ? '名称或 IMEI' : '名称'"
+            clearable
+          />
           <el-radio-group v-model="life" size="small">
             <el-radio-button value="">全部</el-radio-button>
             <el-radio-button value="在途">{{ lifeLabel("在途") }}</el-radio-button>
@@ -30,11 +43,18 @@
             <el-radio-button value="alert">异常</el-radio-button>
           </el-radio-group>
         </div>
-        <div class="text-muted count">
+        <div class="text-muted count" data-test="screen-count">
           {{ shown.length }} 台
           <template v-if="unplaced">· {{ unplaced }} 台没有定位</template>
         </div>
-        <ul class="list">
+        <ErrorState
+          v-if="error"
+          :message="`采样箱列表加载失败：${error}`"
+          :retrying="loading"
+          data-test="screen-error"
+          @retry="load()"
+        />
+        <ul v-else class="list" data-test="screen-list">
           <li
             v-for="box in shown"
             :key="box.id"
@@ -44,7 +64,7 @@
             <span class="dot" :class="onlineOf(box) ? 'on' : 'off'" />
             <div class="info">
               <div class="line">
-                <b>{{ box.name || box.id }}</b>
+                <b>{{ boxTitle(box) }}</b>
                 <el-tag size="small" :type="lifeTone(box.life)">{{ lifeLabel(box.life) }}</el-tag>
               </div>
               <LocationLine
@@ -59,6 +79,11 @@
             </div>
           </li>
         </ul>
+        <EmptyState
+          v-if="!error && !loading && !shown.length"
+          :description="filtered ? '没有符合条件的采样箱' : '你的数据范围里还没有采样箱'"
+          data-test="screen-empty"
+        />
         <section v-if="wall && feed.length" class="feed">
           <div class="card-head__title">最近动态</div>
           <div v-for="(item, index) in feed" :key="index" class="feed-line">
@@ -95,6 +120,7 @@ import SampleBoxAPI from "@/api/sample/box";
 import WorkbenchAPI, { type FeedItem } from "@/api/sample/workbench";
 import LocationLine from "@/components/biz/LocationLine.vue";
 import TimeText from "@/components/biz/TimeText.vue";
+import { usePerm } from "@/composables/usePerm";
 import BoxDrawer from "./BoxDrawer.vue";
 import TiandituMap, { type TiandituPoint } from "@/components/TiandituMap/index.vue";
 import { lifeLabel } from "@/utils/labels";
@@ -102,16 +128,21 @@ import { ageText, boxPositions } from "@/utils/position";
 import { toDate, clock } from "@/utils/time";
 import { lifeTone } from "@/utils/tone";
 import { telemetryState } from "../boxes/telemetry";
-import type { SampleBox } from "../data";
+import { IMEI_PERMS, type SampleBox } from "../data";
+import { boxTitle } from "@/utils/boxLabel";
 
 /**
  * 实时地图：全部箱子在地图上，左侧可搜可筛，点一台定位。
  * 「大屏模式」全屏深色，加上指标和最近动态，适合挂在值班室。按页取，最多 500 台；30 秒刷新。
  */
 const rootRef = ref<HTMLElement>();
+const can = usePerm();
 const boxes = ref<SampleBox[]>([]);
 const feed = ref<FeedItem[]>([]);
 const loading = ref(false);
+const error = ref("");
+// 轮询失败但手上还有上一轮数据：不炸整个页面，只把列表标成「可能不是最新」
+const stale = ref(false);
 const updatedAt = ref<Date | null>(null);
 const keyword = ref("");
 const life = ref("");
@@ -129,17 +160,26 @@ const updatedText = computed(() =>
 const hasPlace = (box: SampleBox) =>
   (box.gpsLng != null && box.gpsLat != null) || (box.lbsLng != null && box.lbsLat != null);
 const onlineOf = (box: SampleBox) =>
-  telemetryState(box.last, box.reportPeriodSec, now.value).online;
+  telemetryState(box.last, box.reportPeriodSec, now.value, box.charge, box.reportOnlyWhenCharging)
+    .online;
 const shown = computed(() => {
   const text = keyword.value.trim().toLowerCase();
   return boxes.value.filter((box) => {
-    if (text && !box.id.includes(text) && !(box.name || "").toLowerCase().includes(text))
+    // 编号就是 IMEI：没有「设备标识」权限时这一项不参与筛选，和服务端口径一致
+    if (
+      text &&
+      !(canImei.value && box.id.includes(text)) &&
+      !(box.name || "").toLowerCase().includes(text)
+    )
       return false;
     if (life.value === "alert") return Boolean(box.alert);
     return !life.value || box.life === life.value;
   });
 });
 const unplaced = computed(() => shown.value.filter((box) => !hasPlace(box)).length);
+const filtered = computed(() => Boolean(keyword.value.trim() || life.value));
+// 没有「设备标识」权限（现场角色默认如此）：搜索框别写 IMEI，也不按编号筛
+const canImei = computed(() => IMEI_PERMS.every((perm) => can(perm)));
 const kpis = computed(() => {
   const list = boxes.value;
   const online = list.filter(onlineOf).length;
@@ -168,7 +208,7 @@ const points = computed<TiandituPoint[]>(() =>
       id: box.id,
       lng: here.lng,
       lat: here.lat,
-      title: box.name || box.id,
+      title: boxTitle(box),
       status: box.alert ? "异常" : isGps ? "gps" : undefined,
       address: here.address || undefined,
       lines: [
@@ -198,25 +238,43 @@ function onSelect(id: string) {
   drawerOpen.value = true;
 }
 
-async function load() {
-  loading.value = true;
+/**
+ * 按页取箱子，最多 500 台。30 秒一轮：翻页、切筛子、手动刷新和轮询会叠在一起，
+ * 所以每一轮一个序号，旧响应回来直接丢——不然半截列表会贴到新数据上。
+ * silent（轮询）不显示骨架、失败只标 stale。
+ */
+let seq = 0;
+async function load(silent = false) {
+  const mine = ++seq;
+  if (!silent) loading.value = true;
   try {
     const all: SampleBox[] = [];
     for (let page = 1; page <= 5; page += 1) {
       const result = await SampleBoxAPI.page({ page, pageSize: 100 });
+      if (mine !== seq) return;
       all.push(...result.list);
       if (all.length >= result.total) break;
     }
-    boxes.value = all;
-    updatedAt.value = new Date();
+    let items = feed.value;
     if (wall.value) {
       const bench = await WorkbenchAPI.get();
-      feed.value = [...bench.feed]
-        .sort((a, b) => (toDate(b.time)?.getTime() ?? 0) - (toDate(a.time)?.getTime() ?? 0))
-        .slice(0, 8);
+      items = [...bench.feed].sort(
+        (a, b) => (toDate(b.time)?.getTime() ?? 0) - (toDate(a.time)?.getTime() ?? 0)
+      );
     }
+    if (mine !== seq) return;
+    boxes.value = all;
+    feed.value = wall.value ? items.slice(0, 8) : [];
+    updatedAt.value = new Date();
+    error.value = "";
+    stale.value = false;
+  } catch (e) {
+    if (mine !== seq) return;
+    // 请求层已经弹过一次错误提示，这里只把页面状态摆出来（骨架不能一直转）
+    if (boxes.value.length) stale.value = true;
+    else error.value = e instanceof Error ? e.message : "加载失败";
   } finally {
-    loading.value = false;
+    if (mine === seq) loading.value = false;
   }
 }
 
@@ -237,7 +295,8 @@ function onFullscreenChange() {
 let poll = 0;
 onMounted(() => {
   void load();
-  poll = window.setInterval(() => void load(), 30000);
+  // 30 秒一轮的后台刷新：不抢骨架屏，失败只标 stale
+  poll = window.setInterval(() => void load(true), 30000);
   document.addEventListener("fullscreenchange", onFullscreenChange);
 });
 onBeforeUnmount(() => {
@@ -271,6 +330,24 @@ onBeforeUnmount(() => {
 h1 {
   margin: 0;
   font-size: 18px;
+}
+/* 后台刷新失败的「旧」标：用全站的新鲜度配色，不跟正文抢注意力 */
+.stale {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 22px;
+  color: var(--status-stale);
+  background: var(--status-stale-bg);
+  border-radius: 4px;
+}
+.stale__dot {
+  width: 6px;
+  height: 6px;
+  background: var(--status-warn);
+  border-radius: 50%;
 }
 .kpis {
   display: flex;

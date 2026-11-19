@@ -11,15 +11,20 @@ export function lifeTone(life?: string): Tone {
   return "info";
 }
 
-/** 任务状态。 */
+/** 任务状态（采样/送检/划拨共用；口径对齐 shared/taskFlow.js 的终态集合）。 */
 export function taskTone(status?: string): Tone {
-  if (["已签收", "已完成"].includes(status || "")) return "success";
-  if (["已取消", "已拒收"].includes(status || "")) return "info";
-  if (status === "已检测") return "success";
-  if (status === "待检测" || status === "退回中") return "warning";
-  if (status === "已退回") return "info";
-  if (["待签收", "待核验"].includes(status || "")) return "warning";
+  // 划拨：已划拨 ok / 已撤销 neutral（设计基准 README.md:94）
+  if (status === "已划拨") return "success";
+  if (status === "已撤销") return "info";
+  if (["已签收", "已完成", "已检测"].includes(status || "")) return "success";
+  if (["已取消", "已拒收", "已退回"].includes(status || "")) return "info";
+  if (["待检测", "退回中", "待签收", "待核验"].includes(status || "")) return "warning";
   return "primary";
+}
+
+/** 划拨单状态色：已划拨 success / 已撤销 info（neutral）。 */
+export function transferTone(status?: string): Tone {
+  return status === "已划拨" ? "success" : "info";
 }
 
 /** 录像请求状态。 */

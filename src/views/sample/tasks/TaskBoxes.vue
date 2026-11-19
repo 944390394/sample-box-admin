@@ -14,9 +14,9 @@
           type="primary"
           @click.stop="router.push(`/device/boxes/${row.id}`)"
         >
-          {{ row.name || row.id }}
+          {{ boxTitle(row) }}
         </el-link>
-        <span v-else class="muted">{{ row.id }}（已删除）</span>
+        <span v-else class="muted">{{ imeiText(row) }}（已删除）</span>
       </template>
     </el-table-column>
     <el-table-column label="所属 · 保管人" min-width="130">
@@ -147,6 +147,7 @@ import { formatDistance, type TaskBox, type TaskTrack } from "@/api/sample/repor
 import FreshTag from "@/components/biz/FreshTag.vue";
 import { ageText } from "@/utils/position";
 import { ago, fullTime } from "@/utils/time";
+import { boxTitle, imeiText } from "@/utils/boxLabel";
 
 /** 任务里的箱子：所属、电量、箱盖、位置、到达、开箱次数和任务期间轨迹。点一行在地图上定位。 */
 const props = defineProps<{

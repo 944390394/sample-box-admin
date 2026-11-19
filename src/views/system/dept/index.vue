@@ -237,7 +237,7 @@
                 </el-table-column>
               </el-table>
             </el-tab-pane>
-            <el-tab-pane :label="`人员（${members.total}）`" name="members">
+            <el-tab-pane v-if="canMembers" :label="`人员（${members.total}）`" name="members">
               <div class="tab-tools">
                 <span class="muted">含下级部门的人员</span>
                 <el-button
@@ -649,6 +649,17 @@ const canEditAny = computed(() =>
 );
 /** 编辑已有部门时，名称、编号、上级、排序、状态要「编辑部门基本信息」；新建看「新增部门」。 */
 const basicLocked = computed(() => Boolean(formData.id) && !can("sys:dept:update"));
+/** 人员页签与 GET /users 同口径：只有部门查看权限（如资产管理员）时不渲染、不请求，避免 403 报错页（R4）。 */
+const canMembers = computed(() =>
+  [
+    "sys:user:view",
+    "sys:user:create",
+    "sys:user:update",
+    "sys:user:disable",
+    "sys:user:enable",
+    "sys:user:delete",
+  ].some((code) => can(code))
+);
 
 const loading = ref(false);
 const list = ref<DeptItem[]>([]);
@@ -734,7 +745,7 @@ const members = reactive({
 });
 let membersSeq = 0;
 async function loadMembers() {
-  if (!selectedId.value) return;
+  if (!selectedId.value || !canMembers.value) return;
   const seq = ++membersSeq;
   members.loading = true;
   try {
@@ -746,6 +757,12 @@ async function loadMembers() {
     if (seq !== membersSeq) return;
     members.list = page.list;
     members.total = page.total;
+  } catch {
+    /* 无人员查看权限时页签已隐藏；兜底吞掉拒绝，不留未处理 rejection（R4） */
+    if (seq === membersSeq) {
+      members.list = [];
+      members.total = 0;
+    }
   } finally {
     if (seq === membersSeq) members.loading = false;
   }

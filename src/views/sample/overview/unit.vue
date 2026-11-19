@@ -15,51 +15,67 @@
         <span v-if="data && data.unit.path !== data.unit.name" class="path-text">
           {{ data.unit.path }}
         </span>
-        <span v-if="updatedAt" class="freshness" :class="{ stale: dataStale }">
-          <i class="dot" />
-          更新于 {{ ageText(updatedAt.toISOString()) }}
-          <em v-if="dataStale">旧</em>
-        </span>
-        <span v-if="!error" class="auto-hint">
-          <i class="pulse" />
-          每 5 秒自动刷新
-        </span>
+        <FreshnessMeta :updated-at="updatedAt" :error="error" :interval="5000" />
       </template>
       <template #actions>
         <el-button :icon="Refresh" :loading="loading" @click="refresh">刷新</el-button>
-        <el-button :icon="Box" @click="router.push({ path: '/device/boxes', query: { orgId } })">
-          本单位的箱子
-        </el-button>
+        <el-button :icon="Box" @click="openBoxes">本单位的箱子</el-button>
       </template>
     </PageHeader>
 
-    <el-alert v-if="error" type="warning" :closable="false" show-icon>
-      <template #title>
-        刷新失败：{{ error }}
-        <el-button link type="primary" size="small" @click="refresh">重试</el-button>
-      </template>
-    </el-alert>
+    <!-- 范围外/不存在的单位：重试永远不会成功，给友好错态＋回自己总览的出口（R4） -->
+    <EmptyState
+      v-if="error && errorCode === 'A0404'"
+      description="这个单位不存在，或不在你的数据范围内"
+    >
+      <div class="unit-error-guide">
+        <p class="text-muted guide-text">
+          链接里的单位编号可能有误，或你的数据范围没有覆盖它。 返回总览会自动落到你有权查看的单位。
+        </p>
+        <div class="guide-actions">
+          <el-button type="primary" :icon="ArrowLeft" @click="backToMyOverview">
+            返回我的总览
+          </el-button>
+          <el-button :icon="Refresh" :loading="loading" @click="refresh">重试</el-button>
+        </div>
+      </div>
+    </EmptyState>
+    <ErrorState
+      v-else-if="error"
+      :message="`刷新失败：${error}`"
+      :retrying="loading"
+      @retry="refresh"
+    >
+      <el-button link type="primary" size="small" @click="backToMyOverview">返回我的总览</el-button>
+    </ErrorState>
 
-    <el-skeleton v-if="!data && loading" :rows="8" animated />
+    <el-skeleton v-if="!data && loading && !error" :rows="8" animated />
     <template v-else-if="data">
-      <StatTiles v-if="data.station" :items="stationTiles" :max="3" data-test="station-tiles" />
-      <StatTiles
-        v-else
-        :items="tiles"
-        :max="4"
-        data-test="unit-tiles"
-        @update:model-value="openTile"
+      <!-- 检测站：流转管线，点某一段切换下方明细页签 -->
+      <FlowPipeline
+        v-if="data.station"
+        :steps="flowSteps"
+        :active="stationTab"
+        data-test="station-tiles"
+        @step-click="onFlowStep"
       />
+      <!-- 分公司：四张 KPI，点卡进箱子列表对应筛选 -->
+      <div v-else-if="data.stats" class="kpi-grid" data-test="unit-tiles">
+        <KpiCard v-for="item in kpis" :key="item.key" :item="item" @select="openTile" />
+      </div>
+      <EmptyState v-else description="本单位暂无箱子数据" />
 
-      <div v-if="flagChips.length" class="flag-strip">
+      <div v-if="flagChips.length" class="flag-strip" role="group" aria-label="异常箱子">
         <button
           v-for="chip in flagChips"
           :key="chip.key"
+          type="button"
           class="flag-chip"
           :class="`is-${chip.tone}`"
+          :aria-label="`${chip.label} ${chip.value} 台，查看这些箱子`"
           @click="openTile(chip.key)"
         >
-          <i class="dot" />
+          <i class="dot" aria-hidden="true" />
           {{ chip.label }}
           <b>{{ chip.value }}</b>
         </button>
@@ -70,15 +86,18 @@
         title="状态分布"
         :sub="`共 ${data.stats.total.toLocaleString()} 台`"
       >
-        <DistributionBar :segments="segments" :height="10" />
-        <div class="legend">
-          <span v-for="seg in segments" :key="seg.label" class="legend-item">
-            <i class="dot" :style="{ background: seg.color }" />
-            {{ seg.label }}
-            <b>{{ seg.value.toLocaleString() }}</b>
-            <em v-if="data.stats.total">{{ Math.round((seg.value / data.stats.total) * 100) }}%</em>
-          </span>
-        </div>
+        <template v-if="data.stats.total > 0">
+          <DistributionBar :segments="segments" :height="10" />
+          <div class="legend">
+            <span v-for="seg in segments" :key="seg.label" class="legend-item">
+              <i class="dot" :style="{ background: seg.color }" aria-hidden="true" />
+              {{ seg.label }}
+              <b>{{ seg.value.toLocaleString() }}</b>
+              <em>{{ percent(seg.value, data.stats.total) }}</em>
+            </span>
+          </div>
+        </template>
+        <EmptyState v-else description="本单位还没有箱子" />
       </SectionCard>
 
       <SectionCard
@@ -89,6 +108,7 @@
       >
         <StationBoard
           :key="orgId"
+          v-model:tab="stationTab"
           :station="data.station"
           :day-text="dayText"
           @query="onStationQuery"
@@ -100,9 +120,17 @@
           <template #extra>
             <el-button size="small" :disabled="isToday" @click="goToday">今天</el-button>
           </template>
-          <UnitCalendar :day="day" :calendar="data.calendar" @change="onDayChange" />
+          <ControlledCalendar
+            :day="day"
+            :month="month"
+            :counts="data.calendar"
+            :loading="loading"
+            @select="onSelectDay"
+            @month-change="onMonthChange"
+            @today="goToday"
+          />
         </SectionCard>
-        <SectionCard :title="`${dayText}任务`" :sub="`${data.tasks.length} 张`">
+        <SectionCard :title="`${dayText}任务`" sub="点任务看详情">
           <DayTasks :tasks="data.tasks" :day-text="dayText" />
         </SectionCard>
       </div>
@@ -113,51 +141,42 @@
 <script setup lang="ts">
 defineOptions({ name: "SampleOverviewUnit" });
 
-import {
-  AlarmClock,
-  Box,
-  CircleCheck,
-  House,
-  Refresh,
-  Suitcase,
-  Van,
-} from "@element-plus/icons-vue";
+import { AlarmClock, ArrowLeft, Box, House, Refresh, Van } from "@element-plus/icons-vue";
 import OverviewAPI, { type UnitOverview } from "@/api/sample/overview";
 import DistributionBar, { type DistSegment } from "@/components/biz/DistributionBar.vue";
+import FreshnessMeta from "@/components/biz/FreshnessMeta.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import SectionCard from "@/components/biz/SectionCard.vue";
-import StatTiles, { type StatTile } from "@/components/biz/StatTiles.vue";
+import ControlledCalendar from "@/components/ov/ControlledCalendar.vue";
+import EmptyState from "@/components/ov/EmptyState.vue";
+import ErrorState from "@/components/ov/ErrorState.vue";
+import FlowPipeline from "@/components/ov/FlowPipeline.vue";
+import KpiCard from "@/components/ov/KpiCard.vue";
+import type { FlowStep, KpiItem } from "@/components/ov/types";
+import { monthOf, todayStr } from "@/composables/useCalendarGrid";
 import { useOverviewPolling } from "@/composables/useOverviewPolling";
 import { lifeLabel } from "@/utils/labels";
-import { ageText } from "@/utils/position";
-import { clock } from "@/utils/time";
 import DayTasks from "./components/DayTasks.vue";
 import StationBoard, { type StationQuery } from "./components/StationBoard.vue";
-import UnitCalendar from "./components/UnitCalendar.vue";
 
 /**
- * 单位总览（补充协议 1.2.8、1.2.9）：分公司看箱子数量状态、日历选日看任务；
- * 检测站看在途 / 已到未检测 / 已检测的流转，来源公司主从列表 + 三页签明细。
- * 每 5 秒轮询，后台暂停、失败退避；明细全部服务端分页。
+ * 单位总览（补充协议 1.2.8、1.2.9）：分公司看 KPI + 状态分布 + 日历选日看任务时间线；
+ * 检测站看流转管线（点段切页签）+ 来源公司主从明细 + 日历任务时间线。
+ * 每 5 秒轮询，后台暂停、失败退避；轮询只换数据，不重置选中日 / 页签 / 公司选择。
  */
 const route = useRoute();
 const router = useRouter();
 const orgId = computed(() => String(route.params.orgId || ""));
 const data = ref<UnitOverview | null>(null);
 
-function pad(n: number) {
-  return String(n).padStart(2, "0");
-}
-function localDay(d: Date) {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-const today = localDay(new Date());
+const today = todayStr();
 const day = ref(
   typeof route.query.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(route.query.day)
     ? route.query.day
     : today
 );
-const month = ref(day.value.slice(0, 7));
+const month = ref(monthOf(day.value));
+const stationTab = ref("waiting");
 const stationQuery = ref<StationQuery>({
   company: "",
   companyQ: "",
@@ -193,69 +212,71 @@ async function load(): Promise<boolean> {
   data.value = result;
   return true;
 }
-const { updatedAt, error, loading, refresh } = useOverviewPolling(load, 5000);
-const dataStale = computed(
-  () =>
-    Boolean(error.value) ||
-    (updatedAt.value ? clock.value - updatedAt.value.getTime() > 20000 : false)
-);
+const { updatedAt, error, errorCode, loading, refresh } = useOverviewPolling(load, 5000);
 
-const tiles = computed<StatTile[]>(() => {
+/** 404/范围外错态的出口：回总览入口，由它按数据范围落到自己有权看的单位（R4）。 */
+function backToMyOverview() {
+  void router.replace("/monitor/overview");
+}
+
+function percent(value: number, total: number) {
+  return `${total > 0 ? Math.round((value / total) * 100) : 0}%`;
+}
+
+const kpis = computed<KpiItem[]>(() => {
   const s = data.value?.stats;
   if (!s) return [];
+  const moving = s.counts["在途"] ?? 0;
+  const idle = s.counts["未使用"] ?? 0;
+  const pending = s.counts["待激活"] ?? 0;
+  const stopped = s.counts["停用"] ?? 0;
   return [
-    { key: "total", label: "箱子总数", value: s.total, clickable: false, icon: Box },
+    {
+      key: "total",
+      label: "箱子总数",
+      value: s.total,
+      clickable: false,
+      icon: Box,
+      hint: `${lifeLabel("停用")} ${stopped.toLocaleString()} 台`,
+    },
     {
       key: "life:在途",
       label: lifeLabel("在途"),
-      value: s.counts["在途"] ?? 0,
+      value: moving,
       tone: "primary",
       icon: Van,
+      hint: `占总数 ${percent(moving, s.total)}`,
     },
     {
       key: "life:未使用",
       label: "在仓库",
-      value: s.counts["未使用"] ?? 0,
+      value: idle,
       tone: "success",
       icon: House,
+      hint: `占总数 ${percent(idle, s.total)}`,
     },
     {
       key: "life:待激活",
       label: lifeLabel("待激活"),
-      value: s.counts["待激活"] ?? 0,
-      tone: s.counts["待激活"] ? "warning" : "default",
+      value: pending,
+      tone: pending ? "warning" : "default",
       icon: AlarmClock,
+      hint: `占总数 ${percent(pending, s.total)}`,
     },
   ];
 });
-const stationTiles = computed<StatTile[]>(() => {
+const flowSteps = computed<FlowStep[]>(() => {
   const st = data.value?.station;
   if (!st) return [];
   return [
+    { key: "inbound", label: "运往本站途中", value: st.moving, tone: "primary" },
     {
-      key: "moving",
-      label: "运往本站途中",
-      value: st.moving,
-      tone: "primary",
-      clickable: false,
-      icon: Van,
-    },
-    {
-      key: "arrived",
+      key: "waiting",
       label: "已到 · 未开箱检测",
       value: st.arrived,
       tone: st.arrived ? "warning" : "default",
-      clickable: false,
-      icon: Suitcase,
     },
-    {
-      key: "inspected",
-      label: `${dayText.value}已开箱检测`,
-      value: st.inspected,
-      tone: "success",
-      clickable: false,
-      icon: CircleCheck,
-    },
+    { key: "done", label: `${dayText.value}已开箱检测`, value: st.inspected, tone: "success" },
   ];
 });
 const flagChips = computed(() => {
@@ -285,6 +306,12 @@ const segments = computed<DistSegment[]>(() => {
 function openTile(key: string) {
   if (key) void router.push({ path: "/device/boxes", query: { orgId: orgId.value, tile: key } });
 }
+function openBoxes() {
+  void router.push({ path: "/device/boxes", query: { orgId: orgId.value } });
+}
+function onFlowStep(key: string) {
+  stationTab.value = key;
+}
 function onStationQuery(q: StationQuery) {
   stationQuery.value = q;
   void refresh();
@@ -295,11 +322,20 @@ function onDayChange(next: string, nextMonth: string) {
   void router.replace({ query: { ...route.query, day: next } });
   void refresh();
 }
+function onSelectDay(next: string) {
+  onDayChange(next, monthOf(next));
+}
+function onMonthChange(nextMonth: string) {
+  // 翻月只换显示月与角标数据，不动选中日
+  month.value = nextMonth;
+  void refresh();
+}
 function goToday() {
-  onDayChange(today, today.slice(0, 7));
+  onDayChange(today, monthOf(today));
 }
 
 watch(orgId, () => {
+  stationTab.value = "waiting";
   stationQuery.value = {
     company: "",
     companyQ: "",
@@ -318,55 +354,29 @@ watch(orgId, () => {
   font-size: 12px;
   color: var(--el-text-color-placeholder);
 }
-.freshness {
-  display: inline-flex;
-  gap: 5px;
+.unit-error-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   align-items: center;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-secondary);
 }
-.freshness .dot {
-  width: 6px;
-  height: 6px;
-  background: var(--status-ok);
-  border-radius: 50%;
+.unit-error-guide .guide-text {
+  max-width: 460px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
 }
-.freshness.stale .dot {
-  background: var(--status-warn);
+.unit-error-guide .guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
 }
-.freshness em {
-  padding: 0 4px;
-  font-size: 11px;
-  font-style: normal;
-  line-height: 16px;
-  color: var(--status-stale);
-  border: 1px solid currentcolor;
-  border-radius: 3px;
-}
-.auto-hint {
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-  margin-left: 10px;
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
-}
-.pulse {
-  width: 6px;
-  height: 6px;
-  background: var(--el-color-primary);
-  border-radius: 50%;
-  animation: pulse 2s ease-in-out infinite;
-}
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.25;
-  }
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--page-gap);
 }
 .flag-strip {
   display: flex;
@@ -385,10 +395,14 @@ watch(orgId, () => {
   background: var(--content-bg);
   border: 1px solid var(--card-border);
   border-radius: 999px;
-  transition: border-color 0.15s;
+  transition: border-color var(--motion-fast, 150ms);
 }
 .flag-chip:hover {
   border-color: var(--card-border-hover);
+}
+.flag-chip:focus-visible {
+  outline: var(--focus-ring, 2px solid var(--el-color-primary));
+  outline-offset: 1px;
 }
 .flag-chip .dot {
   width: 6px;
@@ -424,6 +438,7 @@ watch(orgId, () => {
   color: var(--el-text-color-secondary);
 }
 .legend-item .dot {
+  flex-shrink: 0;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -444,12 +459,20 @@ watch(orgId, () => {
   gap: var(--page-gap);
   align-items: start;
 }
-@media (max-width: 1000px) {
+@media (max-width: 1024px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .day-grid {
     grid-template-columns: minmax(0, 1fr);
   }
   .legend {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 480px) {
+  .kpi-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

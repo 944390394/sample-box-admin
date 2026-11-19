@@ -32,6 +32,10 @@ export interface BoxSettings {
   batteryReserve: number;
   /** 任务里箱子离目的地多近算到达，米 */
   arriveRadiusM?: number;
+  /** 划拨/送检功能开关（B1）：默认关。开时才启用 /sample/transfers* 与送检建单、任务单默认采样。 */
+  enableTransferInspect?: boolean;
+  /** 建单后未上线的离线宽限，秒（B3/#18）：默认 3600。设置页以分钟展示（1–1440）。 */
+  taskOfflineGraceSec?: number;
 }
 
 export interface TcpSettings {

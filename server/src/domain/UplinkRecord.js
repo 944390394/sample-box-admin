@@ -20,8 +20,11 @@ export class UplinkRecord {
     this.gpsLat = fields.gpsLat;
   }
 
-  /** kind 由 BoxState.kindOf 在更新状态前算好；不传时按报文里的 why。 */
-  static capture(box, uplink, receivedAt, kind = uplink.why) {
+  /**
+   * kind 由 BoxState.apply 算出（apply 对入参只读不写、返回派生种类，R-12），存储层据此标注
+   * uplink.kind 并显式传入；没走过 apply 的包（内部构造）退回报文里的 why。
+   */
+  static capture(box, uplink, receivedAt, kind = uplink.kind ?? uplink.why) {
     return new UplinkRecord({
       boxId: box.id,
       imei: uplink.imei,

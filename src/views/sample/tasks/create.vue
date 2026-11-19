@@ -5,7 +5,21 @@
       back="/task/tasks"
       subtitle="分步填写，最后核对一遍再创建。离开页面前会提醒保存。"
     />
-    <el-empty v-if="!canManage" description="当前角色没有「新建调拨任务」或「新建采样任务」权限" />
+    <el-alert
+      v-if="optionsFailed"
+      type="warning"
+      class="init-alert"
+      show-icon
+      :closable="false"
+      title="单位列表没取到，创建页暂时填不下去。"
+      data-test="create-options-error"
+    >
+      <el-button link type="primary" @click="init">重新加载</el-button>
+    </el-alert>
+    <p v-else-if="presetMissing" class="tip" data-test="create-boxes-missing">
+      带过来的采样箱有 {{ presetMissing }} 台没取到（不在你的管理范围内或已删除），已跳过。
+    </p>
+    <el-empty v-if="!canManage" description="当前角色没有「新建采样任务」或「新建送检单」权限" />
     <div v-else class="create-layout" :class="{ solo: !showSummary }">
       <el-card shadow="never" class="task-form">
         <el-steps :active="step" finish-status="success" align-center class="steps">
@@ -28,14 +42,19 @@
           <template v-if="current === 'basic'">
             <el-form-item label="任务类型">
               <el-radio-group v-model="form.kind">
-                <el-radio-button value="调拨" :disabled="!canTransfer">调拨</el-radio-button>
                 <el-radio-button value="采样" :disabled="!canSample">采样</el-radio-button>
+                <el-radio-button v-if="enableTransferInspect" value="送检" :disabled="!canInspect">
+                  送检
+                </el-radio-button>
+                <el-radio-button v-else value="调拨" :disabled="!canTransfer">调拨</el-radio-button>
               </el-radio-group>
               <p class="tip">
                 {{
-                  form.kind === "调拨"
-                    ? "把采样箱从一个单位寄到另一个单位，由接收单位签收，签收后箱子归接收单位。"
-                    : "安排采样箱到采样单位采样。箱子的归属不变。"
+                  form.kind === "送检"
+                    ? "把采样箱寄到检测站开箱检测：签收后待检测，逐台「开始检测」，全部检测完整单已检测。"
+                    : form.kind === "调拨"
+                      ? "把采样箱从一个单位寄到另一个单位，由接收单位签收，签收后箱子归接收单位。"
+                      : "安排采样箱到采样单位采样。箱子的归属不变。"
                 }}
               </p>
             </el-form-item>
@@ -239,7 +258,7 @@
               type="info"
               :closable="false"
               class="indent"
-              :title="`选中的箱子分属 ${boxOrgs.join('、')}，调拨单只能写一个寄出单位，请确认`"
+              :title="`选中的箱子分属 ${boxOrgs.join('、')}，寄送单只能写一个寄出单位，请确认`"
             />
             <el-form-item label="开箱次数上限">
               <div class="limit">
@@ -263,8 +282,8 @@
               </div>
               <p class="tip">
                 从任务开始到结束，按箱子上报的开箱次数计算；超过上限会在任务列表和详情里标红。{{
-                  form.kind === "调拨"
-                    ? "调拨途中一般不该开箱，可设为 0。"
+                  logistics
+                    ? "寄送途中一般不该开箱，可设为 0。"
                     : "采样一般开一次装样、一次封箱，可按流程设置。"
                 }}
               </p>
@@ -293,7 +312,7 @@
                   <dd>{{ form.note || "—" }}</dd>
                 </dl>
               </section>
-              <template v-if="form.kind === '调拨'">
+              <template v-if="logistics">
                 <section>
                   <header>
                     <b>寄出方</b>
@@ -512,8 +531,10 @@ import PolicyFields from "../boxes/PolicyFields.vue";
 import PlaceField from "./PlaceField.vue";
 import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
+import { boxTitle, imeiText } from "@/utils/boxLabel";
 import { TRIP_TEXT } from "./status";
 import { useUserStore } from "@/stores/user";
+import { useBoxFeatures } from "@/composables/useBoxFeatures";
 import SampleBoxAPI from "@/api/sample/box";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import InfoList, { type InfoItem } from "@/components/biz/InfoList.vue";
@@ -524,17 +545,23 @@ type StepKey = "basic" | "boxes" | "from" | "to" | "sample" | "policy" | "review
 const router = useRouter(),
   route = useRoute(),
   user = useUserStore();
-// 新建调拨、新建采样、任务期间上报策略分开授权
+// 新建采样、新建送检、新建调拨（legacy）、任务期间上报策略分开授权
 const canTransfer = computed(() => Boolean(user.userInfo.perms?.includes("task:create:transfer")));
 const canSample = computed(() => Boolean(user.userInfo.perms?.includes("task:create:sample")));
+const canInspect = computed(() => Boolean(user.userInfo.perms?.includes("task:create:inspect")));
 const canPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.task)));
 const canReadPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.read)));
+const { enableTransferInspect, loadBoxFeatures } = useBoxFeatures();
+/** 送检与旧调拨共用同一套物流表单（寄出方/接收方/地址）；采样是另一套。 */
+const logistics = computed(() => form.kind === "调拨" || form.kind === "送检");
 const previewFailed = ref(false);
 let previewRequest = 0;
-const canManage = computed(() => canTransfer.value || canSample.value);
+const canManage = computed(
+  () => canSample.value || canInspect.value || (canTransfer.value && !enableTransferInspect.value)
+);
 const form = reactive({
   name: "",
-  kind: route.query.type === "调拨" ? "调拨" : "采样",
+  kind: route.query.type === "送检" ? "送检" : route.query.type === "调拨" ? "调拨" : "采样",
   boxIds: [] as string[],
   overrides: {} as Record<string, Policy>,
   fromOrgId: "",
@@ -553,16 +580,6 @@ const form = reactive({
   recordVideo: false,
   trip: "双向" as "" | "单向" | "双向",
 });
-if (
-  !user.userInfo.perms?.includes("task:create:sample") &&
-  user.userInfo.perms?.includes("task:create:transfer")
-)
-  form.kind = "调拨";
-if (
-  !user.userInfo.perms?.includes("task:create:transfer") &&
-  user.userInfo.perms?.includes("task:create:sample")
-)
-  form.kind = "采样";
 /** 各步骤的字段错误，显示在对应输入框下面。 */
 const errors = reactive<Record<string, string>>({});
 const advancedOpen = ref(false);
@@ -583,9 +600,30 @@ watch(
   (id) => void loadUsers(id, sampleUsers)
 );
 const boxNames = computed(() =>
-  form.boxIds.map((id) => chosenBoxes.value.find((b) => b.id === id)?.name || id).join("、")
+  form.boxIds
+    .map((id) => {
+      const box = chosenBoxes.value.find((b) => b.id === id);
+      // 名称为空时服务端给的是编号回显、编号就是 IMEI，统一走 boxTitle；查不到的箱子也按打码副本写
+      return box ? boxTitle(box) : imeiText({ id });
+    })
+    .join("、")
 );
-const dirty = computed(() => Boolean(form.name || form.boxIds.length || form.note));
+/**
+ * 「脏」按整页算：以前只看 name / 箱子 / 备注三项，改了寄出方、地点、上报策略、误差范围
+ * 却离开，一样会丢，但页面不问一句（L-P1-10）。这里把可编辑状态整体序列化，跟初始化完成
+ * 时的快照比一次；初始化（含 ?boxIds= 预选的箱子和从服务端取回的默认值）落在基线里，不算用户改过。
+ */
+const snapshot = () =>
+  JSON.stringify({
+    form,
+    custom: custom.value,
+    policy: policy.value,
+    arriveRadius: arriveRadius.value,
+    limitOpens: limitOpens.value,
+    maxOpens: maxOpens.value,
+  });
+const baseline = ref("");
+const dirty = computed(() => Boolean(baseline.value) && snapshot() !== baseline.value);
 onBeforeRouteLeave(async () => {
   if (saved.value || !dirty.value) return true;
   try {
@@ -599,8 +637,16 @@ onBeforeRouteLeave(async () => {
     return false;
   }
 });
+// 关标签页、刷新、浏览器地址栏跳转都不走路由守卫，只走 beforeunload
+function onBeforeUnload(event: BeforeUnloadEvent) {
+  if (saved.value || !dirty.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
 const custom = ref(false),
-  policy = ref<Policy>({ reportPeriodSec: 60, reportOnlyWhenCharging: false });
+  /** 「本任务统一」的初始策略取系统默认（L-P1-9）：默认周期归管理员在设置页改，前端不再写死 60 秒。 */
+  defaultPolicy = ref<Policy>({ reportPeriodSec: 60, reportOnlyWhenCharging: false }),
+  policy = ref<Policy>({ ...defaultPolicy.value });
 const saving = ref(false),
   states = reactive<Record<string, PolicyState>>({});
 const chosenBoxes = ref<SampleBox[]>([]);
@@ -616,9 +662,9 @@ const editOpen = ref(false),
 const arriveRadius = ref(2000);
 const limitOpens = ref(false),
   maxOpens = ref(0);
-// 调拨途中一般不该开箱，打开限制时调拨默认 0 次、采样默认 2 次
+// 寄送途中一般不该开箱，打开限制时物流单默认 0 次、采样默认 2 次
 watch(limitOpens, (on) => {
-  if (on) maxOpens.value = form.kind === "调拨" ? 0 : 2;
+  if (on) maxOpens.value = logistics.value ? 0 : 2;
 });
 const orgs = ref<TaskOrg[]>([]),
   fromUsers = ref<Person[]>([]),
@@ -633,12 +679,12 @@ watch(isAgency, (on) => {
  * 调拨是 基本 → 采样箱 → 寄出方 → 接收方 → 确认；采样是 基本 → 采样箱 →（要寄送时）寄出方 → 采样安排 → 确认。
  */
 const steps = computed<{ key: StepKey; title: string }[]>(() =>
-  form.kind === "调拨"
+  logistics.value
     ? [
         { key: "basic", title: "基本信息" },
         { key: "boxes", title: "采样箱" },
         { key: "from", title: "寄出方" },
-        { key: "to", title: "接收方" },
+        { key: "to", title: form.kind === "送检" ? "检测站" : "接收方" },
         { key: "review", title: "核对" },
       ]
     : form.trip
@@ -661,11 +707,11 @@ const current = computed(() => steps.value[step.value]?.key || "basic");
 /** 选箱子和核对这两步要整宽，不显示右边的摘要；核对页本身就是完整摘要。 */
 const showSummary = computed(() => current.value !== "boxes" && current.value !== "review");
 const summaryItems = computed<InfoItem[]>(() => {
-  const ship = form.kind === "调拨" || Boolean(form.trip);
+  const ship = logistics.value || Boolean(form.trip);
   const list: InfoItem[] = [
     {
       label: "类型",
-      value: form.kind === "调拨" ? "调拨" : `采样 · ${form.trip ? `${form.trip}寄送` : "不寄送"}`,
+      value: logistics.value ? form.kind : `采样 · ${form.trip ? `${form.trip}寄送` : "不寄送"}`,
     },
     { label: "名称", value: form.name.trim() || "—" },
     {
@@ -678,9 +724,9 @@ const summaryItems = computed<InfoItem[]>(() => {
       label: "寄出",
       value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
     });
-  if (form.kind === "调拨")
+  if (logistics.value)
     list.push({
-      label: "接收",
+      label: form.kind === "送检" ? "检测站" : "接收",
       value: [orgById(form.toOrgId)?.name, form.signer].filter(Boolean).join(" · ") || "—",
     });
   else
@@ -717,7 +763,7 @@ function checkStep(key: StepKey) {
 }
 function next() {
   if (!checkStep(current.value)) return;
-  if (current.value === "boxes" && (form.kind === "调拨" || form.trip) && !form.fromOrgId)
+  if (current.value === "boxes" && (logistics.value || form.trip) && !form.fromOrgId)
     form.fromOrgId = suggestedFrom();
   step.value = Math.min(step.value + 1, steps.value.length - 1);
 }
@@ -820,20 +866,23 @@ watch(
  * 箱子挂在上级（比如挂在总公司、从总公司下的部门寄出）算正常；还没分配单位的箱子不提示。
  */
 const outside = computed(() => {
-  if ((form.kind !== "调拨" && !form.trip) || !form.fromOrgId) return [];
+  if ((!logistics.value && !form.trip) || !form.fromOrgId) return [];
   const root = orgById(form.fromOrgId);
   if (!root) return [];
-  return chosenBoxes.value
-    .filter((box) => {
-      const org = box.orgId ? orgById(String(box.orgId)) : null;
-      if (!org) return false;
-      const related =
-        org.id === root.id ||
-        org.path.startsWith(`${root.path} / `) ||
-        root.path.startsWith(`${org.path} / `);
-      return !related;
-    })
-    .map((box) => box.id);
+  return (
+    chosenBoxes.value
+      .filter((box) => {
+        const org = box.orgId ? orgById(String(box.orgId)) : null;
+        if (!org) return false;
+        const related =
+          org.id === root.id ||
+          org.path.startsWith(`${root.path} / `) ||
+          root.path.startsWith(`${org.path} / `);
+        return !related;
+      })
+      // 提示文案里只用称谓：没起名的箱子直接写编号等于下发整串 IMEI（M-1）
+      .map((box) => boxTitle(box))
+  );
 });
 /** 选中的箱子分属哪些单位（未分配的算总公司）。 */
 const boxOrgs = computed(() => [
@@ -874,9 +923,7 @@ function policyForBox(id: string): Policy | undefined {
   );
 }
 function editBoxPolicy(id: string) {
-  const base =
-    policyForBox(id) ||
-    (!canReadPolicy.value ? { reportPeriodSec: 60, reportOnlyWhenCharging: false } : null);
+  const base = policyForBox(id) || (!canReadPolicy.value ? { ...defaultPolicy.value } : null);
   if (!base) return;
   editId.value = id;
   editPolicy.value = { ...base };
@@ -905,7 +952,7 @@ async function submit() {
   for (const item of steps.value) {
     if (!checkStep(item.key)) return goto(item.key);
   }
-  const transfer = form.kind === "调拨";
+  const transfer = logistics.value;
   const data: TaskCreate = {
     name: form.name.trim(),
     kind: form.kind,
@@ -953,26 +1000,64 @@ async function submit() {
   }
 }
 
-onMounted(async () => {
+const optionsFailed = ref(false);
+/** 带过来的 ?boxIds= 里没取到的台数（不在范围内或已删除）：取到几台就用几台，但要告诉用户少了几台。 */
+const presetMissing = ref(0);
+/**
+ * 初始化：单位列表、系统默认（上报周期、到达误差）、?boxIds= 预选的箱子。
+ * 取失败时页面会是一张填不下去的半张表（没有单位可选、箱子全丢），所以要留一条能重试的提示（L-P1-5）。
+ */
+async function init() {
+  await loadBoxFeatures();
   if (!canManage.value) return;
-  const loaded = await API.taskOptions();
-  orgs.value = loaded.orgs;
-  arriveRadius.value = loaded.arriveRadiusM;
-  myOrgId.value = loaded.myOrgId;
-  // 从箱子详情、工作台跳过来时带着 ?boxIds=，先选好
-  const preset = String(route.query.boxIds || "")
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .slice(0, 100);
-  if (preset.length) {
-    const found = await Promise.all(
-      preset.map((id) => SampleBoxAPI.detail(encodeURIComponent(id)).catch(() => null))
-    );
-    chosenBoxes.value = found.filter((box): box is SampleBox => box !== null);
-    form.boxIds = chosenBoxes.value.map((box) => box.id);
+  // 类型按开关 + 权限校正：送检未开通/无权限回落采样；开关开后 legacy 调拨优先转送检
+  if (form.kind === "送检" && (!enableTransferInspect.value || !canInspect.value))
+    form.kind = canSample.value ? "采样" : "调拨";
+  if (form.kind === "调拨" && enableTransferInspect.value)
+    form.kind = canInspect.value ? "送检" : "采样";
+  if (form.kind === "采样" && !canSample.value)
+    form.kind = canInspect.value && enableTransferInspect.value ? "送检" : "调拨";
+  optionsFailed.value = false;
+  try {
+    const loaded = await API.taskOptions();
+    orgs.value = loaded.orgs;
+    arriveRadius.value = loaded.arriveRadiusM;
+    myOrgId.value = loaded.myOrgId;
+    defaultPolicy.value = {
+      reportPeriodSec: loaded.defaultReportPeriodSec,
+      reportOnlyWhenCharging: loaded.defaultReportOnlyWhenCharging,
+    };
+    if (!custom.value) policy.value = { ...defaultPolicy.value };
+    // 从箱子详情、工作台跳过来时带着 ?boxIds=，先选好
+    const preset = String(route.query.boxIds || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .slice(0, 100);
+    if (preset.length) {
+      const found = await Promise.all(
+        preset.map((id) => SampleBoxAPI.detail(encodeURIComponent(id)).catch(() => null))
+      );
+      chosenBoxes.value = found.filter((box): box is SampleBox => box !== null);
+      form.boxIds = chosenBoxes.value.map((box) => box.id);
+      if (chosenBoxes.value.length < preset.length)
+        presetMissing.value = preset.length - chosenBoxes.value.length;
+    }
+  } catch {
+    optionsFailed.value = true;
+  } finally {
+    // 到这里页面自己填的东西都算「初始状态」，之后用户改过才叫脏
+    baseline.value = snapshot();
   }
+}
+onMounted(() => {
+  window.addEventListener("beforeunload", onBeforeUnload);
+  void init();
 });
+// 页面被 keep-alive 缓存时切走不会 unmount：不摘掉监听，在别的页面关标签也会被拦
+onDeactivated(() => window.removeEventListener("beforeunload", onBeforeUnload));
+onActivated(() => window.addEventListener("beforeunload", onBeforeUnload));
+onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload));
 </script>
 <style scoped>
 /* 卡片铺开到 1280px：选箱表格、核对页要宽；填写类的步骤输入框收在 720px 内，不拉得太长 */
@@ -1031,6 +1116,9 @@ onMounted(async () => {
   font-size: 12px;
   line-height: 1.6;
   color: var(--el-text-color-secondary);
+}
+.init-alert {
+  margin-bottom: 10px;
 }
 .indent {
   width: auto;

@@ -102,6 +102,26 @@
                 米，箱子离寄出、收货地址或计划地点在这个范围内算到达；基站定位误差常有一两公里
               </span>
             </el-form-item>
+            <el-form-item label="建单后未上线宽限">
+              <el-input-number
+                v-model="boxForm.taskOfflineGraceMin"
+                :min="1"
+                :max="1440"
+                :step="5"
+                :disabled="!can.box"
+              />
+              <span class="unit">
+                分钟（1–1440，默认
+                60）。被任务占用、从未上报的箱子，建单后这段时间内算中性「待上线」，不计离线；超过才计离线。一旦上报过回落「超过
+                3 个上报周期」口径。
+              </span>
+            </el-form-item>
+            <el-form-item label="划拨/送检功能">
+              <el-switch v-model="boxForm.enableTransferInspect" :disabled="!can.box" />
+              <span class="unit">
+                开启后启用「调拨单（批量划拨）」「送检单」两个独立页与建单入口；任务单页只放采样。关闭时新端点报未开通，旧流程不受影响。
+              </span>
+            </el-form-item>
             <el-form-item v-if="canSetPolicy">
               <el-button type="primary" :loading="savingBox" @click="saveBox">保存</el-button>
             </el-form-item>
@@ -439,6 +459,7 @@ import SettingsAPI, {
 import BrandingCard from "./BrandingCard.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import InfoList, { type InfoItem } from "@/components/biz/InfoList.vue";
+import { refreshBoxFeatures } from "@/composables/useBoxFeatures";
 import {
   defaultLabelSet,
   LABEL_GROUPS,
@@ -601,6 +622,10 @@ const boxForm = reactive({
   reportOnlyWhenCharging: false,
   batteryReserve: 20,
   arriveRadiusM: 2000,
+  /** 建单后未上线宽限，UI 以分钟展示（1–1440），保存时 ×60 存秒。 */
+  taskOfflineGraceMin: 60,
+  /** 划拨/送检功能开关。 */
+  enableTransferInspect: false,
 });
 const savingLabels = ref(false);
 const labelForm = reactive<Labels>(defaultLabelSet());
@@ -629,6 +654,11 @@ async function load() {
     boxForm.reportOnlyWhenCharging = Boolean(settings.value.box?.reportOnlyWhenCharging);
     boxForm.batteryReserve = settings.value.box?.batteryReserve ?? 20;
     boxForm.arriveRadiusM = settings.value.box?.arriveRadiusM ?? 2000;
+    // 宽限回显：服务端存秒 → UI 分钟（默认 3600s = 60 分钟）
+    const graceSec = Number(settings.value.box?.taskOfflineGraceSec);
+    boxForm.taskOfflineGraceMin =
+      Number.isFinite(graceSec) && graceSec > 0 ? Math.round(graceSec / 60) : 60;
+    boxForm.enableTransferInspect = Boolean(settings.value.box?.enableTransferInspect);
     if (settings.value.labels) {
       setLabels(settings.value.labels);
       fillLabels(settings.value.labels as Labels);
@@ -665,8 +695,13 @@ async function saveBox() {
       reportOnlyWhenCharging: boxForm.reportOnlyWhenCharging,
       batteryReserve: boxForm.batteryReserve,
       arriveRadiusM: boxForm.arriveRadiusM,
+      // 分钟 → 秒（服务端 taskOfflineGraceSec 校验 60–86400）
+      taskOfflineGraceSec: Math.round(boxForm.taskOfflineGraceMin * 60),
+      enableTransferInspect: boxForm.enableTransferInspect,
     });
     await load();
+    // 让全站徽标/菜单立刻按新宽限与新开关走
+    await refreshBoxFeatures();
     ElMessage.success("已保存");
   } finally {
     savingBox.value = false;

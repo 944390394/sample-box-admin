@@ -58,7 +58,7 @@
     </div>
     <div v-if="canLocation" class="cell cell--wide" data-test="summary-location">
       <span class="label">位置</span>
-      <LocationLine :box="box" :period-sec="box.reportPeriodSec" compact />
+      <LocationLine :box="box" :period-sec="box.reportPeriodSec" compact dual />
     </div>
   </div>
 </template>
@@ -83,7 +83,14 @@ const can = usePerm();
 
 const canLocation = computed(() => can(BOX_PERM.location));
 const online = computed(
-  () => telemetryState(props.box.last, props.box.reportPeriodSec, now.value).online
+  () =>
+    telemetryState(
+      props.box.last,
+      props.box.reportPeriodSec,
+      now.value,
+      props.box.charge,
+      props.box.reportOnlyWhenCharging
+    ).online
 );
 const lastText = computed(() => (props.box.last ? ageText(props.box.last, now.value) : "从未上报"));
 

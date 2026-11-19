@@ -1,12 +1,12 @@
 <template>
   <div class="page-container page-flow">
     <PageHeader
-      title="任务单"
-      subtitle="调拨：采样箱从一个单位送到另一个单位；采样：采样机构带箱子去计划地点采样再寄回。"
+      title="任务单（采样）"
+      subtitle="采样机构带箱子去计划地点采样再寄回。送检测站/拒收退回见「送检单」，批量划拨见「调拨单」。"
     >
       <template #actions>
         <el-button
-          v-if="can('task:create:transfer') || can('task:create:sample')"
+          v-if="can('task:create:sample')"
           type="primary"
           :icon="Plus"
           @click="router.push('/task/create')"
@@ -33,11 +33,6 @@
       </el-tabs>
 
       <div class="filter-bar">
-        <el-radio-group v-model="query.kind" @change="reload">
-          <el-radio-button value="">全部类型</el-radio-button>
-          <el-radio-button value="调拨">调拨</el-radio-button>
-          <el-radio-button value="采样">采样</el-radio-button>
-        </el-radio-group>
         <el-tree-select
           v-model="query.orgId"
           :data="orgOptions"
@@ -84,13 +79,7 @@
         <el-table-column label="任务" min-width="220">
           <template #default="{ row }">
             <div class="name">
-              <el-tag
-                size="small"
-                :type="row.kind === '调拨' ? 'primary' : 'success'"
-                effect="plain"
-              >
-                {{ row.kind }}
-              </el-tag>
+              <el-tag size="small" type="success" effect="plain">采样</el-tag>
               <b>{{ row.name }}</b>
               <el-tooltip v-if="row.recordVideo" content="采样机构开箱时录像" placement="top">
                 <el-icon class="video"><VideoCamera /></el-icon>
@@ -99,17 +88,10 @@
             <div class="text-muted mono">{{ row.id }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="路线 / 地点" min-width="200">
+        <el-table-column label="采样单位 / 地点" min-width="200">
           <template #default="{ row }">
-            <template v-if="row.kind === '调拨'">
-              {{ row.fromOrg || "—" }}
-              <span class="arrow">→</span>
-              {{ row.toOrg || "—" }}
-            </template>
-            <template v-else>
-              {{ row.org || "—" }}
-              <div class="text-muted">{{ row.placeAt?.address || row.place || "" }}</div>
-            </template>
+            {{ row.org || "—" }}
+            <div class="text-muted">{{ row.placeAt?.address || row.place || "" }}</div>
           </template>
         </el-table-column>
         <el-table-column label="箱数" width="64" align="center">
@@ -185,7 +167,7 @@ import TimeText from "@/components/biz/TimeText.vue";
 import { usePerm } from "@/composables/usePerm";
 import { useUrlQuery } from "@/composables/useUrlQuery";
 import { taskTone } from "@/utils/tone";
-import { TASK_ACTIONS, stepsOf } from "./status";
+import { TASK_ACTIONS, isEnded, stepsOf } from "./status";
 
 /**
  * 任务单列表：上面按状态分标签并带数量，「待我处理」是我现在能推进的；
@@ -200,7 +182,6 @@ const {
 } = useUrlQuery({
   status: "进行中",
   mine: "",
-  kind: "",
   orgId: "",
   from: "",
   to: "",
@@ -216,9 +197,7 @@ const loading = ref(false);
 const orgOptions = ref<OptionItem[]>([]);
 const dates = ref<string[] | null>(query.from && query.to ? [query.from, query.to] : null);
 const tab = ref(query.mine === "1" ? "mine" : query.status || "全部");
-const filtered = computed(() =>
-  Boolean(query.kind || query.orgId || query.from || query.q || query.boxId)
-);
+const filtered = computed(() => Boolean(query.orgId || query.from || query.q || query.boxId));
 
 const tabs = computed(() => [
   { key: "mine", label: "待我处理", count: counts.value.mine },
@@ -242,7 +221,8 @@ async function load() {
       pageSize: query.pageSize,
       mine: query.mine === "1" ? "1" : undefined,
       status: query.mine === "1" || query.status === "全部" ? undefined : query.status || undefined,
-      kind: query.kind || undefined,
+      // 任务单页只放采样（kind 固定）；送检/划拨各有独立页，不再混进来
+      kind: "采样",
       orgId: query.orgId || undefined,
       from: query.from || undefined,
       to: query.to || undefined,
@@ -293,24 +273,17 @@ watch(
 
 // 表格行在模板里是 DefaultRow，按普通对象收
 type TaskRow = Record<string, unknown> & { kind?: string; status?: string };
-const ended = (row: TaskRow) => ["已取消", "已拒收"].includes(String(row.status));
+// 结束口径和服务端流程校验同一份：以前这里只认已取消/已拒收，已检测、已退回的单子进度条是空的
+const ended = (row: TaskRow) => isEnded(String(row.status));
 function stepOf(row: TaskRow) {
   const steps = stepsOf(row);
-  const index = steps.indexOf(String(row.status));
-  return {
-    index:
-      index < 0
-        ? ["已完成", "已签收"].includes(String(row.status))
-          ? steps.length - 1
-          : -1
-        : index,
-    total: steps.length,
-  };
+  return { index: steps.indexOf(String(row.status)), total: steps.length };
 }
 function progressText(row: TaskRow) {
-  if (ended(row)) return "已结束";
   const { index, total } = stepOf(row);
-  return index >= 0 ? `第 ${index + 1}/${total} 步` : "";
+  if (index >= 0) return `第 ${index + 1}/${total} 步`;
+  // 已取消、已拒收不在步骤序列里，没有第几步可算
+  return ended(row) ? "已结束" : "";
 }
 
 onMounted(async () => {

@@ -41,6 +41,29 @@ function deptInManage(ctx, deptId) {
   if (!scope || scope.all || isAdmin(ctx)) return true;
   return manageIds(scope).includes(String(deptId ?? ""));
 }
+/**
+ * 把 userInScope 的条件翻译成 SQL（L-P2-3）：可管单位里的人，加上自己。
+ * 和 JS 版严格对齐——JS 里 NULL 部门算成空串，所以空串在范围内时要连 NULL 一起放行，
+ * 免得提前筛把人筛没了、JS 权威判定却看不到了。
+ */
+function userScopeSql(scope, selfId) {
+  if (!scope || scope.all) return { sql: "", params: [] };
+  const ids = manageIds(scope).map(String);
+  const parts = [];
+  const params = [];
+  if (ids.length) {
+    parts.push(`dept_id IN (${ids.map(() => "?").join(",")})`);
+    params.push(...ids);
+    if (ids.includes("")) parts.push("dept_id IS NULL");
+  }
+  const self = String(selfId ?? "");
+  if (self) {
+    parts.push("id = ?");
+    params.push(self);
+  }
+  if (!parts.length) return { sql: " WHERE 1 = 0", params };
+  return { sql: ` WHERE ${parts.join(" OR ")}`, params };
+}
 /** 非管理员只能管自己管理范围内的人：人员的部门在范围里，或者就是自己。 */
 function userInScope(ctx, user) {
   const scope = ctx.access?.scope;
@@ -152,6 +175,7 @@ async function guardUser(ctx, id) {
 import { readCoords, readDeptLocation } from "./src/geo/place.js";
 import { randomBytes } from "node:crypto";
 import { readCameras, validateCameras } from "./src/settings/deptCameras.js";
+import { badRequest, conflict } from "./src/domain/AppError.js";
 
 async function record(ctx, action, targetType, targetId, result) {
   try {
@@ -218,38 +242,38 @@ function randomPassword(length = 10) {
 async function readLeader(db, input, policy = SECURITY_DEFAULTS) {
   if (input === undefined) return { keep: true };
   if (input === null || input === "") return { userId: null };
-  if (typeof input !== "object" || Array.isArray(input)) throw new Error("负责人格式不正确");
+  if (typeof input !== "object" || Array.isArray(input)) throw badRequest("负责人格式不正确");
   if (input.userId != null && input.userId !== "") {
     const user = await db.get("SELECT id FROM sys_user WHERE id = ? AND status = 1", [
       String(input.userId),
     ]);
-    if (!user) throw new Error("负责人不存在或已停用");
+    if (!user) throw badRequest("负责人不存在或已停用");
     return { userId: String(user.id) };
   }
   const spec = input.create;
   if (!spec || typeof spec !== "object") return { userId: null };
   const nickname = typeof spec.nickname === "string" ? spec.nickname.trim() : "";
   const username = typeof spec.username === "string" ? spec.username.trim() : "";
-  if (!nickname || nickname.length > 64) throw new Error("请填写负责人姓名");
+  if (!nickname || nickname.length > 64) throw badRequest("请填写负责人姓名");
   if (!/^[A-Za-z0-9_.@-]{3,64}$/.test(username))
-    throw new Error("用户名须为 3–64 位字母、数字或 _ . @ -");
+    throw badRequest("用户名须为 3–64 位字母、数字或 _ . @ -");
   if (await db.get("SELECT id FROM sys_user WHERE username = ?", [username]))
-    throw new Error("用户名已存在");
+    throw conflict("用户名已存在");
   const mobile = typeof spec.mobile === "string" ? spec.mobile.trim() : "";
-  if (mobile.length > 32) throw new Error("手机号格式不正确");
+  if (mobile.length > 32) throw badRequest("手机号格式不正确");
   const roleIds = Array.isArray(spec.roleIds)
     ? [...new Set(spec.roleIds.map(String))].slice(0, 10)
     : [];
   for (const roleId of roleIds) {
     if (!(await db.get("SELECT id FROM sys_role WHERE id = ?", [roleId])))
-      throw new Error("角色不存在");
+      throw badRequest("角色不存在");
   }
   let password = typeof spec.password === "string" ? spec.password : "";
   const generated = !password;
   if (generated) password = randomPassword();
   else {
     const problem = checkPassword(password, policy);
-    if (problem) throw new Error(`初始密码不符合要求：${problem}`);
+    if (problem) throw badRequest(`初始密码不符合要求：${problem}`);
   }
   return { create: { nickname, username, mobile, roleIds, password, generated } };
 }
@@ -384,8 +408,36 @@ async function loadDeptTree(db) {
   return buildDeptTree(rows.map(toDept));
 }
 
-async function loadUsers(db) {
-  const rows = await db.all("SELECT * FROM sys_user");
+/**
+ * 人员列表要用的列（L-P2-3）。写明白，不再 SELECT *：
+ * password_hash、salt、secret_key 这些凭据列根本不会进内存，也就没法被下一层的字段映射漏出去。
+ */
+const USER_COLUMNS = [
+  "id",
+  "username",
+  "nickname",
+  "email",
+  "status",
+  "dept_id",
+  "must_change_password",
+  "locked_until",
+  "password_changed_at",
+  "mobile",
+  "gender",
+  "avatar",
+  "create_time",
+];
+
+/**
+ * 读取人员。给了 scope 时把可见范围（可管单位 + 自己）下推到 SQL（L-P2-3），
+ * userInScope 仍是权威判定，SQL 只做提前筛；两者结果一致。
+ */
+async function loadUsers(db, scope, selfId) {
+  const where = userScopeSql(scope, selfId);
+  const rows = await db.all(
+    `SELECT ${USER_COLUMNS.join(", ")} FROM sys_user${where.sql}`,
+    where.params
+  );
   const links = await db.all("SELECT user_id, role_id FROM sys_user_role");
   const roleIds = new Map();
   for (const link of links) {
@@ -827,7 +879,7 @@ export async function listUsers(ctx) {
       row.nickname || "",
     ])
   );
-  const users = (await loadUsers(ctx.db))
+  const users = (await loadUsers(ctx.db, ctx.access?.scope, ctx.user?.id))
     .filter((user) => userInScope(ctx, user))
     .map((user) => {
       const reason = passwordChangeReason(

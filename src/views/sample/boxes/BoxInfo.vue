@@ -51,7 +51,12 @@
     <SectionCard v-if="canLocation" title="定位" class="span-2">
       <InfoList :items="location" label-width="72px">
         <template #gps>
-          <div v-if="pos.gps" class="fix">
+          <div
+            v-if="pos.gps"
+            class="fix"
+            :class="{ 'is-off': pos.current?.source !== 'GPS' }"
+            data-test="loc-gps-row"
+          >
             <div class="fix__line">
               <span class="mono">{{ coordText(pos.gps.lng, pos.gps.lat) }}</span>
               <FreshTag :time="pos.gps.at" :period-sec="box.reportPeriodSec" />
@@ -63,6 +68,7 @@
               >
                 当前使用
               </el-tag>
+              <el-tag v-else size="small" type="info" effect="plain">没在用</el-tag>
               <button type="button" class="copy" @click="copy(coordText(pos.gps.lng, pos.gps.lat))">
                 复制
               </button>
@@ -72,12 +78,17 @@
               定位时间 {{ fullTime(pos.gps.at) }}，之后一直没定到卫星，现在按基站位置算
             </div>
           </div>
-          <span v-else class="muted">
-            {{ box.gps === "未定位" ? "上报过，但还没定到卫星" : "—" }}
+          <span v-else class="muted" data-test="loc-gps-row">
+            {{ box.gps === "未定位" ? "上报过，但还没定到卫星" : "无记录" }}
           </span>
         </template>
         <template #lbs>
-          <div v-if="pos.lbs" class="fix">
+          <div
+            v-if="pos.lbs"
+            class="fix"
+            :class="{ 'is-off': pos.current?.source !== '基站' }"
+            data-test="loc-lbs-row"
+          >
             <div class="fix__line">
               <span class="mono">{{ coordText(pos.lbs.lng, pos.lbs.lat) }}</span>
               <FreshTag v-if="pos.lbs.at" :time="pos.lbs.at" :period-sec="box.reportPeriodSec" />
@@ -89,6 +100,7 @@
               >
                 当前使用
               </el-tag>
+              <el-tag v-else size="small" type="info" effect="plain">没在用</el-tag>
               <button type="button" class="copy" @click="copy(coordText(pos.lbs.lng, pos.lbs.lat))">
                 复制
               </button>
@@ -96,7 +108,9 @@
             <div v-if="pos.lbs.address" class="fix__addr">{{ pos.lbs.address }}</div>
             <div class="fix__hint">基站定位误差可能有一两公里</div>
           </div>
-          <span v-else class="muted">—</span>
+          <span v-else class="muted" data-test="loc-lbs-row">
+            {{ pos.lastLbsAt ? "有基站记录但没算出坐标" : "无记录" }}
+          </span>
         </template>
       </InfoList>
     </SectionCard>
@@ -111,7 +125,7 @@ import { usePerm } from "@/composables/usePerm";
 import { lifeLabel } from "@/utils/labels";
 import { boxPositions, coordText, round } from "@/utils/position";
 import { fullTime } from "@/utils/time";
-import { BOX_PERM, type SampleBox } from "../data";
+import { BOX_PERM, boxName, imeiText, type SampleBox } from "../data";
 
 /**
  * 采样箱详情 · 设备：它是什么、硬件状况。分五块：身份、归属、运行、电池、定位。
@@ -128,8 +142,15 @@ const timeOrDash = (t?: string | null) => (t ? fullTime(t) : "—");
 const identity = computed<InfoItem[]>(() => {
   const b = props.box;
   const list: InfoItem[] = [
-    { label: "IMEI", value: b.id, mono: true, copy: true, tip: "设备编号，贴在箱体上" },
-    { label: "名称", value: b.name || "—" },
+    {
+      label: "IMEI",
+      value: imeiText(b),
+      mono: true,
+      // 打码过的串抄了也没用，不给复制按钮
+      copy: !b.masked?.includes("imei"),
+      tip: "设备编号，贴在箱体上",
+    },
+    { label: "名称", value: boxName(b, "—") },
   ];
   // ICCID、IMSI、固件版本各要各的权限
   if (can(BOX_PERM.iccid))
@@ -308,6 +329,10 @@ async function copy(text: string) {
   flex-wrap: wrap;
   gap: 4px 10px;
   align-items: center;
+}
+/* 当前没用上的那个来源整行压暗，配合「没在用」标签：避免把几天前的 GPS 看成现在的位置 */
+.fix.is-off {
+  opacity: 0.55;
 }
 .fix__addr {
   margin-top: 2px;

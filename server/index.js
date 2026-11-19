@@ -60,6 +60,9 @@ import { mergeBrandingSettings, readBranding } from "./src/settings/brandingConf
 import { WechatAuth } from "./src/auth/WechatAuth.js";
 import { Mailer } from "./src/integration/Mailer.js";
 import { VideoPlatform } from "./src/integration/VideoPlatform.js";
+import { errorResponse } from "./src/http/errorResponse.js";
+import { corsHeaders, parseCorsOrigins } from "./src/http/cors.js";
+import { backdoorRefusalMessage, checkDebugBackdoors } from "./src/runtimeGuards.js";
 
 const serverRoot = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(serverRoot, "..");
@@ -76,6 +79,11 @@ const acceptance = Boolean(homeDir) && process.env.SAMPLE_ACCEPTANCE === "1";
 if (acceptance)
   console.warn(`[验收] 临时环境 ${homeDir}：登录不校验验证码。线上不要设 SAMPLE_ACCEPTANCE`);
 const port = Number(process.env.PORT) || 8000;
+/** 跨域白名单：默认只放行本机来源，别的来源要显式列在 SAMPLE_CORS_ORIGINS（体检编号 L-P1-7） */
+const corsOptions = {
+  allow: parseCorsOrigins(process.env.SAMPLE_CORS_ORIGINS),
+  allowLoopback: process.env.SAMPLE_CORS_LOOPBACK !== "0",
+};
 
 const state = { installed: false, db: null, config: null };
 const accountSecurity = new AccountSecurity({ policy: () => publicSecurity(state.config) });
@@ -116,9 +124,8 @@ function send(res, status, payload) {
   }
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    // 通配 * 让任何网页都能调这套接口；改成只放行白名单来源（http/cors.js）
+    ...corsHeaders(res.req?.headers?.origin, corsOptions),
   });
   res.end(JSON.stringify(payload));
 }
@@ -127,8 +134,8 @@ function ok(res, data, msg = "一切ok") {
   send(res, 200, { code: "00000", data, msg });
 }
 
-function fail(res, msg, code = "A0001", status = 200) {
-  send(res, status, { code, data: null, msg });
+function fail(res, msg, code = "A0001", status = 200, data = null) {
+  send(res, status, { code, data, msg });
 }
 
 function readBody(req, maxBytes = 10 * 1024 * 1024) {
@@ -713,6 +720,39 @@ const routes = [
     auth: true,
     handler: (ctx) => useSample(ctx, (api) => api.policy.retryVideo(ctx)),
   },
+  // 划拨（B1）：提交即生效 + 整单禁撤。特性开关 box.enableTransferInspect 默认关，
+  // 关时这些端点报「未开通」（A0409），旧 /sample/tasks 行为不变。权限在控制器里按动作查。
+  // candidate-boxes 必须排在 /transfers/:id 前面（matchRoute 首个命中即返回）。
+  {
+    method: "POST",
+    path: "/api/v1/sample/transfers",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.createTransfer(ctx)),
+  },
+  {
+    method: "GET",
+    path: "/api/v1/sample/transfers",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.transfers(ctx)),
+  },
+  {
+    method: "GET",
+    path: "/api/v1/sample/transfers/candidate-boxes",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.transferCandidates(ctx)),
+  },
+  {
+    method: "GET",
+    path: "/api/v1/sample/transfers/:id",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.transferDetail(ctx)),
+  },
+  {
+    method: "POST",
+    path: "/api/v1/sample/transfers/:id/revoke",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.revokeTransfer(ctx)),
+  },
   {
     method: "GET",
     path: "/api/v1/sample/workbench",
@@ -961,7 +1001,7 @@ const routes = [
     perm: "sys:oplog:read",
     handler: visitTrend,
   },
-  { method: "GET", path: "/api/v1/sample/tasks", auth: true, reserved: true },
+  // GET /api/v1/sample/tasks 上面已有真实现（matchRoute 首个命中即返回），这里不再挂一份永远走不到的占位（L-P2-11）
   { method: "GET", path: "/api/v1/sample/alerts", auth: true, reserved: true },
   { method: "GET", path: "/api/v1/sample/commands", auth: true, reserved: true },
 ];
@@ -1407,6 +1447,12 @@ async function saveBox(ctx) {
     !perms?.has("sys:settings:arrive-radius")
   )
     return ctx.fail("没有「修改到达判定半径」权限");
+  // 划拨/送检功能开关：沿用「修改默认上报策略」这项箱子设置写权限（不新增权限码）
+  if (
+    Boolean(before.enableTransferInspect) !== Boolean(after.enableTransferInspect) &&
+    !perms?.has("device:box:policyDefault")
+  )
+    return ctx.fail("没有修改划拨/送检功能开关的权限");
   state.config = next;
   writeFileSync(configPath, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
   chmodSync(configPath, 0o600);
@@ -1601,8 +1647,10 @@ async function streamDownload(res, filename, chunks) {
   res.writeHead(200, {
     "Content-Type": "text/csv; charset=utf-8",
     "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Expose-Headers": "Content-Disposition",
+    ...corsHeaders(res.req?.headers?.origin, {
+      ...corsOptions,
+      expose: ["Content-Disposition"],
+    }),
   });
   for await (const chunk of chunks) {
     if (!res.write(chunk)) await onceEvent(res, "drain");
@@ -1683,7 +1731,7 @@ const httpServer = createServer(async (req, res) => {
       user: null,
       invalidateSessions: (id) => sampleRuntime?.disconnectUser(id),
       ok: (data, msg) => ok(res, data, msg),
-      fail: (msg, code, status) => fail(res, msg, code, status),
+      fail: (msg, code, status, data) => fail(res, msg, code, status, data),
       download: (filename, chunks) => streamDownload(res, filename, chunks),
     };
     try {
@@ -1722,7 +1770,10 @@ const httpServer = createServer(async (req, res) => {
         res.destroy(error);
         return;
       }
-      fail(res, error.message || "系统出错", error.publicCode || "B0001", error.httpStatus || 500);
+      // 只回带码的错误（domain/AppError 或手工带的 publicCode + httpStatus）；
+      // 其余异常原文不外泄，统一 B0001 + 固定文案，原文在这一条请求的诊断日志里（http/errorResponse.js）
+      const out = errorResponse(error);
+      fail(res, out.message, out.code, out.status, out.data ?? null);
     }
   } catch (error) {
     diagnostic.error = error;
@@ -1737,6 +1788,14 @@ httpServer.on("error", (error) => {
 
 loadInstalled()
   .then(async () => {
+    // 后门变量在线上形态下直接拒绝启动（见 src/runtimeGuards.js）
+    const backdoors = checkDebugBackdoors({ config: state.config, homeDir });
+    if (!backdoors.allowed) {
+      const message = backdoorRefusalMessage(backdoors);
+      logSystem({ source: "process", level: "error", kind: "startup", message });
+      console.error(message);
+      process.exit(1);
+    }
     if (state.installed) {
       try {
         const runtime = await startSampleRuntime({

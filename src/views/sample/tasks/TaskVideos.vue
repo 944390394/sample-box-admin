@@ -33,7 +33,7 @@
             </el-tag>
           </span>
           <span class="caption">
-            <b>{{ index + 1 }}. {{ names[video.boxId] || video.boxId }}</b>
+            <b>{{ index + 1 }}. {{ nameOf(video.boxId) }}</b>
             <span>
               开箱 {{ shortTime(video.openedAt || video.recordedAt) }}
               <template v-if="video.distanceM != null">
@@ -78,7 +78,7 @@
 
     <el-dialog
       v-model="player.open"
-      :title="current ? `${names[current.boxId] || current.boxId} · 开箱录像` : ''"
+      :title="current ? `${nameOf(current.boxId)} · 开箱录像` : ''"
       width="860px"
       style="max-width: 96vw"
       destroy-on-close
@@ -107,6 +107,7 @@ import { VideoCamera, VideoPlay } from "@element-plus/icons-vue";
 import API, { formatDistance, type TaskVideo } from "@/api/sample/report-policy";
 import { fullTime, shortTime } from "@/utils/time";
 import { videoTone } from "@/utils/tone";
+import { boxTitle } from "@/utils/boxLabel";
 
 /**
  * 开箱录像：采样机构在采样单位每开一次箱一格，标出录像请求的状态（已请求、录制中、已完成、失败、平台未接入）。
@@ -124,6 +125,8 @@ const props = withDefaults(
 );
 const emit = defineEmits<{ changed: [videos: TaskVideo[]] }>();
 const player = reactive({ open: false, id: "" });
+/** names 里可能是服务端回显的编号（编号就是 IMEI），统一走 boxTitle 再显示。 */
+const nameOf = (id: string) => boxTitle({ id, name: props.names[id] });
 const current = computed(() => props.videos.find((v) => v.id === player.id));
 const retrying = ref("");
 const statusCounts = computed(() => {

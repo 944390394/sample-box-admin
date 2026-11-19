@@ -46,6 +46,7 @@ import TiandituMap, {
   type TiandituPoint,
 } from "@/components/TiandituMap/index.vue";
 import { shortTime, toDate } from "@/utils/time";
+import { boxTitle } from "@/utils/boxLabel";
 
 /**
  * 轨迹地图：采样箱详情和任务详情共用。
@@ -147,7 +148,8 @@ function stayText(stay: Stay) {
     ? `${shortTime(stay.from)} 至 ${shortTime(stay.to)}，${stay.count} 次定位并成一点`
     : shortTime(stay.from);
 }
-const nameOf = (id: string) => props.names[id] || id;
+// 名称可能是服务端的编号回显，也可能压根没有：统一走 boxTitle，整串 IMEI 不会出现在地图点上
+const nameOf = (id: string) => boxTitle({ id, name: props.names[id] });
 
 const lines = computed<TiandituLine[]>(() => {
   const list: TiandituLine[] = [...props.extraLines];

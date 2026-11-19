@@ -163,8 +163,9 @@ export class MemoryBoxStore extends BoxStore {
       if (!box) {
         box = BoxState.createPending(uplink.imei, uplink, receivedAt, this.#allocateName());
       }
-      const kind = box.kindOf(uplink);
-      box.apply(uplink, receivedAt);
+      // apply 返回派生种类、不改入参（R-12）；存储层显式标注 uplink.kind，与 SqlBoxStore 同口径
+      const kind = box.apply(uplink, receivedAt);
+      uplink.kind = kind;
       this.byImei.set(box.imei, box);
       this.byId.set(box.id, box);
       const record = UplinkRecord.capture(box, uplink, receivedAt, kind);

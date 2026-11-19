@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { lockedMinutes } from "../settings/securityConfig.js";
 import { audit } from "../log/audit.js";
+// 纯字符串拼 LIKE 模式，不碰数据库；全库 LIKE 参数只从这一处生成（L-P2-5）
+import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 
 /** 绑定二维码 5 分钟有效。 */
 const TICKET_TTL_MS = 5 * 60000;
@@ -69,8 +71,8 @@ export class WechatAuth {
     const masked = `${phone.slice(0, 3)}****${phone.slice(-4)}`;
     // 人员里的手机号可能带空格、横线、+86：先按后 4 位粗筛，再统一格式比对
     const candidates = await ctx.db.all(
-      "SELECT * FROM sys_user WHERE status = 1 AND mobile LIKE ?",
-      [`%${phone.slice(-4)}%`]
+      `SELECT * FROM sys_user WHERE status = 1 AND mobile LIKE ? ${ESCAPE_SQL}`,
+      [likePattern(phone.slice(-4))]
     );
     const users = candidates.filter((user) => normalizePhone(user.mobile) === phone);
     if (!users.length)

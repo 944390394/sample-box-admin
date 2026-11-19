@@ -48,6 +48,9 @@ const props = defineProps<{
   width?: string;
   height?: string;
 }>();
+const emit = defineEmits<{
+  select: [payload: { seriesName?: string; name?: string; dataIndex?: number }];
+}>();
 
 const chartRef = ref<HTMLDivElement | null>(null);
 let chartInstance: echarts.ECharts | null = null;
@@ -56,6 +59,9 @@ let chartInstance: echarts.ECharts | null = null;
 const initChart = () => {
   if (chartRef.value) {
     chartInstance = echarts.init(chartRef.value);
+    chartInstance.on("click", (p: { seriesName?: string; name?: string; dataIndex?: number }) =>
+      emit("select", { seriesName: p.seriesName, name: p.name, dataIndex: p.dataIndex })
+    );
     if (props.options) {
       chartInstance.setOption(props.options);
     }
@@ -67,15 +73,14 @@ useResizeObserver(chartRef, () => {
   chartInstance?.resize();
 });
 
-// 监听 options 变化，更新图表
+// 浅 watch：options 整包替换时增量更新，不 deep 遍历大对象、不重建实例
 watch(
   () => props.options,
   (newOptions) => {
     if (chartInstance && newOptions) {
-      chartInstance.setOption(newOptions);
+      chartInstance.setOption(newOptions, { lazyUpdate: true });
     }
-  },
-  { deep: true }
+  }
 );
 
 onMounted(() => {

@@ -1,0 +1,71 @@
+// 单据生命周期（当前状态）— 唯一事实源 shared/taskFlow.js（服务端校验与页面进度条共用）
+// 生成：2026-11-19，system-modeler + graphviz。目标态（调拨=批量划拨提交即生效、送检单独立 9 状态）未画入。
+// 通用规则（taskFlow.js:76-91）：除「退回中」外，任何非终态都可取消 → 已取消；图中省略取消边以免淹没主干。
+digraph task_lifecycle {
+  rankdir=TB;
+  fontname="Microsoft YaHei";
+  node [shape=box, style="rounded,filled", fillcolor="#eef3fb", fontname="Microsoft YaHei", fontsize=11];
+  edge [fontname="Microsoft YaHei", fontsize=10];
+  labelloc="t";
+  label="单据生命周期 · 当前状态（shared/taskFlow.js）\n绿=正常终态  灰红=作废终态  虚线=旧单/条件分支";
+
+  subgraph cluster_sampling {
+    label="采样单 TK-（trip：单向 / 双向 / 旧单不填）";
+    style=rounded; color="#4a7ebb";
+    sp_send [label="待寄出"];
+    sp_transit [label="运送中"];
+    sp_wait [label="待采样\n（旧单无 trip 从这里开始，走双向回程）"];
+    sp_doing [label="采样中"];
+    sp_sealed [label="已封箱"];
+    sp_back [label="在途（回程）"];
+    sp_verify [label="待核验"];
+    sp_done [label="已完成", fillcolor="#d9efd9"];
+    sp_signed [label="已签收", fillcolor="#d9efd9"];
+    sp_refused [label="已拒收\n（样品作废，如开箱超限）", fillcolor="#f3d9d9"];
+
+    sp_send -> sp_transit [label="寄出"];
+    sp_transit -> sp_wait [label="到达采样单位"];
+    sp_wait -> sp_doing [label="开始采样"];
+    sp_doing -> sp_sealed [label="封箱"];
+    sp_sealed -> sp_done [label="单向：封箱即完成"];
+    sp_sealed -> sp_back [label="双向：寄回"];
+    sp_back -> sp_verify [label="到达寄出单位"];
+    sp_verify -> sp_signed [label="核验签收（普通接收方）"];
+    sp_verify -> sp_refused [label="拒收"];
+  }
+
+  subgraph cluster_alloc {
+    label="调拨单（现状：物流式签收转移归属；direct=现行建单页免物流）";
+    style=rounded; color="#b08a3e";
+    al_create [label="建单（direct）", shape=ellipse, fillcolor="#fdf6e3"];
+    al_send [label="待寄出（旧单）"];
+    al_transit [label="运送中（旧单）"];
+    al_wait [label="待签收"];
+    al_signed [label="已签收\n归属转移 #handOver\nReportPolicyController.js:1297", fillcolor="#d9efd9"];
+    al_refused [label="已拒收", fillcolor="#f3d9d9"];
+    al_returning [label="退回中\n（不可取消）"];
+    al_returned [label="已退回", fillcolor="#f3d9d9"];
+
+    al_create -> al_wait [label="direct：不定位不发货"];
+    al_send -> al_transit [label="旧单：寄出", style=dashed];
+    al_transit -> al_wait [style=dashed];
+    al_wait -> al_signed [label="签收（普通接收方）"];
+    al_wait -> al_refused [label="拒收不退回"];
+    al_wait -> al_returning [label="拒收并退回"];
+    al_returning -> al_returned [label="寄出方接收退回"];
+  }
+
+  subgraph cluster_inspect {
+    label="检测站分支（签收方为「采样机构」类型单位，task.inspect=true）";
+    style=rounded; color="#5b8a5b";
+    in_wait [label="待检测"];
+    in_done [label="已检测\n（逐台「开始检测」，全部开始后整单结束）", fillcolor="#d9efd9"];
+    in_wait -> in_done [label="每台扫码开始检测"];
+  }
+
+  sp_verify -> in_wait [label="签收（接收方=检测站）\nsignTargetOf", style=dashed];
+  al_wait -> in_wait [label="签收（接收方=检测站）", style=dashed];
+
+  note [shape=note, fillcolor="#fffbe6",
+    label="终态集合（taskFlow.js:26-30）：\n正常结束＝已完成 / 已签收 / 已检测\n作废结束＝已取消 / 已拒收 / 已退回\n「已签收」在检测站单里不是持久状态（签收→待检测）"];
+}

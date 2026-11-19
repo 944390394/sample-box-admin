@@ -20,7 +20,8 @@ export class TaskVideoService {
 
   /** 收到开箱上报时调用。返回新记录的编号，不录像返回 null。不等平台回应。 */
   async onOpen(box, uplink) {
-    if (uplink?.why !== "pad" || !box) return null;
+    // 认派生 kind（uplink.kind），不认原始 why：连续上报的固件开箱只发 why=timer，靠 opens 跳变才派生出 pad
+    if ((uplink?.kind ?? uplink?.why) !== "pad" || !box) return null;
     const task = await this.db.get(
       `SELECT t.id, t.status, t.body FROM sample_task t JOIN sample_task_box m ON m.task_id = t.id
        WHERE m.box_id = ? AND t.kind = '采样' AND t.status IN (${RECORDING.map(() => "?").join(",")})

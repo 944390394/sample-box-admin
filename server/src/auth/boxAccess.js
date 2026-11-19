@@ -1,7 +1,7 @@
 import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
 import { voltagePercent } from "../domain/BatteryEstimate.js";
 import { ALL_PERMS, DEFAULT_ROLE_PERMS, grantsAll } from "./permCatalog.js";
-import { firmwareSupportsRemote } from "../settings/boxConfig.js";
+import { firmwareSupportsRemote, offlineGraceSec } from "../settings/boxConfig.js";
 
 export const BOX = {
   list: "device:box:list",
@@ -74,6 +74,8 @@ export const FIELD_GROUPS = [
       "gpsLat",
       "lbsAddress",
       "gpsAddress",
+      "lastGpsAt",
+      "lastLbsAt",
     ],
   },
   { perm: BOX.iccid, name: "iccid", fields: ["iccid"] },
@@ -82,6 +84,40 @@ export const FIELD_GROUPS = [
 ];
 const STATUS_GROUPS = ["power", "lid", "opens", "signal", "charging", "powerLog", "storage"];
 const IDENTITY_GROUPS = ["iccid", "imsi", "firmware"];
+/**
+ * 「设备标识」这一项的口径。老库里是一项 device:box:identity，迁移 045 拆成了
+ * iccid / imsi / firmware 三项（见 permCatalog 的 SPLIT_045），所以「有没有设备标识权限」
+ * 只能按拆完的三项判断：三项都有才算有。IMEI 也归这项管——现场采样员默认只有工况和位置，
+ * 不该看到整队箱子的 IMEI。
+ */
+const IDENTITY_PERMS = [BOX.iccid, BOX.imsi, BOX.firmware];
+export function identityGranted(perms) {
+  return !perms || IDENTITY_PERMS.every((perm) => perms.has(perm));
+}
+
+/** IMEI 打码：留前 3 位和后 4 位，够现场对上尾号，又抄不走整串。 */
+export function maskImei(imei) {
+  const text = String(imei || "");
+  if (!text) return "";
+  if (text.length < 8) return "****";
+  return `${text.slice(0, 3)}${"*".repeat(text.length - 7)}${text.slice(-4)}`;
+}
+
+/** 现在的箱子编号就是 15 位 IMEI（独立代理键还没落地），凡是这个形态的串都按设备标识处理。 */
+const IMEI_LIKE = /^\d{15}$/;
+
+/**
+ * 「名称」单元格：没起名时 toJSON 会把编号回显进来，而编号就是整串 IMEI（M-1）。
+ * 有设备标识权限的照原样给；没有的要么空着（页面自己写占位），要么给打码副本，绝不下发整串。
+ * 下载文件名不能出现打码串里的星号，所以第二个参数传 false。
+ */
+export function boxNameCell(json, perms, maskedFallback = true) {
+  const name = String(json?.name ?? "");
+  const id = String(json?.id ?? "");
+  if (!name || name !== id || !IMEI_LIKE.test(id)) return name;
+  if (identityGranted(perms)) return name;
+  return maskedFallback ? maskImei(id) : "";
+}
 
 export const FLAGS = ["alert", "offline", "low", "lid", "ready"];
 /** 筛选、计数要看的字段权限：低电量、可调配看电量，开着盖看箱盖状态。 */
@@ -316,27 +352,63 @@ export function canSee(access, box) {
   return Boolean(box.ownerId) && scope.ownerIds.includes(String(box.ownerId));
 }
 
-/** 拼进 WHERE 的范围条件。范围为空时一台都不给。 */
-export function scopeSql(scope) {
+/**
+ * 范围条件的唯一实现（L-P2-2）：单位、保管人、箱子三类 id 拼成 (a IN (?) OR b IN (?))。
+ * 列名由 cols 显式给，不给裸列名做正则替换——正则改 SQL 一旦调用点带进 boxIds，
+ * 裸 id 会静默绑到 sample_box.id 上，范围判断就错了。
+ */
+function scopeCondition(scope, cols) {
   if (!scope || scope.all) return null;
   const parts = [];
   const params = [];
-  if (scope.orgIds.length) {
-    parts.push(`org_id IN (${scope.orgIds.map(() => "?").join(", ")})`);
-    params.push(...scope.orgIds);
-  }
-  if (scope.ownerIds.length) {
-    parts.push(`owner_id IN (${scope.ownerIds.map(() => "?").join(", ")})`);
-    params.push(...scope.ownerIds);
+  // boxIds 是工作台口径：经手进行中任务的箱子也算范围内（箱子可能已改挂单位/保管人）
+  for (const [ids, col] of [
+    [scope.orgIds, cols.org],
+    [scope.ownerIds, cols.owner],
+    [scope.boxIds, cols.box],
+  ]) {
+    if (!ids?.length) continue;
+    parts.push(`${col} IN (${ids.map(() => "?").join(", ")})`);
+    params.push(...ids);
   }
   if (!parts.length) return { sql: "1 = 0", params: [] };
   return { sql: `(${parts.join(" OR ")})`, params };
 }
 
 /**
+ * 拼进 WHERE 的范围条件。范围为空时一台都不给。
+ * prefix 给列名加表别名（sample_box 有别名的查询传 "b."），避免各调用点再手抄一份列名。
+ */
+export function scopeSql(scope, prefix = "") {
+  return scopeCondition(scope, {
+    org: `${prefix}org_id`,
+    owner: `${prefix}owner_id`,
+    box: `${prefix}id`,
+  });
+}
+
+/**
+ * 任务绑定箱子的历史快照口径：箱子的单位和保管人以 sample_task_box 建单时的快照为准，
+ * 现在改挂了也还认那份快照，所以取 COALESCE(现在的箱子, 快照)；箱子编号只认快照表。
+ */
+export function historicalScopeSql(scope) {
+  return scopeCondition(scope, {
+    org: "COALESCE(b.org_id,m.org_id,'')",
+    owner: "COALESCE(b.owner_id,m.owner_id,'')",
+    box: "m.box_id",
+  });
+}
+
+/**
  * 没有权限的字段直接拿掉，masked 告诉页面哪几块是无权查看而不是没数据（按 FIELD_GROUPS 的名字）。
  * 工况七项都没有时另记 status，设备标识三项都没有时另记 identity，旧页面照样能判断。
  * remote：设备固件支不支持远程抹除、读本机日志。不受「查看固件版本」影响，页面不用再看版本号。
+ *
+ * imei 是唯一不删只打码的：箱子编号现在就是 IMEI，页面导航、筛选、二维码全靠 id，删了整个页面就散了，
+ * 所以无权限时把 imei 换成打码副本、masked 里记 "imei"。等编号换成独立代理键（见 refactor-plans）
+ * 之后 id 不再等于 IMEI，这里就能直接删。
+ * name 也跟着收口（M-1）：没起名时 BoxState.toJSON 把编号回显进 name，无权限时这个回显要清空，
+ * 否则「名称」列、导出 CSV 的名称列等于又下发一遍整串 IMEI。
  */
 export function maskBox(json, perms) {
   const remote = firmwareSupportsRemote(json.firmware);
@@ -347,6 +419,13 @@ export function maskBox(json, perms) {
     if (perms.has(group.perm)) continue;
     for (const field of group.fields) delete copy[field];
     masked.push(group.name);
+  }
+  if (!identityGranted(perms)) {
+    copy.imei = maskImei(copy.imei || copy.id);
+    masked.push("imei");
+    // M-1：编号是 15 位纯数字、name 又和编号一模一样，才是 toJSON 的回显；
+    // 真起过名的、老数据 BOX-001 那种非 IMEI 编号都不动，别把正常内容清掉。
+    if (IMEI_LIKE.test(copy.id) && copy.name === copy.id) copy.name = "";
   }
   if (STATUS_GROUPS.every((name) => masked.includes(name))) masked.push("status");
   if (IDENTITY_GROUPS.every((name) => masked.includes(name))) masked.push("identity");
@@ -375,7 +454,22 @@ export function usableMv(usable, reserve) {
 
 export function flagMatch(box, flag, limits) {
   const last = String(box.last || "");
-  const online = Boolean(last) && last >= limits.onlineSince;
+  // 与 SqlBoxStore.onlineSql 同口径：仅充电且未充电豁免；有自身周期用 3×周期，否则用 onlineSince（R-4 收敛）
+  const reportedAt = last ? Date.parse(last.replace(" ", "T")) : NaN;
+  const seconds = Number(box.reportPeriodSec);
+  const period = Number.isInteger(seconds) && seconds >= 5 ? seconds : null;
+  const exempt = Boolean(box.reportOnlyWhenCharging) && Number(box.charge) === 0;
+  const within =
+    period == null
+      ? last >= limits.onlineSince
+      : Number.isFinite(reportedAt) && Date.now() - reportedAt <= period * 3000;
+  // B3/#18 宽限：占用且从未上报，建单后 grace 内不算离线（与 onlineSql 同口径）
+  const boundAt = String(box.boundTaskAt || "");
+  const boundPending =
+    !last &&
+    Boolean(boundAt) &&
+    Date.now() - Date.parse(boundAt.replace(" ", "T")) <= offlineGraceSec() * 1000;
+  const online = (Boolean(last) && (exempt || within)) || boundPending;
   const mv = Number(box.batteryMv);
   if (flag === "alert") return Boolean(box.alert);
   if (flag === "offline") return !online;

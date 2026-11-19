@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ENDED, ENDED_SQL, initialOf, nextOf } from "./taskFlow.js";
+import { ENDED, ENDED_SQL, initialOf, nextOf, prefixOf } from "./taskFlow.js";
+import { formatTimestamp } from "../domain/Clock.js";
 import { voidBoxIds } from "./taskPlaces.js";
 import {
   currentBoxSettings,
@@ -8,6 +9,8 @@ import {
   firmwareSupportsQueueAck,
   firmwareSupportsLink,
 } from "./boxConfig.js";
+import { badRequest, conflict, noPermission, notVisible } from "../domain/AppError.js";
+import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
 
 export function supportsDispatch(firmware) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(firmware));
@@ -33,14 +36,14 @@ export function validatePolicy(input) {
     input.reportPeriodSec < 5 ||
     input.reportPeriodSec > 3600
   )
-    throw new Error("上报周期必须是 5–3600 秒的整数");
-  if (typeof input.reportOnlyWhenCharging !== "boolean") throw new Error("请选择定时上报模式");
+    throw badRequest("上报周期必须是 5–3600 秒的整数");
+  if (typeof input.reportOnlyWhenCharging !== "boolean") throw badRequest("请选择定时上报模式");
   if (input.indicators != null && typeof input.indicators !== "boolean")
-    throw new Error("请选择指示灯模式");
+    throw badRequest("请选择指示灯模式");
   if (input.moduleLed != null && typeof input.moduleLed !== "boolean")
-    throw new Error("请选择模块指示灯模式");
+    throw badRequest("请选择模块指示灯模式");
   if (input.periodicGps != null && typeof input.periodicGps !== "boolean")
-    throw new Error("请选择定位策略");
+    throw badRequest("请选择定位策略");
   return {
     ...(typeof input.periodicGps === "boolean" ? { periodicGps: input.periodicGps } : {}),
     reportPeriodSec: input.reportPeriodSec,
@@ -87,6 +90,138 @@ export function resolvePolicy(single, batch, task, boxId) {
 
 const parse = (v) => (v ? JSON.parse(v) : null);
 const stamped = (v) => (v ? { ...validatePolicy(v), revision: randomUUID() } : null);
+
+/**
+ * 划拨提交守卫（§3.2 G-A/G-B/G-C）：向导候选箱（candidate-boxes）与提交端点用同一函数，
+ * 不会出现「向导能选、提交被拒」。合格返回 null；否则 {reasonCode, reason, taskName?, taskStatus?}。
+ * 历史上开过盖/做过检测不拦（D-9）：那是撤销时相对本单基线的判定，建单时基线还不存在。
+ */
+export async function transferBlock(db, box, target = null) {
+  if (!box) return { reasonCode: "BOX_MISSING", reason: "采样箱已删除或停用，请刷新后重试" };
+  if (box.life === "停用")
+    return { reasonCode: "BOX_DISABLED", reason: "采样箱已删除或停用，请刷新后重试" };
+  // 与 createTask 的 busy 查询同款：未结束单占用（检测站已开始检测的箱子不算占用）。
+  // 划拨两态 ∈ ENDED，所以划拨单不会拦自己。
+  const busy = await db.get(
+    `SELECT t.name,t.status FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.status NOT IN (${ENDED_SQL}) AND m.inspected_at IS NULL LIMIT 1`,
+    [box.id]
+  );
+  if (busy)
+    return {
+      reasonCode: "IN_ACTIVE_TASK",
+      reason: `${box.name || box.id} 已在任务单「${busy.name}」里，那张单结束或取消后才能再绑定`,
+      taskName: busy.name,
+      taskStatus: busy.status,
+    };
+  if (target && String(box.org_id ?? "") === String(target.id))
+    return { reasonCode: "ALREADY_TARGET", reason: `${box.name || box.id} 已属于 ${target.name}` };
+  return null;
+}
+
+/**
+ * 撤销划拨逐台守卫（§4.2，判定顺序 IN_ACTIVE_TASK → OPENED_AFTER → INSPECTED → ORG_MOVED，
+ * 一台只报第一条命中）。撤销事务内实时判定与详情展示共用。可撤返回 null。
+ * 已开箱只用 opens 增量（D-7）：lid 是瞬时态，合盖后又能撤会留下漏洞。
+ */
+export async function revokeBlock(db, box, link, task) {
+  if (!box) return { reasonCode: "ORG_MOVED", reason: "箱子已删除，无法退回原公司" };
+  const busy = await db.get(
+    `SELECT t.name,t.status FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.status NOT IN (${ENDED_SQL}) AND t.id<>? AND m.inspected_at IS NULL LIMIT 1`,
+    [box.id, task.id]
+  );
+  if (busy)
+    return {
+      reasonCode: "IN_ACTIVE_TASK",
+      reason: `已进入未结束任务「${busy.name}」（${busy.status}）`,
+      taskName: busy.name,
+      taskStatus: busy.status,
+    };
+  const delta = Number(box.opens || 0) - Number(link?.opens_start || 0);
+  if (delta > 0)
+    return {
+      reasonCode: "OPENED_AFTER",
+      reason: `划拨后已开箱（箱盖异常开启 ×${delta}），不满足未开箱条件`,
+      opensDelta: delta,
+    };
+  const inspected = await db.get(
+    "SELECT t.name FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND m.inspected_at IS NOT NULL AND t.id<>? LIMIT 1",
+    [box.id, task.id]
+  );
+  if (inspected)
+    return {
+      reasonCode: "INSPECTED",
+      reason: `已完成开箱检测（${inspected.name} · 已检测），不满足未检测条件`,
+    };
+  if (String(box.org_id ?? "") !== String(task.to_org_id ?? "")) {
+    const org = await db.get("SELECT name FROM sys_dept WHERE id=?", [String(box.org_id ?? "")]);
+    const where = org?.name || String(box.org_id ?? "") || "总公司";
+    return { reasonCode: "ORG_MOVED", reason: `归属已改挂到${where}` };
+  }
+  return null;
+}
+
+/**
+ * 建单时寄出单位下面的所有部门（R-5 自控制器层移入）：只有还挂在这些单位名下的箱子才跟着交接。
+ * 旧数据没有 fromOrgId，退回按单位名找一个同名部门；都对不上时返回 null 表示不拦。
+ */
+export function senderOrgIds(depts, task) {
+  const orgId = String(task.fromOrgId ?? "");
+  if (orgId) return new Set(collectDeptIds(buildDeptTree(depts), orgId) || [orgId]);
+  const byName = depts
+    .filter((row) => String(row.name) === String(task.fromOrg || ""))
+    .map((row) => String(row.id));
+  return task.fromOrg && byName.length === 1 ? new Set(byName) : null;
+}
+
+/**
+ * 签收时的归属交接（R-5）：与状态推进在同一个事务里直接写 sample_box。
+ * 改造前是 transition 提交后控制器逐台调 boxes.updateBox（各自独立事务），
+ * 中途失败会留下「已签收但归属只移了一半」；现在任一台失败整体回滚，状态与归属都不留半成品。
+ * 跳过守卫语义不变：建单后被改挂到别的单位（不在寄出方子树）的箱子跳过并记录，不静默拉走；
+ * 箱子已删除同样跳过。归属判定在行锁（MySQL FOR UPDATE）之后做，读写之间没有竞态窗口。
+ * 返回 { moved, skipped }；skipped 带 where（现挂单位名）供控制器提交后写运行日志，
+ * 持久化/响应时只取 { boxId, reason }。
+ */
+async function handOverBoxes(tx, task, ids, signerFit = "none") {
+  const moved = [];
+  const skipped = [];
+  if (!ids.length) return { moved, skipped };
+  const depts = await tx.all("SELECT id, parent_id AS parentId, name, sort FROM sys_dept");
+  const nameOf = new Map(depts.map((row) => [String(row.id), row.name]));
+  // null = 判不出寄出单位（旧单只存了单位名），沿用改造前的无条件交接，不批量跳过
+  const fromIds = senderOrgIds(depts, task);
+  // 签收人不在这张单的接收单位里时，别把他写成这批箱子的保管人：
+  // 保管人会让自己数据范围里的账号看到这些箱子，等于给外来账号开了一条读取通道。
+  const custodian = task.signerId && signerFit !== "foreign" ? String(task.signerId) : "";
+  const owner = custodian ? String(task.signer ?? "") : "—";
+  // 与 createTransfer/revokeTransfer 同一加锁顺序（排序后逐台 FOR UPDATE），避免交叉死锁
+  for (const boxId of [...ids].sort()) {
+    const box = await tx.get(
+      "SELECT id, org_id FROM sample_box WHERE id=?" +
+        (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+      [boxId]
+    );
+    if (!box) {
+      skipped.push({ boxId, reason: "箱子已删除" });
+      continue;
+    }
+    const current = String(box.org_id ?? "");
+    if (fromIds && !fromIds.has(current)) {
+      const where = nameOf.get(current) || current || "总公司";
+      skipped.push({ boxId, reason: `已改挂到${where}`, where });
+      continue;
+    }
+    await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id=?, owner=? WHERE id=?", [
+      String(task.toOrgId),
+      task.toOrg,
+      custodian,
+      owner,
+      boxId,
+    ]);
+    moved.push(boxId);
+  }
+  return { moved, skipped };
+}
 
 export class ReportPolicy {
   constructor(db) {
@@ -194,7 +329,7 @@ export class ReportPolicy {
   }
 
   async save(ids, layer, policy) {
-    if (!["single", "batch"].includes(layer)) throw new Error("策略层级不正确");
+    if (!["single", "batch"].includes(layer)) throw badRequest("策略层级不正确");
     const value = stamped(policy);
     await this.db.transaction(async (tx) => {
       for (const id of ids) {
@@ -202,7 +337,7 @@ export class ReportPolicy {
           "SELECT id FROM sample_box WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
           [id]
         );
-        if (!box) throw new Error("采样箱已删除，请刷新后重试");
+        if (!box) throw conflict("采样箱已删除，请刷新后重试");
         const row = await tx.get("SELECT * FROM box_report_policy WHERE box_id=?", [id]);
         const single = layer === "single" ? JSON.stringify(value) : row?.single_json || null;
         const batch = layer === "batch" ? JSON.stringify(value) : row?.batch_json || null;
@@ -292,7 +427,8 @@ export class ReportPolicy {
   async observe(box, uplink) {
     // Flash replay describes the policy at the event time, possibly before a reboot.
     if (uplink.backfill) return;
-    if (uplink.why === "boot")
+    // 派生 kind 优先：连续上报的固件重启只发 why=timer + opens=0，认 why 就漏掉这次重启、不清投递记录
+    if ((uplink.kind ?? uplink.why) === "boot")
       await this.db.run("DELETE FROM box_report_delivery WHERE box_id=?", [box.id]);
     if (
       uplink.policyVersion == null ||
@@ -321,7 +457,8 @@ export class ReportPolicy {
   }
 
   async createTask(input, actor = {}) {
-    const id = `TK-${Date.now()}-${randomUUID().slice(0, 6)}`;
+    // 单号前缀按 kind：采样 TK-、送检 IN-（划拨走 createTransfer，AL-）。前缀只是显示，kind 才是权威。
+    const id = `${prefixOf(input.kind)}${Date.now()}-${randomUUID().slice(0, 6)}`;
     const initial = initialOf(input);
     // 带寄送的采样单：接收方是采样单位，记进 to_org_id，采样单位不管箱子也能看到这张单
     const toOrgId = input.kind === "采样" && input.trip ? input.orgId : input.toOrgId;
@@ -332,6 +469,8 @@ export class ReportPolicy {
         Object.entries(input.overrides || {}).map(([k, v]) => [k, stamped(v)])
       ),
     };
+    // is_inspect 真列（050）：送检单恒 1；采样/旧调拨送检测站的按 body.inspect，与统计侧 LIKE 判定同源
+    const isInspect = input.kind === "送检" || body.inspect === true ? 1 : 0;
     await this.db.transaction(async (tx) => {
       const snapshots = new Map();
       for (const boxId of [...input.boxIds].sort()) {
@@ -340,7 +479,7 @@ export class ReportPolicy {
             (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
           [boxId]
         );
-        if (!box || box.life === "停用") throw new Error("采样箱已删除或停用，请刷新后重试");
+        if (!box || box.life === "停用") throw conflict("采样箱已删除或停用，请刷新后重试");
         // 一台箱子同时只能在一张没结束的任务单里（还没开始的也算）
         // 检测站已开始检测的箱子，这张单对它来说已经结束
         const busy = await tx.get(
@@ -348,7 +487,7 @@ export class ReportPolicy {
           [boxId]
         );
         if (busy)
-          throw new Error(
+          throw conflict(
             `${box.name || boxId} 已在任务单「${busy.name}」里，那张单结束或取消后才能再绑定`
           );
         snapshots.set(boxId, box);
@@ -365,7 +504,7 @@ export class ReportPolicy {
         );
       }
       await tx.run(
-        "INSERT INTO sample_task (id,name,kind,status,body,created_at,from_org_id,to_org_id) VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO sample_task (id,name,kind,status,body,created_at,from_org_id,to_org_id,is_inspect) VALUES (?,?,?,?,?,?,?,?,?)",
         [
           id,
           input.name,
@@ -375,6 +514,7 @@ export class ReportPolicy {
           new Date().toISOString(),
           input.fromOrgId || null,
           toOrgId || null,
+          isInspect,
         ]
       );
       for (const boxId of input.boxIds) {
@@ -386,6 +526,7 @@ export class ReportPolicy {
         // 建单就占用：箱子显示「在途」，选箱时不再出现在「可用」里。
         // 任务策略：旧固件等任务开始才生效；1.0.17 起建单即按 assignedPolicies 快照下发，任务期间不变
         await tx.run("UPDATE sample_box SET life='在途' WHERE id=? AND life='未使用'", [boxId]);
+        await syncBoundTask(tx, boxId);
       }
       await this.refresh(input.boxIds, tx);
       await addTaskLog(tx, { taskId: id, status: initial, action: "创建", actor });
@@ -394,10 +535,373 @@ export class ReportPolicy {
     return id;
   }
 
-  /** note、detail 记进流转记录；action 不填按状态取默认动作名。返回推进前的状态。 */
-  async transition(id, status, { actor = {}, note = "", detail = null, action = "" } = {}) {
+  /**
+   * 创建划拨单（§3.2）：提交即生效。单据、箱单快照、归属迁移在同一个 db.transaction 里写完，
+   * 任一步失败整体回滚（归属不得残留）；不调 boxes.updateBox（它另开事务）、不写 box_active_task、
+   * 不改 life、不下发任务策略——划拨两态 ∈ ENDED，不是任务、不占用箱子。
+   * clientToken 幂等（051 transfer_request）：重复提交返回原 task_id，不重复转移。
+   * actor 可带 scope（控制器传 ctx.access.scope）：目标公司必须在操作人范围内，口径同单箱 assign。
+   */
+  async createTransfer(input, actor = {}) {
+    const name = String(input?.name ?? "").trim();
+    if (!name || name.length > 120) throw badRequest("请填写划拨单名称");
+    const toOrgId = String(input?.toOrgId ?? "");
+    if (!toOrgId) throw badRequest("请选择目标公司");
+    const boxIds = [
+      ...new Set((Array.isArray(input?.boxIds) ? input.boxIds : []).map((id) => String(id))),
+    ];
+    if (!boxIds.length) throw badRequest("请选择要划拨的采样箱");
+    if (boxIds.length > 500) throw badRequest("一张划拨单最多 500 台箱子，请分批提交");
+    const note = String(input?.note ?? "").slice(0, 1000);
+    const clientToken = String(input?.clientToken ?? "").slice(0, 64);
+    const scope = actor.scope || null;
+
+    // 幂等先查一次（事务外快路径）；锁内还会再查一次兜住并发双击
+    if (clientToken) {
+      const prior = await this.db.get("SELECT task_id FROM transfer_request WHERE client_token=?", [
+        clientToken,
+      ]);
+      if (prior) return { id: prior.task_id, idempotent: true };
+    }
+
+    const id = `AL-${Date.now()}-${randomUUID().slice(0, 6)}`;
+    const createdAt = new Date().toISOString();
+    let result = null;
+    await this.db.transaction(async (tx) => {
+      const target = await tx.get("SELECT id,name FROM sys_dept WHERE id=? AND status=1", [
+        toOrgId,
+      ]);
+      if (!target) throw badRequest("目标公司不存在或已停用");
+      if (scope && !scope.all && !scope.orgIds.includes(String(target.id)))
+        throw noPermission("只能划拨到自己范围内的单位");
+      if (clientToken) {
+        const prior = await tx.get("SELECT task_id FROM transfer_request WHERE client_token=?", [
+          clientToken,
+        ]);
+        if (prior) {
+          result = { id: prior.task_id, idempotent: true };
+          return;
+        }
+      }
+      // 与 createTask 同一加锁顺序（boxIds 排序后逐台 FOR UPDATE），避免交叉死锁
+      const sorted = [...boxIds].sort();
+      const snapshots = new Map();
+      const blocked = [];
+      for (const boxId of sorted) {
+        const box = await tx.get(
+          "SELECT id,name,life,org_id,owner_id,opens FROM sample_box WHERE id=?" +
+            (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+          [boxId]
+        );
+        const hit = await transferBlock(tx, box, { id: String(target.id), name: target.name });
+        if (hit) blocked.push({ boxId, code: boxId, name: box?.name || boxId, ...hit });
+        else snapshots.set(boxId, box);
+      }
+      // 整单拒（D-2）：不做部分成功，逐台原因一次性回给页面
+      if (blocked.length)
+        throw Object.assign(conflict(blocked[0].reason), {
+          data: { blocked, totalCount: boxIds.length, blockedCount: blocked.length },
+        });
+
+      const depts = await tx.all("SELECT id,name FROM sys_dept");
+      const orgNameOf = new Map(depts.map((row) => [String(row.id), row.name]));
+      const ownerIds = [
+        ...new Set(sorted.map((bid) => String(snapshots.get(bid).owner_id ?? "")).filter(Boolean)),
+      ];
+      const owners = ownerIds.length
+        ? await tx.all(
+            `SELECT id,nickname FROM sys_user WHERE id IN (${ownerIds.map(() => "?").join(",")})`,
+            ownerIds
+          )
+        : [];
+      const ownerNameOf = new Map(owners.map((row) => [String(row.id), row.nickname]));
+      const fromMap = new Map();
+      const boxes = [];
+      for (const boxId of sorted) {
+        const box = snapshots.get(boxId);
+        const orgId = String(box.org_id ?? "");
+        const orgName = orgNameOf.get(orgId) || orgId || "总公司";
+        const bucket = fromMap.get(orgId) || { orgId, orgName, count: 0 };
+        bucket.count += 1;
+        fromMap.set(orgId, bucket);
+        const ownerId = String(box.owner_id ?? "");
+        boxes.push({
+          boxId,
+          code: boxId,
+          name: box.name || boxId,
+          fromOrgId: orgId,
+          fromOrg: orgName,
+          fromOwnerId: ownerId,
+          fromOwner: ownerNameOf.get(ownerId) || "",
+          life: box.life,
+          revocable: true,
+        });
+      }
+      const from = [...fromMap.values()];
+      // from_org_id 单值列表达不了跨公司批量：存 NULL，「原公司」一律读 sample_task_box 快照（D-12）
+      const body = {
+        kind: "划拨",
+        name,
+        toOrg: target.name,
+        toOrgId: String(target.id),
+        from,
+        note,
+        boxIds: sorted,
+        ...(clientToken ? { clientToken } : {}),
+        createdBy: String(actor.name || "").slice(0, 64),
+        createdById: String(actor.id || ""),
+      };
+      await tx.run(
+        "INSERT INTO sample_task (id,name,kind,status,body,created_at,from_org_id,to_org_id,is_inspect) VALUES (?,?,?,?,?,?,?,?,0)",
+        [id, name, "划拨", "已划拨", JSON.stringify(body), createdAt, null, String(target.id)]
+      );
+      for (const boxId of sorted) {
+        const box = snapshots.get(boxId);
+        // 快照 = 撤销时的回滚目标（唯一权威来源）；opens_start = 「划拨后是否开箱」的基线
+        await tx.run(
+          "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id,opens_start) VALUES (?,?,?,?,?)",
+          [id, boxId, box.org_id, box.owner_id, Number(box.opens) || 0]
+        );
+        // 归属即时转移，与单据同一事务。保管人清空：旧保管人不应再跨公司看到这批箱子
+        await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id='', owner='' WHERE id=?", [
+          String(target.id),
+          target.name,
+          boxId,
+        ]);
+      }
+      await addTaskLog(tx, {
+        taskId: id,
+        status: "已划拨",
+        action: "提交划拨",
+        actor,
+        note,
+        detail: {
+          count: sorted.length,
+          from: boxes.map((b) => ({
+            boxId: b.boxId,
+            code: b.code,
+            name: b.name,
+            orgId: b.fromOrgId,
+            orgName: b.fromOrg,
+            ownerName: b.fromOwner,
+          })),
+          toOrgId: String(target.id),
+          toOrgName: target.name,
+        },
+      });
+      if (clientToken)
+        await tx.run(
+          "INSERT INTO transfer_request (client_token,task_id,created_at) VALUES (?,?,?)",
+          [clientToken, id, createdAt]
+        );
+      result = { id, idempotent: false };
+    });
+    return result;
+  }
+
+  /**
+   * 撤销划拨（§4）：仅 kind=划拨 且 status=已划拨 可撤。事务内锁单锁箱后逐台实时判定四类守卫，
+   * 任一不合格 → 整单禁撤（状态不变、归属不动），409 带逐台原因；全合格 → 归属退回建单快照
+   * （sample_task_box.org_id/owner_id）+ status=已撤销 + 审计。不删行：箱单与日志全部保留。
+   * 已撤销不可再撤，也没有「撤销撤销」（D-8）。
+   */
+  async revokeTransfer(taskId, { reason = "", actor = {} } = {}) {
+    const note = String(reason ?? "").trim();
+    if (!note || note.length > 100) throw badRequest("请填写撤销原因（100 字以内）");
+    let result = null;
+    await this.db.transaction(async (tx) => {
+      const task = await tx.get(
+        "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+        [taskId]
+      );
+      if (!task) throw notVisible("划拨单不存在或不在你的管理范围内");
+      if (task.kind !== "划拨") throw conflict("只有划拨单可以撤销");
+      if (task.status === "已撤销") throw conflict("这张划拨单已撤销，不能重复撤销");
+      if (task.status !== "已划拨") throw conflict("任务状态已改变，请刷新后重试");
+      const links = await tx.all(
+        "SELECT box_id,org_id,owner_id,opens_start FROM sample_task_box WHERE task_id=? ORDER BY box_id",
+        [taskId]
+      );
+      const boxes = [];
+      const restored = [];
+      let blockedCount = 0;
+      for (const link of links) {
+        const box = await tx.get(
+          "SELECT id,name,life,org_id,owner_id,opens FROM sample_box WHERE id=?" +
+            (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+          [link.box_id]
+        );
+        const hit = await revokeBlock(tx, box, link, task);
+        const entry = { boxId: link.box_id, code: link.box_id, name: box?.name || link.box_id };
+        if (hit) {
+          blockedCount += 1;
+          boxes.push({ ...entry, ok: false, ...hit });
+          continue;
+        }
+        // 退回目标 = 建单快照；名称按当前部门/人员表解析，快照 owner_id 为空串按空处理（显示「—」）
+        const orgId = String(link.org_id ?? "");
+        const orgRow = orgId ? await tx.get("SELECT name FROM sys_dept WHERE id=?", [orgId]) : null;
+        const ownerId = String(link.owner_id ?? "");
+        const ownerRow = ownerId
+          ? await tx.get("SELECT nickname FROM sys_user WHERE id=?", [ownerId])
+          : null;
+        const toOrg = orgRow?.name || orgId || "总公司";
+        const owner = ownerRow?.nickname || "";
+        restored.push({ ...entry, toOrgId: orgId, toOrg, ownerId, owner });
+        boxes.push({
+          ...entry,
+          ok: true,
+          restoreTo: { orgId, orgName: toOrg, ownerName: owner || "—" },
+        });
+      }
+      if (blockedCount)
+        throw Object.assign(conflict(`存在 ${blockedCount} 台不可撤销箱子，整单禁止撤销。`), {
+          data: {
+            canRevoke: false,
+            banner: "整单禁止撤销",
+            confirmLabel: "整单不可撤销",
+            totalCount: links.length,
+            blockedCount,
+            okCount: links.length - blockedCount,
+            boxes,
+          },
+        });
+      const revokedAt = new Date().toISOString();
+      for (const item of restored)
+        await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id=?, owner=? WHERE id=?", [
+          item.toOrgId,
+          item.toOrg,
+          item.ownerId,
+          item.owner,
+          item.boxId,
+        ]);
+      // 带 status 条件：并发第二次撤销落到 0 行 → 整体回滚
+      const updated = await tx.run(
+        "UPDATE sample_task SET status='已撤销' WHERE id=? AND status='已划拨'",
+        [taskId]
+      );
+      if (!Number(updated?.changes ?? updated?.affectedRows ?? 0))
+        throw conflict("任务状态已改变，请刷新后重试");
+      await addTaskLog(tx, {
+        taskId,
+        status: "已撤销",
+        action: "撤销划拨",
+        actor,
+        note,
+        at: revokedAt,
+        detail: {
+          count: restored.length,
+          restored: restored.map((r) => ({
+            boxId: r.boxId,
+            code: r.code,
+            name: r.name,
+            toOrgId: r.toOrgId,
+            toOrgName: r.toOrg,
+            ownerId: r.ownerId,
+            ownerName: r.owner,
+          })),
+        },
+      });
+      result = {
+        id: taskId,
+        status: "已撤销",
+        revokedAt,
+        restoredCount: restored.length,
+        restored,
+        log: { action: "撤销划拨", actorName: String(actor.name || ""), at: revokedAt },
+      };
+    });
+    return result;
+  }
+
+  /**
+   * 划拨单读模型（§6.2）：创建响应、幂等重放、详情共用。
+   * 「原公司」一律按 sample_task_box 快照聚合（跨公司批量时 from 多条，D-12）；
+   * status=已划拨 时逐台实时评估撤销守卫，给 revocable/reasonCode。
+   */
+  async transferView(taskId) {
+    const row = await this.db.get("SELECT * FROM sample_task WHERE id=? AND kind='划拨'", [taskId]);
+    if (!row) return null;
+    const body = parse(row.body) || {};
+    const links = await this.db.all(
+      "SELECT box_id,org_id,owner_id,opens_start FROM sample_task_box WHERE task_id=? ORDER BY box_id",
+      [taskId]
+    );
+    const depts = await this.db.all("SELECT id,name FROM sys_dept");
+    const orgNameOf = new Map(depts.map((d) => [String(d.id), d.name]));
+    const ownerIds = [...new Set(links.map((l) => String(l.owner_id ?? "")).filter(Boolean))];
+    const owners = ownerIds.length
+      ? await this.db.all(
+          `SELECT id,nickname FROM sys_user WHERE id IN (${ownerIds.map(() => "?").join(",")})`,
+          ownerIds
+        )
+      : [];
+    const ownerNameOf = new Map(owners.map((u) => [String(u.id), u.nickname]));
+    const fromMap = new Map();
+    const boxes = [];
+    for (const link of links) {
+      const box = await this.db.get("SELECT id,name,life,org_id,opens FROM sample_box WHERE id=?", [
+        link.box_id,
+      ]);
+      const orgId = String(link.org_id ?? "");
+      const orgName = orgNameOf.get(orgId) || orgId || "总公司";
+      const bucket = fromMap.get(orgId) || { orgId, orgName, count: 0 };
+      bucket.count += 1;
+      fromMap.set(orgId, bucket);
+      const ownerId = String(link.owner_id ?? "");
+      const hit = row.status === "已划拨" ? await revokeBlock(this.db, box, link, row) : null;
+      boxes.push({
+        boxId: link.box_id,
+        code: link.box_id,
+        name: box?.name || link.box_id,
+        fromOrgId: orgId,
+        fromOrg: orgName,
+        fromOwnerId: ownerId,
+        fromOwner: ownerNameOf.get(ownerId) || "",
+        life: box?.life || "",
+        revocable: row.status === "已划拨" && !hit,
+        ...(hit ? { reasonCode: hit.reasonCode, reason: hit.reason } : {}),
+      });
+    }
+    const revokeLog =
+      row.status === "已撤销"
+        ? await this.db.get(
+            "SELECT created_at,note FROM sample_task_log WHERE task_id=? AND action='撤销划拨' ORDER BY created_at DESC LIMIT 1",
+            [taskId]
+          )
+        : null;
+    return {
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      name: row.name,
+      createdAt: row.created_at,
+      toOrg: {
+        id: String(row.to_org_id ?? ""),
+        name: body.toOrg || orgNameOf.get(String(row.to_org_id ?? "")) || "",
+      },
+      from: [...fromMap.values()],
+      boxCount: links.length,
+      boxes,
+      steps: [],
+      ...(revokeLog ? { revokedAt: revokeLog.created_at, revokeReason: revokeLog.note || "" } : {}),
+    };
+  }
+
+  /**
+   * note、detail 记进流转记录；action 不填按状态取默认动作名。
+   * handOver（R-5）：签收时传 { signerFit }，归属交接与状态更新同事务执行，任一台失败整体回滚；
+   * 跳过明细持久化进本条流转记录的 detail.handOver，任务详情读最近一次交接结果。
+   * 返回 { from: 推进前的状态, handOver: { moved, skipped } | null }。
+   */
+  async transition(
+    id,
+    status,
+    { actor = {}, note = "", detail = null, action = "", handOver = null } = {}
+  ) {
     let from = "";
     let changed = [];
+    let handOverResult = null;
     await this.db.transaction(async (tx) => {
       const task = await tx.get(
         "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
@@ -407,7 +911,7 @@ export class ReportPolicy {
         !task ||
         !nextOf({ ...JSON.parse(task.body), kind: task.kind }, task.status).includes(status)
       )
-        throw new Error("任务状态已改变，请刷新后重试");
+        throw conflict("任务状态已改变，请刷新后重试");
       const ids = await tx.all("SELECT box_id FROM sample_task_box WHERE task_id=?", [id]);
       if (["执行中", "运送中", "采样中"].includes(status)) {
         for (const { box_id } of ids) {
@@ -420,7 +924,7 @@ export class ReportPolicy {
             );
             continue;
           }
-          if (busy) throw new Error(`${box_id} 已有执行中的任务`);
+          if (busy) throw conflict(`${box_id} 已有执行中的任务`);
           await tx.run("INSERT INTO box_active_task (box_id,task_id) VALUES (?,?)", [box_id, id]);
           // 任务开始后箱子算「在途」，结束后没有别的进行中任务再回到「未使用」
           await tx.run("UPDATE sample_box SET life='在途' WHERE id=? AND life='未使用'", [box_id]);
@@ -476,6 +980,27 @@ export class ReportPolicy {
         id,
         task.status,
       ]);
+      // 签收交接（R-5）：归属迁移与状态更新同事务。放在状态更新之后、流转记录之前，
+      // 跳过明细才能记进本条签收记录；任一台抛错整个事务回滚（状态、占用、归属都不留半成品）。
+      if (handOver) {
+        handOverResult = await handOverBoxes(
+          tx,
+          JSON.parse(task.body),
+          ids.map((b) => b.box_id),
+          handOver.signerFit || "none"
+        );
+        detail = {
+          ...(detail || {}),
+          handOver: {
+            movedCount: handOverResult.moved.length,
+            skippedCount: handOverResult.skipped.length,
+            // detail 列是 TEXT（MySQL 64KB）：超大单只持久化前 200 台明细，总数另记
+            skipped: handOverResult.skipped
+              .slice(0, 200)
+              .map(({ boxId, reason }) => ({ boxId, reason })),
+          },
+        };
+      }
       await addTaskLog(tx, {
         taskId: id,
         status,
@@ -490,9 +1015,10 @@ export class ReportPolicy {
       );
       from = task.status;
       changed = ids.map((b) => b.box_id);
+      for (const boxId of changed) await syncBoundTask(tx, boxId);
     });
     this.onPolicyChanged?.(changed);
-    return from;
+    return { from, handOver: handOverResult };
   }
 
   /**
@@ -507,16 +1033,16 @@ export class ReportPolicy {
         "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
         [taskId]
       );
-      if (!task || task.status !== "待检测") throw new Error("这张单不在「待检测」，请刷新后重试");
+      if (!task || task.status !== "待检测") throw conflict("这张单不在「待检测」，请刷新后重试");
       const link = await tx.get(
         "SELECT box_id, inspected_at FROM sample_task_box WHERE task_id=? AND box_id=?",
         [taskId, boxId]
       );
-      if (!link) throw new Error("这台箱子不在这张任务单里");
-      if (link.inspected_at) throw new Error("这台箱子已经开始检测了");
+      if (!link) throw conflict("这台箱子不在这张任务单里");
+      if (link.inspected_at) throw conflict("这台箱子已经开始检测了");
       // 开箱超过任务上限的箱子样品作废（强制签收也一样），不检测；整张单结束时一起释放
       const voided = await voidBoxIds(tx, taskId, JSON.parse(task.body));
-      if (voided.has(boxId)) throw new Error("这台箱子开箱次数超过上限，样品已作废，不能开始检测");
+      if (voided.has(boxId)) throw conflict("这台箱子开箱次数超过上限，样品已作废，不能开始检测");
       const now = new Date().toISOString();
       const by = String(actor.name || "").slice(0, 64);
       await tx.run(
@@ -572,6 +1098,7 @@ export class ReportPolicy {
         });
       }
       await this.refresh(released, tx);
+      for (const boxId of released) await syncBoundTask(tx, boxId);
       result = { done: left === 0, left };
     });
     this.onPolicyChanged?.([boxId]);
@@ -601,6 +1128,26 @@ export const TASK_ACTIONS = {
   // 带寄送的采样单：箱子寄到采样单位
   待采样: "确认到达",
 };
+
+/**
+ * B3/#18 占用锚点维护：重算箱子当前「未结束且未检测」的最早任务，写 bound_task_id/bound_task_at。
+ * bound_task_at 用 formatTimestamp 墙钟（与 onlineSql 的 now 同格式），避免 ISO/墙钟混比。
+ * 在建单/流转/开始检测的事务内调用，保证占用与锚点同事务一致。
+ */
+async function syncBoundTask(db, boxId) {
+  const row = await db.get(
+    `SELECT t.id, t.created_at FROM sample_task_box m JOIN sample_task t ON t.id=m.task_id
+     WHERE m.box_id=? AND t.status NOT IN (${ENDED_SQL}) AND m.inspected_at IS NULL
+     ORDER BY t.created_at LIMIT 1`,
+    [boxId]
+  );
+  const at = row ? formatTimestamp(new Date(row.created_at)).slice(0, 19) : "";
+  await db.run("UPDATE sample_box SET bound_task_id=?, bound_task_at=? WHERE id=?", [
+    row ? row.id : "",
+    at,
+    boxId,
+  ]);
+}
 
 async function addTaskLog(
   tx,

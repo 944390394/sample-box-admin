@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 
 export const LOG_READ = "sys:runtime-log:read";
 export const LOG_DETAIL = "sys:runtime-log:detail";
@@ -207,9 +208,10 @@ export class SystemLog {
       values.push(n);
     }
     if (query.q) {
-      where.push("(message LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR code = ?)");
+      // 反斜杠在 MySQL 里还是字符串转义符，同一份 SQL 到两种库行为不一样；统一用 ! 转义（L-P2-5）
+      where.push(`(message LIKE ? ${ESCAPE_SQL} OR path LIKE ? ${ESCAPE_SQL} OR code = ?)`);
       const q = String(query.q).slice(0, 100),
-        like = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+        like = likePattern(q);
       values.push(like, like, q);
     }
     const filter = where.join(" AND ");

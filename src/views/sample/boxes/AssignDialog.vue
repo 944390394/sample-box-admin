@@ -7,7 +7,7 @@
     @open="onOpen"
   >
     <p v-if="box" class="lead">
-      {{ box.name || box.id }} · 现在属于 {{ box.org || "总公司" }}
+      {{ boxTitle(box) }} · 现在属于 {{ box.org || "总公司" }}
       <template v-if="box.owner && box.owner !== '—'">，由 {{ box.owner }} 保管</template>
     </p>
     <el-form label-width="84px" @submit.prevent>
@@ -51,6 +51,7 @@
 
 <script setup lang="ts">
 import SampleBoxAPI, { type AssignOptions } from "@/api/sample/box";
+import { boxTitle } from "@/utils/boxLabel";
 import type { SampleBox } from "../data";
 
 const props = defineProps<{ modelValue: boolean; box: SampleBox | null }>();
@@ -106,7 +107,7 @@ async function save() {
       orgId: orgId.value,
       ownerId: ownerId.value ?? "",
     });
-    ElMessage.success(`${props.box.id} 已分配`);
+    ElMessage.success(`${boxTitle(props.box)} 已分配`);
     emit("saved", next);
     emit("update:modelValue", false);
   } finally {

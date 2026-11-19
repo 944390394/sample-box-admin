@@ -205,8 +205,8 @@ export const TASK_PERMS = [
   item(
     9410,
     "task:create:transfer",
-    "新建调拨任务",
-    "把采样箱调到另一个单位，签收后归属变更",
+    "新建划拨单",
+    "批量把采样箱划拨给另一个公司，提交即生效、归属立即转移",
     "task",
     "do",
     TASK_ENTER
@@ -216,6 +216,24 @@ export const TASK_PERMS = [
     "task:create:sample",
     "新建采样任务",
     "让采样机构带箱子去计划地点采样",
+    "task",
+    "do",
+    TASK_ENTER
+  ),
+  item(
+    9420,
+    "task:create:inspect",
+    "新建送检单",
+    "把采样箱送检测站，签收后逐台开始检测",
+    "task",
+    "do",
+    TASK_ENTER
+  ),
+  item(
+    9421,
+    "task:transfer:revoke",
+    "撤销划拨",
+    "整单退回原公司；任一箱子已进入任务/已开箱/已检测则整单禁撤",
     "task",
     "do",
     TASK_ENTER

@@ -81,7 +81,9 @@ import { kindLabel, lidLabel, lifeLabel } from "@/utils/labels";
 import { ago, clock, lastDays } from "@/utils/time";
 import { kindTone, lifeTone, taskTone } from "@/utils/tone";
 import { telemetryState } from "../boxes/telemetry";
+import { isEnded } from "../tasks/status";
 import { BOX_PERM, EVENT_PERMS, TASK_CREATE, type SampleBox } from "../data";
+import { boxTitle, imeiText } from "@/utils/boxLabel";
 
 /** 实时地图点一台箱子，右侧抽屉看它的状态、位置、当前和最近的任务、最近事件。 */
 const props = defineProps<{ modelValue: boolean; box: SampleBox | null }>();
@@ -90,15 +92,21 @@ const router = useRouter();
 const can = usePerm();
 const tasks = ref<PolicyTask[]>([]);
 const events = ref<BoxLogItem[]>([]);
-const title = computed(() => props.box?.name || props.box?.id || "采样箱");
+const title = computed(() => (props.box ? boxTitle(props.box) : "采样箱"));
 const online = computed(() =>
-  props.box ? telemetryState(props.box.last, props.box.reportPeriodSec, clock.value).online : false
+  props.box
+    ? telemetryState(
+        props.box.last,
+        props.box.reportPeriodSec,
+        clock.value,
+        props.box.charge,
+        props.box.reportOnlyWhenCharging
+      ).online
+    : false
 );
 const current = computed(
-  () =>
-    tasks.value.find(
-      (t) => !["已完成", "已签收", "已拒收", "已取消", "已检测", "已退回"].includes(t.status)
-    ) || null
+  // 结束口径和服务端流程校验同一份，别在这儿抄一份状态清单
+  () => tasks.value.find((t) => !isEnded(t.status)) || null
 );
 const canCreate = computed(
   () => props.box?.life === "未使用" && TASK_CREATE.some((perm) => can(perm))
@@ -112,7 +120,7 @@ const subtitle = computed(() => {
   const b = props.box;
   if (!b) return "";
   const keeper = b.owner && b.owner !== "—" ? `${b.owner} 保管` : "无保管人";
-  return `IMEI ${b.id} · ${b.org || "总公司"} · ${keeper}`;
+  return `IMEI ${imeiText(b)} · ${b.org || "总公司"} · ${keeper}`;
 });
 const facts = computed(() => {
   const b = props.box;

@@ -98,6 +98,9 @@ export interface TaskOptions {
   users: { id: string; name: string; dept: string }[];
   myOrgId: string;
   arriveRadiusM: number;
+  /** 系统默认上报周期（创建任务时「本任务统一」的初始值），来自服务端设置，不在前端写死。 */
+  defaultReportPeriodSec: number;
+  defaultReportOnlyWhenCharging: boolean;
 }
 export interface TaskBox {
   id: string;
@@ -127,6 +130,8 @@ export interface TaskBox {
   /** 送检测站的单：这台箱子扫码「开始检测」的时间和人，没开始为空串。 */
   inspectedAt?: string;
   inspectedBy?: string;
+  /** 开箱超限样品作废：不检测，整单结束时一起释放。 */
+  voided?: boolean;
 }
 /** 签收核验里的一台箱子：状态、本次开箱、离收货点多远，issues 是它的问题。 */
 export interface ReceiveBox {
@@ -214,6 +219,8 @@ export interface TaskLog {
   detail: {
     target: { role: string; address: string };
     boxes: { id: string; distanceM: number | null; source: string }[];
+    /** 签收那一步才有：归属交接结果（R-5）。 */
+    handOver?: { movedCount: number; skippedCount: number; skipped: HandOverSkipped[] };
   } | null;
 }
 /** 一路监控：status 未接入 / 在线 / 离线；liveUrl 有值时可以直接看。 */
@@ -224,6 +231,25 @@ export interface TaskCamera {
   status: string;
   liveUrl: string;
   playbackUrl: string;
+}
+
+/** 签收交接（R-5）：跳过的箱子——建单后已改挂他单位或已删除，未随单改归属。 */
+export interface HandOverSkipped {
+  boxId: string;
+  reason: string;
+}
+/** 签收响应里的交接结果：moved 是已改归属的箱子，skipped 是被守卫拦下的。 */
+export interface HandOverResult {
+  moved: string[];
+  skipped: HandOverSkipped[];
+}
+/** 任务详情里的最近一次签收交接（持久化在签收流转记录里，明细最多 200 台，总数看 skippedCount）。 */
+export interface HandOverInfo {
+  movedCount?: number | null;
+  skippedCount?: number;
+  skipped: HandOverSkipped[];
+  at?: string;
+  by?: string;
 }
 
 export interface TaskDetail {
@@ -237,6 +263,8 @@ export interface TaskDetail {
   logs: TaskLog[];
   /** 在等你收货时的签收核验；有 problems 时不能直接签收，只能拒收或强制签收。 */
   check?: ReceiveCheck | null;
+  /** 最近一次签收交接（R-5）：skipped 非空时页面要警示「N 台箱子未随单交接」。 */
+  handOver?: HandOverInfo | null;
   tracks?: TaskTrack[];
   events?: TaskEvent[];
   videos?: TaskVideo[];
@@ -344,7 +372,16 @@ export default {
       params: boxId ? { boxId } : undefined,
     }),
   transition: (id: string, status: string, note = "") =>
-    request({
+    request<
+      unknown,
+      {
+        saved: boolean;
+        /** 旧字段（[{id, reason}]），保留兼容；新代码用 handOver。 */
+        handOverSkipped?: { id: string; reason: string }[];
+        /** 签收交接结果（R-5）：非签收步骤为 null。 */
+        handOver?: HandOverResult | null;
+      }
+    >({
       url: `${base}/tasks/${encodeURIComponent(id)}/status`,
       method: "put",
       data: { status, note },

@@ -23,7 +23,7 @@
         <el-input
           v-model="query.q"
           :prefix-icon="Search"
-          placeholder="名称或 IMEI"
+          :placeholder="canImei ? '名称或 IMEI' : '名称'"
           clearable
           style="width: 220px"
           @input="debouncedReload"
@@ -69,14 +69,10 @@
         <el-table-column label="采样箱" min-width="180" fixed="left">
           <template #default="{ row }">
             <div class="name-cell">
-              <span
-                class="dot"
-                :class="onlineOf(row) ? 'on' : 'off'"
-                :title="onlineOf(row) ? '在线' : '离线'"
-              />
+              <span class="dot" :class="onlineOf(row) ? 'on' : 'off'" :title="dotTitle(row)" />
               <div class="name-text">
-                <b>{{ row.name || row.id }}</b>
-                <div class="text-muted mono">{{ row.id }}</div>
+                <b>{{ boxName(row) }}</b>
+                <div class="text-muted mono">{{ imeiText(row) }}</div>
                 <div v-if="row.alert" class="danger alert-line" :title="row.alert">
                   {{ row.alert }}
                 </div>
@@ -84,9 +80,12 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="状态 · 上报" width="120">
+        <el-table-column label="状态 · 上报" width="170">
           <template #default="{ row }">
             <el-tag size="small" :type="lifeTone(row.life)">{{ lifeLabel(row.life) }}</el-tag>
+            <el-tag v-if="graceOf(row) && !graceOf(row)!.over" size="small" type="info" class="ml">
+              待上线
+            </el-tag>
             <el-tag
               v-if="row.wipe"
               type="danger"
@@ -98,6 +97,15 @@
             </el-tag>
             <div class="text-muted" :class="{ offline: !onlineOf(row) }">
               <TimeText :value="row.last" />
+            </div>
+            <div
+              v-if="graceOf(row)"
+              class="grace-line"
+              :class="{ off: graceOf(row)!.over }"
+              :title="`建单时间 ${graceOf(row)!.full} · 宽限 ${Math.round(taskOfflineGraceSec / 60)} 分钟`"
+            >
+              {{ graceOf(row)!.text }}
+              <span class="abs">{{ graceOf(row)!.abs }}</span>
             </div>
           </template>
         </el-table-column>
@@ -200,7 +208,7 @@
 
     <el-dialog v-model="activate.open" title="激活采样箱" width="460px" style="max-width: 94vw">
       <p v-if="activate.box" class="lead">
-        IMEI {{ activate.box.id }}
+        IMEI {{ imeiText(activate.box) }}
         <template v-if="activate.box.iccid">· ICCID {{ activate.box.iccid }}</template>
       </p>
       <p class="text-muted">
@@ -215,7 +223,7 @@
             v-model="activate.name"
             maxlength="32"
             show-word-limit
-            :placeholder="`不填用默认名称：${activate.box?.name || ''}`"
+            :placeholder="boxNameHint(activate.box)"
             @keyup.enter="doActivate"
           />
         </el-form-item>
@@ -261,7 +269,18 @@ import AssignDialog from "./AssignDialog.vue";
 import ReportPolicyDialog from "./ReportPolicyDialog.vue";
 import { deleteArchive, policyStatusText, policyStatusType, wipeTitle } from "./management";
 import { telemetryState } from "./telemetry";
-import { BOX_PERM, type SampleBox } from "../data";
+import { graceHint, graceState, type GraceState } from "./grace";
+import { useBoxFeatures } from "@/composables/useBoxFeatures";
+import {
+  BOX_PERM,
+  IMEI_PERMS,
+  boxName,
+  boxNameHint,
+  boxTitle,
+  imeiText,
+  realBoxName,
+  type SampleBox,
+} from "../data";
 
 /**
  * 采样箱清单：顶部指标卡兼作筛选（状态、告警、离线、低电、开着盖），下面按名称、IMEI、所属单位搜。
@@ -273,6 +292,9 @@ const { state: query, sync } = useUrlQuery({ q: "", orgId: "", tile: "", page: 1
 
 const rows = ref<SampleBox[]>([]);
 const total = ref(0);
+// scopeTotal：不含状态/快捷筛选的总台数（服务端算好的，比把卡片数字加起来准）；
+// total 是列表行数，随筛选变。两个口径分开写，别混着用（L-P0-3）。
+const scopeTotal = ref<number | null>(null);
 const counts = ref<Record<string, number>>({});
 const flags = ref<Partial<BoxFlags>>({});
 const loading = ref(false);
@@ -281,13 +303,20 @@ const selected = ref<SampleBox[]>([]);
 const orgOptions = ref<OptionItem[]>([]);
 // 跟全站时钟走：在线点和「x 秒前」每秒刷新
 const now = clock;
+// 建单后未上线宽限（秒）由服务端设置下发，不写死「1 小时」
+const { taskOfflineGraceSec, loadBoxFeatures } = useBoxFeatures();
 const tile = ref(query.tile);
 const current = ref<SampleBox | null>(null);
 const assignOpen = ref(false);
 const canBatch = computed(() => can(policyPerm.batch));
 const filtered = computed(() => Boolean(query.q || query.orgId || tile.value));
+// 没有「设备标识」权限时服务端只按名称匹配，搜索框也别写 IMEI
+const canImei = computed(() => IMEI_PERMS.every((perm) => can(perm)));
 const subtitle = computed(() => {
-  const all = Object.values(counts.value).reduce((n, v) => n + v, 0);
+  const all =
+    scopeTotal.value ??
+    // 老的服务端不给 scopeTotal 时退回把卡片数字加起来（四类状态之外还有别的历史值时会少算）
+    Object.values(counts.value).reduce((n, v) => n + v, 0);
   return `共 ${all} 台。新设备第一次上电会自动建档为「${lifeLabel("待激活")}」，核对后激活即可使用。`;
 });
 
@@ -323,6 +352,7 @@ const tiles = computed<StatTile[]>(() => {
       label: "离线",
       value: flags.value.offline ?? 0,
       tone: flags.value.offline ? "warning" : "default",
+      hint: offlineHint.value,
     },
   ];
   if (can(BOX_PERM.power) || can(BOX_PERM.lid)) {
@@ -376,6 +406,7 @@ async function load() {
     if (mine !== seq) return;
     rows.value = page.list;
     total.value = page.total;
+    scopeTotal.value = page.scopeTotal ?? null;
     counts.value = page.counts || {};
     flags.value = page.flags || {};
   } finally {
@@ -413,8 +444,31 @@ watch(
 
 function onlineOf(input: Partial<SampleBox>) {
   const row = input as SampleBox;
-  return telemetryState(row.last, row.reportPeriodSec, now.value).online;
+  return telemetryState(
+    row.last,
+    row.reportPeriodSec,
+    now.value,
+    row.charge,
+    row.reportOnlyWhenCharging
+  ).online;
 }
+/** 建单后未上线宽限徽标：占用且从未上报才适用；宽限内中性待上线（不计离线），超宽限计离线。 */
+function graceOf(input: Partial<SampleBox>): GraceState | null {
+  const row = input as SampleBox;
+  return graceState(row.boundTaskAt, row.last, taskOfflineGraceSec.value, now.value);
+}
+/** 状态点 title：宽限内「待上线…（宽限内不计离线）」，超宽限「离线…」，其余按在线/离线。 */
+function dotTitle(input: Partial<SampleBox>) {
+  const grace = graceOf(input);
+  if (grace) {
+    return grace.over ? `离线 · ${grace.text}` : `待上线 · ${grace.text}（宽限内不计离线）`;
+  }
+  return onlineOf(input) ? "在线" : "离线";
+}
+/** 离线卡 hint 的第二情形随服务端宽限变（「或建单后 X未上线」）。 */
+const offlineHint = computed(
+  () => `超过 3 个上报周期未上报 · ${graceHint(taskOfflineGraceSec.value)}`
+);
 function signalText(csq: number | null | undefined) {
   if (csq == null) return "—";
   if (csq === 99 || csq <= 0) return "无信号";
@@ -455,7 +509,7 @@ async function onMore(cmd: string, input: Partial<SampleBox>) {
   const row = input as SampleBox;
   current.value = row;
   if (cmd === "assign") assignOpen.value = true;
-  else if (cmd === "policy") openPolicy({ boxId: row.id, boxName: row.name });
+  else if (cmd === "policy") openPolicy({ boxId: row.id, boxName: boxTitle(row) });
   else if (cmd === "rename") await rename(row);
   else if (cmd === "disable") await changeLife(row, "disable");
   else if (cmd === "restore") await changeLife(row, "restore");
@@ -465,7 +519,7 @@ async function onMore(cmd: string, input: Partial<SampleBox>) {
       row.id,
       Boolean(row.remote) && can(BOX_PERM.wipe),
       Boolean(row.wipe),
-      row.name || row.id
+      boxTitle(row)
     ))
   )
     await load();
@@ -476,9 +530,10 @@ async function rename(input: Partial<SampleBox>) {
   try {
     const { value } = await ElMessageBox.prompt(
       "1–32 个字，不能和别的采样箱重名",
-      `改名称 · ${row.id}`,
+      `改名称 · ${boxTitle(row)}`,
       {
-        inputValue: row.name,
+        // 没起名时服务端把编号回显进 name，直接拿它当默认值会把 IMEI 填进输入框、顺手保存就变成真名
+        inputValue: realBoxName(row),
         inputValidator: (text: string) =>
           (text.trim().length >= 1 && text.trim().length <= 32) || "名称要 1–32 个字",
         confirmButtonText: "保存",
@@ -499,8 +554,8 @@ async function changeLife(input: Partial<SampleBox>, action: "disable" | "restor
   try {
     await ElMessageBox.confirm(
       action === "disable"
-        ? `停用后「${row.name}」不能被任务选中，可以随时恢复。`
-        : `恢复后「${row.name}」回到${lifeLabel("未使用")}状态。`,
+        ? `停用后「${boxTitle(row)}」不能被任务选中，可以随时恢复。`
+        : `恢复后「${boxTitle(row)}」回到${lifeLabel("未使用")}状态。`,
       `${verb}采样箱`,
       {
         type: action === "disable" ? "warning" : "info",
@@ -570,6 +625,7 @@ async function exportList() {
 
 let poll = 0;
 onMounted(async () => {
+  void loadBoxFeatures();
   void load();
   poll = window.setInterval(() => void load(), 10000);
   try {
@@ -578,7 +634,11 @@ onMounted(async () => {
     orgOptions.value = [];
   }
 });
-onBeforeUnmount(() => window.clearInterval(poll));
+onBeforeUnmount(() => {
+  window.clearInterval(poll);
+  // 搜索框的 300 毫秒防抖也要拆：离开页面时还在排队的话，回来后它会朝已卸载的列表发请求
+  window.clearTimeout(typing);
+});
 </script>
 
 <style scoped>
@@ -626,6 +686,22 @@ onBeforeUnmount(() => window.clearInterval(poll));
   white-space: nowrap;
 }
 .offline {
+  color: var(--el-text-color-placeholder);
+}
+/* 建单后未上线宽限：宽限内中性（--text-3），超宽限 warn。文案随服务端宽限配置变。 */
+.grace-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.grace-line.off {
+  color: var(--status-warn, var(--el-color-warning));
+}
+.grace-line .abs {
   color: var(--el-text-color-placeholder);
 }
 .ops {

@@ -71,6 +71,7 @@ import {
 } from "@/api/sample/report-policy";
 import type { Component } from "vue";
 import { fullTime, toDate } from "@/utils/time";
+import { boxTitle } from "@/utils/boxLabel";
 
 /**
  * 任务动态：流转记录、开关箱和上电、进出任务地点、失联和信号不好，合在一条时间线里，新的在上，按天分组。
@@ -100,7 +101,8 @@ interface Item {
 }
 
 const filter = ref<"" | Kind>("");
-const nameOf = (id: string) => props.names?.[id] || id;
+// 名称可能是服务端回显的编号，也可能压根没查到：统一走 boxTitle，整串 IMEI 不会写进时间线
+const nameOf = (id: string) => boxTitle({ id, name: props.names?.[id] });
 
 /** 同一台箱子开箱前后 10 分钟内的录像算这次开箱的。 */
 function videoFor(boxId: string, time: string) {

@@ -3,7 +3,7 @@
     <div class="chosen">
       <span class="label">已选 {{ chosen.length }} 台</span>
       <el-tag v-for="box in chosen" :key="box.id" closable size="small" @close="remove(box.id)">
-        {{ box.name || box.id }}
+        {{ boxTitle(box) }}
       </el-tag>
       <span v-if="!chosen.length" class="muted">在下面的表格里勾选，最多 100 台</span>
       <el-button v-if="chosen.length" link type="danger" size="small" @click="clearAll">
@@ -15,7 +15,7 @@
       <el-input
         v-model="query.q"
         :prefix-icon="Search"
-        placeholder="名称或 IMEI，回车搜索"
+        :placeholder="canImei ? '名称或 IMEI，回车搜索' : '名称，回车搜索'"
         clearable
         style="width: 260px"
         @keyup.enter="reload"
@@ -41,8 +41,8 @@
       <el-table-column type="selection" width="48" :selectable="selectable" />
       <el-table-column label="采样箱" min-width="180">
         <template #default="{ row }">
-          <b>{{ row.name || row.id }}</b>
-          <div class="muted">{{ row.id }}</div>
+          <b>{{ boxName(row) }}</b>
+          <div class="muted">{{ imeiText(row) }}</div>
         </template>
       </el-table-column>
       <el-table-column label="所属单位" min-width="140">
@@ -100,7 +100,8 @@
 import type { TableInstance } from "element-plus";
 import { Search } from "@element-plus/icons-vue";
 import BoxAPI from "@/api/sample/box";
-import type { SampleBox } from "../data";
+import { usePerm } from "@/composables/usePerm";
+import { IMEI_PERMS, boxName, boxTitle, imeiText, type SampleBox } from "../data";
 
 /**
  * 采样箱选择表：带单位、状态、电量和位置，可以跨页勾选。
@@ -113,6 +114,9 @@ const emit = defineEmits<{
 }>();
 
 const MAX = 100;
+const can = usePerm();
+/** 服务端没有「设备标识」权限时只按名称匹配（SqlBoxStore.page 的 matchImei），搜索框提示跟着口径走。 */
+const canImei = computed(() => IMEI_PERMS.every((perm) => can(perm)));
 const tableRef = ref<TableInstance>();
 const rows = ref<SampleBox[]>([]);
 const total = ref(0);

@@ -50,6 +50,9 @@ export class IngestService {
 
   async #acceptOne(uplink) {
     return this.gate.run(uplink.imei, async () => {
+      // 待抹除：这一包照常入库，只把抹除指令附在下行里。
+      // 修复前这里直接 return，设备在确认抹除前的数据全丢，最长 30 天不上报（体检编号 L-P1-2）。
+      let wipeLine = null;
       if (this.commands) {
         if (uplink.dump) {
           // 板子回传的本机日志不进上报流水，也不确认，避免多出的 ok 把补传队列的记录确认掉。
@@ -57,7 +60,7 @@ export class IngestService {
           return { box: null, silent: true };
         }
         const verdict = await this.commands.onUplink(uplink);
-        if (verdict?.wipe) return { box: null, downlink: this.commands.wipeLine(verdict.wipe) };
+        if (verdict?.wipe) wipeLine = this.commands.wipeLine(verdict.wipe);
         if (verdict?.done) {
           // 设备已经抹除并重启：这时才删旧档案，这一包按新设备建档。
           await this.boxes.removeWiped(uplink.imei);
@@ -70,30 +73,20 @@ export class IngestService {
         }
       }
       if (this.queue && uplink.q != null) {
-        if (this.boxes.commitQueuedUplink) {
-          const committed = await this.boxes.commitQueuedUplink(
-            uplink,
-            this.clock.now(),
-            this.queue
-          );
-          committed.netLink = uplink.netLink;
-          if (committed.record) await this.#publish(uplink, committed);
-          return committed;
-        }
-        const state = await this.queue.seen(uplink);
-        if (state?.dup) {
-          // 重发的旧记录：已经存过，不再入库也不改箱子状态，只回累计确认号让设备清队列。
-          const box = await this.boxes.findByImei(uplink.imei);
-          if (box) return { box, ack: state.ack, netLink: uplink.netLink };
-        }
-        const committed = await this.#commitAndPublish(uplink);
-        committed.ack = await this.queue.record(uplink);
+        // 补传记录的「查重、入库、累计确认」必须在同一个事务里做完，缺这一步就会两条乱序连接
+        // 同时判定「没见过」而重复入库，所以只认支持事务入库的存储（L-P2-1）。
+        // 原来这里还有一条非事务的 queue.seen()/record() 退路：只有测试用的 MemoryBoxStore 会走到，
+        // 生产上永远进不来，留着一个有竞态的分支只会误导后来人，已删。
+        if (!this.boxes.commitQueuedUplink)
+          throw new Error("补传队列要求存储实现 commitQueuedUplink 事务入库");
+        const committed = await this.boxes.commitQueuedUplink(uplink, this.clock.now(), this.queue);
         committed.netLink = uplink.netLink;
+        if (committed.record) await this.#publish(uplink, committed, wipeLine);
+        // 重发的旧记录：这一包不再入库、也不改箱子状态，但待抹除的下行照常回，别多等一轮
+        else if (wipeLine) committed.downlink = wipeLine;
         return committed;
       }
-      const committed = await this.#commitAndPublish(uplink);
-      committed.netLink = uplink.netLink;
-      return committed;
+      return await this.#commitAndPublish(uplink, wipeLine);
     });
   }
 
@@ -112,12 +105,13 @@ export class IngestService {
     });
   }
 
-  async #commitAndPublish(uplink) {
+  async #commitAndPublish(uplink, wipeLine = null) {
     const committed = await this.boxes.commitUplink(uplink, this.clock.now());
-    return this.#publish(uplink, committed);
+    committed.netLink = uplink.netLink;
+    return this.#publish(uplink, committed, wipeLine);
   }
 
-  async #publish(uplink, committed) {
+  async #publish(uplink, committed, wipeLine = null) {
     if (this.policies) {
       await this.policies.observe(committed.box, uplink);
       committed.box.reportPolicy = await this.policies.get(committed.box);
@@ -131,7 +125,7 @@ export class IngestService {
       }
     }
     await this.events.publish(committed);
-    if (this.videos && uplink.why === "pad") {
+    if (this.videos && (uplink.kind ?? uplink.why) === "pad") {
       // 采样机构开箱录像：只登记并异步请求平台，失败不影响上报
       try {
         await this.videos.onOpen(committed.box, uplink);
@@ -146,6 +140,8 @@ export class IngestService {
         logSystem({ source: "service", kind: "command", deviceId: committed.box.id, error });
       }
     }
+    // 下行只有一个坑位：待抹除时优先回抹除指令，导出请求留在下一包（没 issued_at 就一直会重发）
+    if (wipeLine) committed.downlink = wipeLine;
     return committed;
   }
 }

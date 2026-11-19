@@ -97,6 +97,7 @@ import { kindTone, taskTone } from "@/utils/tone";
 import BatteryCurve from "./BatteryCurve.vue";
 import { stepsOf } from "../tasks/status";
 import { BOX_PERM, EVENT_PERMS, type SampleBox } from "../data";
+import { boxTitle } from "@/utils/boxLabel";
 
 /**
  * 采样箱详情 · 概览：它现在在哪、在干什么。
@@ -132,7 +133,7 @@ const points = computed<TiandituPoint[]>(() => {
     id: props.box.id,
     lng: current.lng,
     lat: current.lat,
-    title: props.box.name || props.box.id,
+    title: boxTitle(props.box),
     status: current.source === "GPS" ? "gps" : undefined,
     emphasis: true,
     address: current.address || undefined,

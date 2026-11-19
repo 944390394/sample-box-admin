@@ -1,3 +1,4 @@
+import { badRequest } from "../domain/AppError.js";
 /**
  * 采样机构的监控通道（1–8 路）。现在还没有真正接视频平台，先把通道登记下来，
  * 任务详情按通道数排好宫格；以后接平台只需填直播地址或由 VideoPlatform.liveUrl 给出。
@@ -9,7 +10,7 @@ const url = (value) => {
   const text = String(value || "").trim();
   if (!text) return "";
   if (!/^https?:\/\/\S+$/.test(text) || text.length > 500)
-    throw new Error("监控地址要以 http:// 或 https:// 开头");
+    throw badRequest("监控地址要以 http:// 或 https:// 开头");
   return text;
 };
 
@@ -29,13 +30,13 @@ export function readCameras(value) {
 /** 校验表单提交的通道：名称必填，最多 8 路；平台通道号、直播地址、回放地址模板都选填。 */
 export function validateCameras(input) {
   if (input == null) return [];
-  if (!Array.isArray(input)) throw new Error("监控通道格式不正确");
-  if (input.length > CAMERA_MAX) throw new Error(`监控通道最多 ${CAMERA_MAX} 路`);
+  if (!Array.isArray(input)) throw badRequest("监控通道格式不正确");
+  if (input.length > CAMERA_MAX) throw badRequest(`监控通道最多 ${CAMERA_MAX} 路`);
   return input.map((item, index) => {
     const name = String(item?.name || "").trim();
-    if (!name || name.length > 20) throw new Error(`第 ${index + 1} 路监控要填名称（20 字以内）`);
+    if (!name || name.length > 20) throw badRequest(`第 ${index + 1} 路监控要填名称（20 字以内）`);
     const channel = String(item?.channel || "").trim();
-    if (channel.length > 64) throw new Error(`第 ${index + 1} 路的平台通道号太长`);
+    if (channel.length > 64) throw badRequest(`第 ${index + 1} 路的平台通道号太长`);
     return { name, channel, liveUrl: url(item?.liveUrl), playbackUrl: url(item?.playbackUrl) };
   });
 }

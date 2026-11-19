@@ -46,6 +46,14 @@ export const ACCOUNTS = {
 /** 授权界面验收用的角色（没有人用它，随便改）。 */
 export const GRANTER_ROLE = { id: "93", name: "验收-授权员" };
 
+/**
+ * 华东分公司的签收人（id 94，挂 31 华东调度室，角色 13 调度员）。
+ * 为什么要有这个人：批次 A 把「寄出人 / 签收人必须是那一单位的人」收紧成硬校验后，
+ * 调拨到华东分公司（org 3）的单子必须用华东的人签收——`shared/org.js` 的 3/31 下**一个用户都没有**，
+ * 用 admin（11 系统管理）当签收人会直接 `A0400`。源码的单位表不在我的边界内，所以在这里补夹具账号。
+ */
+export const EAST_SIGNER = { userId: "94", username: "accept.east", nickname: "验收华东签收", deptId: "31", label: "华东签收人" };
+
 const HOME_ORG = { id: "21", name: "调度室" };
 const SZ = { lng: 114.0579, lat: 22.5431 };
 
@@ -106,6 +114,9 @@ async function seedAccounts(db) {
     await db.run("INSERT INTO sys_user (id, username, nickname, password_hash, dept_id, status, create_time, update_time) VALUES (?, ?, ?, 'x', ?, 1, ?, ?)", [id, username, nickname, dept, now, now]);
     await db.run("INSERT INTO sys_user_role (user_id, role_id) VALUES (?, ?)", [id, role]);
   }
+  // 华东签收人：只当调拨单的签收人用，不登录（password_hash 占位），所以不进 passwords
+  await db.run("INSERT INTO sys_user (id, username, nickname, password_hash, dept_id, status, create_time, update_time) VALUES (?, ?, ?, 'x', ?, 1, ?, ?)", [EAST_SIGNER.userId, EAST_SIGNER.username, EAST_SIGNER.nickname, EAST_SIGNER.deptId, now, now]);
+  await db.run("INSERT INTO sys_user_role (user_id, role_id) VALUES (?, '13')", [EAST_SIGNER.userId]);
   const passwords = {};
   for (const [key, account] of Object.entries(ACCOUNTS)) {
     const password = `Acc-${randomBytes(9).toString("base64url")}9a`;
@@ -221,49 +232,98 @@ async function sendPackets(tcpPort, packets) {
   }
 }
 
-/** 用管理员账号调接口建任务单：一张调拨（GPS 新 + GPS 旧两台），一张采样（低电开盖那台）。返回任务编号。 */
+/**
+ * 用管理员账号调接口建任务单：一张调拨（GPS 新 + GPS 旧两台）、一张采样（低电开盖那台）、
+ * 两张送检（一台停在待检测、一台拒收退回）。
+ *
+ * **逐张容错**：批次 A 之后建单接口会因「寄出人/签收人必须是那一单位的人」等规则返回 A0400，
+ * 一张建不出来不能把整个数据准备阶段打断（`run.mjs` 原来没有 try/catch，机器人直接中止）。
+ * 现在每张单单独尝试，失败原因（业务码 + 服务端原文）如实记进返回值，由 `run.mjs` 落到证据里；
+ * 后续依赖某张单的步骤拿不到 id 就跳过并记一条失败，不抛异常。
+ *
+ * 返回：`{ transfer, sample, inspect, back, seeded[], failures[], skipped[] }`
+ */
 export async function createTasks(api) {
-  const transfer = await api.post("/api/v1/sample/tasks", {
+  const seeded = [];
+  const failures = [];
+  const skipped = [];
+  const out = { transfer: null, sample: null, inspect: null, back: null, seeded, failures, skipped };
+
+  /** 建一张单：成功记 id 和单号，失败记业务码与服务端原文 */
+  const create = async (key, label, body) => {
+    try {
+      const task = await api.post("/api/v1/sample/tasks", body);
+      out[key] = task.id;
+      // 建单接口只回 id（`ctx.ok({ id })`），单号/状态由 seed-verify 再拉一次详情取证
+      seeded.push({ key, label, id: task.id });
+      return task;
+    } catch (error) {
+      failures.push({ key, label, stage: "建单", code: error.code || "", reason: error.message });
+      return null;
+    }
+  };
+
+  /** 推进状态：拿不到那张单就跳过（并说明是被建单失败连累的），失败也只记录 */
+  const advance = async (key, label, id, status, note) => {
+    if (!id) {
+      skipped.push({ key, label, stage: `推进到${status}`, reason: "这张单没建出来，跳过" });
+      return;
+    }
+    try {
+      await api.put(`/api/v1/sample/tasks/${id}/status`, { status, note });
+    } catch (error) {
+      failures.push({ key, label, stage: `推进到${status}`, code: error.code || "", reason: error.message });
+    }
+  };
+
+  await create("transfer", "验收-调拨深圳到杭州", {
     name: "验收-调拨深圳到杭州",
     kind: "调拨",
     boxIds: [BOXES.fresh.imei, BOXES.staleGps.imei],
-    fromOrgId: "21",
+    fromOrgId: HOME_ORG.id,
     toOrgId: "3",
-    senderId: "6",
-    signerId: "2",
+    senderId: ACCOUNTS.dispatch.userId,
+    // 签收人必须是华东分公司（3/31）的人，用 admin 会被 A0400 拦掉 → 夹具账号 94。
+    // 带 SAMPLE_ACCEPTANCE_BREAK_TRANSFER=1 时故意用 admin，验证「一张单失败不中止整个准备」这条容错路径。
+    signerId: process.env.SAMPLE_ACCEPTANCE_BREAK_TRANSFER === "1" ? ACCOUNTS.admin.userId : EAST_SIGNER.userId,
     fromPlace: { address: "深圳市福田区福华路", lng: SZ.lng, lat: SZ.lat },
     toPlace: { address: "杭州市西湖区文三路", lng: 120.1551, lat: 30.2741 },
   });
-  const sample = await api.post("/api/v1/sample/tasks", {
+
+  await create("sample", "验收-龙华采样", {
     name: "验收-龙华采样",
     kind: "采样",
     boxIds: [BOXES.lowLid.imei],
-    orgId: "21",
+    orgId: HOME_ORG.id,
     placeAt: { address: "深圳市龙华区民治街道", lng: 114.0301, lat: 22.6204, radiusM: 500 },
   });
+
   // 送检：调度室寄到总部检测站，上限开箱 2 次；寄出后两台在途中开箱，然后到达、签收，停在「待检测」
-  const inspect = await api.post("/api/v1/sample/tasks", {
+  const inspect = await create("inspect", "验收-送检总部", {
     name: "验收-送检总部",
     kind: "调拨",
     boxIds: [BOXES.inspectA.imei, BOXES.inspectB.imei],
-    fromOrgId: "21",
+    fromOrgId: HOME_ORG.id,
     toOrgId: STATION.id,
-    senderId: "6",
-    signerId: "2",
+    senderId: ACCOUNTS.dispatch.userId,
+    // 检测站（13）的签收人是吴迪（user 5），admin 不在这个单位
+    signerId: "5",
     maxOpens: 2,
   });
-  await api.put(`/api/v1/sample/tasks/${inspect.id}/status`, { status: "运送中", note: "" });
+  await advance("inspect", "验收-送检总部", inspect?.id, "运送中", "");
+
   // 拒收退回：一路开箱上限 0 次，寄出后开过一次箱，检测站扫码时只能拒收或强制签收
-  const back = await api.post("/api/v1/sample/tasks", {
+  const back = await create("back", "验收-拒收退回", {
     name: "验收-拒收退回",
     kind: "调拨",
     boxIds: [BOXES.back.imei],
-    fromOrgId: "21",
+    fromOrgId: HOME_ORG.id,
     toOrgId: STATION.id,
-    senderId: "6",
-    signerId: "2",
+    senderId: ACCOUNTS.dispatch.userId,
+    signerId: "5",
     maxOpens: 0,
   });
-  await api.put(`/api/v1/sample/tasks/${back.id}/status`, { status: "运送中", note: "" });
-  return { transfer: transfer.id, sample: sample.id, inspect: inspect.id, back: back.id };
+  await advance("back", "验收-拒收退回", back?.id, "运送中", "");
+
+  return out;
 }

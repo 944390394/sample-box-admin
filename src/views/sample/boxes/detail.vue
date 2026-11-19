@@ -6,7 +6,7 @@
     </el-empty>
 
     <template v-else>
-      <PageHeader :title="box.name || box.id" back="/device/boxes">
+      <PageHeader :title="boxTitle(box)" back="/device/boxes">
         <template #tags>
           <el-tag :type="lifeTone(box.life)">{{ lifeLabel(box.life) }}</el-tag>
           <el-tag v-if="box.wipe" type="danger" effect="dark" :title="wipeTitle(box.wipe)">
@@ -16,9 +16,12 @@
             <span class="dot" :class="online ? 'on' : 'off'" />
             {{ online ? "在线" : "离线" }}
           </el-tag>
+          <el-tag v-if="stale" type="warning" effect="plain" data-test="box-stale">
+            刷新失败，内容可能不是最新
+          </el-tag>
         </template>
         <template #meta>
-          <span class="mono">IMEI {{ box.id }}</span>
+          <span class="mono">IMEI {{ imeiText(box) }}</span>
           · {{ box.org || "总公司" }} ·
           {{ box.owner && box.owner !== "—" ? `${box.owner} 保管` : "无保管人" }}
         </template>
@@ -45,7 +48,8 @@
             分配
           </el-button>
           <el-button v-if="can(policyPerm.read)" @click="policyOpen = true">上报策略</el-button>
-          <el-button @click="qrOpen = true">二维码</el-button>
+          <!-- 箱码图里编码的就是整串 IMEI，没有「设备标识」权限时不给导出（M-1） -->
+          <el-button v-if="canImei" @click="qrOpen = true">二维码</el-button>
           <el-dropdown v-if="more.length" trigger="click" @command="onMore">
             <el-button>
               更多
@@ -130,7 +134,7 @@
     </template>
 
     <el-dialog v-model="activate.open" title="激活采样箱" width="460px" style="max-width: 94vw">
-      <p v-if="box" class="lead">IMEI {{ box.id }}</p>
+      <p v-if="box" class="lead">IMEI {{ imeiText(box) }}</p>
       <p class="text-muted">
         核对箱体上贴的 IMEI 后确认。激活后状态变为{{ lifeLabel("未使用") }}，所属总公司。
       </p>
@@ -139,7 +143,7 @@
         v-model="activate.name"
         maxlength="32"
         show-word-limit
-        :placeholder="`名称（选填），不填用：${box?.name || ''}`"
+        :placeholder="boxNameHint(box)"
         @keyup.enter="doActivate"
       />
       <template #footer>
@@ -153,13 +157,14 @@
       v-if="box"
       v-model="policyOpen"
       :box-id="box.id"
-      :box-name="box.name"
+      :box-name="boxTitle(box)"
       @saved="load"
     />
     <LogExportDialog
       v-if="box"
       v-model="exportOpen"
       :box-id="box.id"
+      :name="boxTitle(box)"
       :remote="Boolean(box.remote)"
     />
     <BoxQrDialog v-if="box" v-model="qrOpen" :box="box" />
@@ -189,7 +194,17 @@ import BoxSummary from "./BoxSummary.vue";
 import ReportPolicyDialog from "./ReportPolicyDialog.vue";
 import { deleteArchive, wipeTitle } from "./management";
 import { telemetryState } from "./telemetry";
-import { BOX_PERM, EVENT_PERMS, TASK_CREATE, type SampleBox } from "../data";
+import {
+  BOX_PERM,
+  EVENT_PERMS,
+  IMEI_PERMS,
+  TASK_CREATE,
+  boxNameHint,
+  boxTitle,
+  imeiText,
+  realBoxName,
+  type SampleBox,
+} from "../data";
 
 /**
  * 采样箱详情：页头放名称、状态和常用操作，下面一条状态条（电量、箱盖、信号、最近上报、位置）切换标签也一直在；
@@ -202,6 +217,8 @@ const can = usePerm();
 const box = ref<SampleBox | null>(null);
 const loading = ref(false);
 const error = ref("");
+/** 后台刷新失败但手上还有内容：页面不清空，只在页头标一下。 */
+const stale = ref(false);
 // 在线状态跟全站时钟走：超过 3 个上报周期没报，到点就变离线，不等下次刷新
 const now = clock;
 const tab = ref(String(route.query.tab || "overview"));
@@ -209,15 +226,26 @@ const assignOpen = ref(false);
 const policyOpen = ref(false);
 const exportOpen = ref(false);
 const qrOpen = ref(false);
+/** 二维码编码的就是整串 IMEI，没有「设备标识」权限的人不该拿到它（M-1）。 */
+const canImei = computed(() => IMEI_PERMS.every((perm) => can(perm)));
 
 const online = computed(() =>
-  box.value ? telemetryState(box.value.last, box.value.reportPeriodSec, now.value).online : false
+  box.value
+    ? telemetryState(
+        box.value.last,
+        box.value.reportPeriodSec,
+        now.value,
+        box.value.charge,
+        box.value.reportOnlyWhenCharging
+      ).online
+    : false
 );
 const maskedText = computed(() => {
   const names: Record<string, string> = {
     status: "电量和箱盖",
     location: "位置",
     identity: "SIM 卡和固件信息",
+    imei: "设备串号 IMEI",
   };
   return (box.value?.masked || []).map((key) => names[key] || key).join("、");
 });
@@ -228,14 +256,23 @@ const activationStep = computed(() => {
   return 1;
 });
 
+/**
+ * 详情页取数：路由 10 秒轮询一次，快速切箱子时旧响应会晚于新响应回来，
+ * 所以每轮一个序号，回来的时候已经不是最新一轮就直接丢掉（连 loading 都不许它清）。
+ * 已经有内容时失败不清页面，只标「可能不是最新」；首屏失败才显示错误页。
+ */
+let seq = 0;
 async function load() {
   const id = String(route.params.id || "");
   if (!id) return;
+  const mine = ++seq;
   loading.value = !box.value;
   try {
     const next = await SampleBoxAPI.detail(encodeURIComponent(id));
+    if (mine !== seq) return;
     box.value = next;
     error.value = "";
+    stale.value = false;
     // 旧链接按名称（BOX-004）打开的，换成编号地址
     if (next.id !== id)
       void router.replace({
@@ -243,9 +280,11 @@ async function load() {
         query: route.query,
       });
   } catch (e) {
-    if (!box.value) error.value = e instanceof Error ? e.message : "";
+    if (mine !== seq) return;
+    if (box.value) stale.value = true;
+    else error.value = e instanceof Error ? e.message : "";
   } finally {
-    loading.value = false;
+    if (mine === seq) loading.value = false;
   }
 }
 
@@ -279,7 +318,7 @@ async function onMore(cmd: string) {
   if (cmd === "rename") {
     try {
       const { value } = await ElMessageBox.prompt("1–32 个字，不能和别的采样箱重名", "改名称", {
-        inputValue: b.name,
+        inputValue: realBoxName(b),
         inputValidator: (text: string) =>
           (text.trim().length >= 1 && text.trim().length <= 32) || "名称要 1–32 个字",
         confirmButtonText: "保存",
@@ -311,7 +350,7 @@ async function onMore(cmd: string) {
         b.id,
         Boolean(b.remote) && can(BOX_PERM.wipe),
         Boolean(b.wipe),
-        b.name || b.id
+        boxTitle(b)
       )
     ) {
       if (b.firmware && b.wipe == null) void router.push("/device/boxes");
@@ -342,6 +381,8 @@ watch(
   (id) => {
     if (id && route.path.startsWith("/device/boxes/")) {
       box.value = null;
+      error.value = "";
+      stale.value = false;
       void load();
     }
   }

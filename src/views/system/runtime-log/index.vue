@@ -155,7 +155,7 @@
         stripe
         @row-click="openRow"
       >
-        <el-table-column label="级别 / 来源" width="140">
+        <el-table-column label="级别 / 来源" width="120">
           <template #default="{ row }">
             <el-tag
               :type="row.level === 'error' ? 'danger' : row.level === 'warn' ? 'warning' : 'info'"
@@ -166,7 +166,7 @@
             <div class="sub">{{ sources[row.source] || row.source }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="问题" min-width="330">
+        <el-table-column label="问题" min-width="280">
           <template #default="{ row }">
             <div class="problem">{{ row.message }}</div>
             <div class="sub mono">
@@ -174,12 +174,12 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column v-if="mode === 'issues'" label="出现次数" width="100">
+        <el-table-column v-if="mode === 'issues'" label="出现次数" width="80">
           <template #default="{ row }">
             <b>{{ row.occurrences }}</b>
           </template>
         </el-table-column>
-        <el-table-column :label="mode === 'issues' ? '最长 / 平均耗时' : '处理耗时'" width="160">
+        <el-table-column :label="mode === 'issues' ? '最长 / 平均耗时' : '处理耗时'" width="140">
           <template #default="{ row }">
             <span
               :class="{
@@ -192,19 +192,19 @@
             <div v-if="mode === 'issues'" class="sub">平均 {{ ms(row.avgDuration) }}</div>
           </template>
         </el-table-column>
-        <el-table-column :label="mode === 'issues' ? '最近 / 首次发生' : '发生时间'" width="205">
+        <el-table-column :label="mode === 'issues' ? '最近 / 首次发生' : '发生时间'" width="185">
           <template #default="{ row }">
             {{ time(row.lastTime || row.time) }}
             <div v-if="mode === 'issues'" class="sub">首次 {{ time(row.firstTime) }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="状态 / 错误码" width="150">
+        <el-table-column label="状态 / 错误码" width="140">
           <template #default="{ row }">
             {{ row.status ?? "—" }}
-            <div class="sub">{{ row.code || "—" }}</div>
+            <div class="sub code" :title="row.code || ''">{{ row.code || "—" }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="130">
           <template #default="{ row }">
             <el-button link type="primary" @click.stop="openRow(row)">
               {{ mode === "issues" ? "查看明细" : "详情" }}
@@ -655,6 +655,11 @@ h3 {
 .sub {
   margin-top: 5px;
   overflow-wrap: anywhere;
+}
+.code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mono {
   font-family: ui-monospace, Consolas, monospace;

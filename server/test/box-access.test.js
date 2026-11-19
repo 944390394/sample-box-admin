@@ -271,7 +271,8 @@ test("无权字段不下发", () => {
   assert.equal(masked.battery, undefined);
   assert.equal(masked.lbsLng, undefined);
   assert.equal(masked.iccid, undefined);
-  // 按字段遮：工况七项、位置、ICCID、IMSI、固件各自一组；全遮时另记 status、identity 给旧页面
+  // 按字段遮：工况七项、位置、ICCID、IMSI、固件各自一组；IMEI 是唯一不删只打码的（编号还要用来导航、出二维码）；
+  // 全遮时另记 status、identity 给旧页面
   assert.deepEqual(masked.masked, [
     "power",
     "lid",
@@ -284,10 +285,16 @@ test("无权字段不下发", () => {
     "iccid",
     "imsi",
     "firmware",
+    "imei",
     "status",
     "identity",
   ]);
   assert.equal(masked.id, "BOX-001");
+  assert.equal(masked.imei, "864********0001");
+  // 设备标识三项都有才不打码：老目录里的 device:box:identity 已被迁移 045 拆掉，光有它不算
+  const withIdentity = maskBox(json, new Set([BOX.list, BOX.iccid, BOX.imsi, BOX.firmware]));
+  assert.equal(withIdentity.imei, "864317080990001");
+  assert.ok(!withIdentity.masked.includes("imei") && !withIdentity.masked.includes("identity"));
   // 只有「查看箱盖状态」：箱盖给，电量不给
   const lidOnly = maskBox(json, new Set([BOX.list, BOX.lid]));
   assert.ok("lid" in lidOnly && lidOnly.battery === undefined);
@@ -298,4 +305,23 @@ test("无权字段不下发", () => {
   );
   // 不看固件版本也知道能不能远程操作
   assert.equal(typeof masked.remote, "boolean");
+});
+
+test("没起名时服务端把编号回显进 name，无设备标识权限不能带出整串 IMEI（M-1）", () => {
+  // 现在的编号就是 IMEI：BoxState.toJSON 在名称为空时写的是 name = id
+  const echoBox = (id, name) => ({ id, name: name || id, imei: id, masked: [] });
+  const listOnly = new Set([BOX.list, BOX.detail]);
+  const granted = new Set([BOX.list, BOX.iccid, BOX.imsi, BOX.firmware]);
+  const echo = echoBox("864317080990002");
+
+  const stripped = maskBox(echo, listOnly);
+  assert.equal(stripped.name, "");
+  assert.equal(stripped.imei, "864********0002");
+  // 有权限的一律照旧，别过度打码
+  assert.equal(maskBox(echo, granted).name, "864317080990002");
+  assert.equal(maskBox(echo, granted).imei, "864317080990002");
+  // 编号不是 IMEI 的老数据、真起过名的，都不该被动到
+  assert.equal(maskBox(echoBox("BOX-001"), listOnly).name, "BOX-001");
+  const named = maskBox(echoBox("864317080990002", "南山01号"), listOnly);
+  assert.equal(named.name, "南山01号");
 });

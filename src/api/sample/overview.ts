@@ -53,6 +53,8 @@ export interface GroupOverview {
   stationCount: number;
   /** 搜索筛选后的单位总数（分页用）。 */
   unitTotal: number;
+  /** 非全量范围且恰好只有一个单位时＝该单位编号（前端空态/筛选空结果跳转用）；否则 null。 */
+  myUnitId: string | null;
   page: number;
   pageSize: number;
   top: TopUnit[];

@@ -4,6 +4,9 @@
  *
  * rows 按时间倒序（最新在前），每行 { box_id, name, kind, received_at }。
  * 返回 { type: "box", boxId, boxName, kind, action, time（最近一次）, since（最早一次）, count, counts }。
+ *
+ * 注意 boxName：没起名时这里写的是编号，而现在的编号就是整串 IMEI。这是纯领域函数、不看权限，
+ * 所以调用方（SampleController 的工作台 feed）下发前要按「设备标识」权限过一遍 boxNameCell（M-1）。
  */
 const FAMILY = { boot: "boot", pad: "lid", shut: "lid" };
 const LABEL = { pad: "开箱", shut: "关箱", boot: "上电" };

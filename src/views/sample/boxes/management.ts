@@ -1,6 +1,7 @@
 import { h, ref } from "vue";
 import { ElMessage, ElMessageBox, ElRadio, ElRadioGroup } from "element-plus";
 import SampleBoxAPI from "@/api/sample/box";
+import { boxTitle } from "@/utils/boxLabel";
 
 export function policyStatusText(status?: string) {
   if (!status) return "—";
@@ -42,7 +43,8 @@ export async function deleteArchive(
   id: string,
   remote = false,
   wiping = false,
-  name = id
+  // 调用方没给称谓时也别把整串编号写进确认框：现在的编号就是 IMEI
+  name = boxTitle({ id })
 ): Promise<boolean> {
   const wipe = ref<Wipe>("");
   const note = (text: string) =>

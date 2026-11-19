@@ -72,6 +72,7 @@ import type { TiandituCircle, TiandituPoint } from "@/components/TiandituMap/ind
 import { usePerm } from "@/composables/usePerm";
 import { lastDays } from "@/utils/time";
 import { BOX_PERM, type SampleBox } from "../data";
+import { isEnded } from "../tasks/status";
 
 /**
  * 采样箱详情 · 轨迹，两种看法：
@@ -90,7 +91,6 @@ const PLACE_COLORS: Record<string, { color: string; glyph: string }> = {
   收货地址: { color: "#dc2626", glyph: "收" },
   计划地点: { color: "#7c3aed", glyph: "采" },
 };
-const ENDED = ["已完成", "已签收", "已拒收", "已取消", "已检测", "已退回"];
 
 const mode = ref<string>(canHistory.value ? "1" : "task");
 const loading = ref(false);
@@ -113,7 +113,7 @@ const placeLegend = computed(() =>
 const windowText = computed(() => {
   const r = taskResult.value;
   if (!r) return "";
-  const live = !ENDED.includes(r.task.status);
+  const live = !isEnded(r.task.status);
   return `${r.window.from.slice(5, 16)} 至 ${live ? "现在" : r.window.to.slice(5, 16)}`;
 });
 
@@ -164,7 +164,7 @@ async function loadTasks() {
   const result = await PolicyAPI.tasks({ boxId: props.box.id, pageSize: 100 });
   tasks.value = result.list;
   tasksLoaded.value = true;
-  taskId.value = (result.list.find((t) => !ENDED.includes(t.status)) || result.list[0])?.id || "";
+  taskId.value = (result.list.find((t) => !isEnded(t.status)) || result.list[0])?.id || "";
 }
 
 async function load() {

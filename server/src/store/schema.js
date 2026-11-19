@@ -42,6 +42,13 @@ const BOX_COLUMNS = {
     powered_at: "TEXT NOT NULL DEFAULT ''",
     org_id: "TEXT NOT NULL DEFAULT ''",
     owner_id: "TEXT NOT NULL DEFAULT ''",
+    /**
+     * §7.3 的占用锚点两列（建单时间快照，离线宽限判定用）。列只在这里声明，由 ensureSchema 补齐；
+     * 数据回填是编号迁移 054 的事。054 不能假设这两列已存在：migrate() 先跑编号迁移、
+     * 后跑 ensureSchema（db.js:78-88），所以 054 里要用 listColumns 自查 + 内联 ALTER 自愈。
+     */
+    bound_task_id: "TEXT NOT NULL DEFAULT ''",
+    bound_task_at: "TEXT NOT NULL DEFAULT ''",
   },
   mysql: {
     name: "VARCHAR(64) NOT NULL DEFAULT ''",
@@ -77,6 +84,9 @@ const BOX_COLUMNS = {
     powered_at: "VARCHAR(32) NOT NULL DEFAULT ''",
     org_id: "VARCHAR(32) NOT NULL DEFAULT ''",
     owner_id: "VARCHAR(32) NOT NULL DEFAULT ''",
+    // 与上面 sqlite 段同一对锚点列（见 BOX_COLUMNS.sqlite 的注释），类型跟 sample_task 的列宽一致
+    bound_task_id: "VARCHAR(64) NOT NULL DEFAULT ''",
+    bound_task_at: "VARCHAR(32) NOT NULL DEFAULT ''",
   },
 };
 

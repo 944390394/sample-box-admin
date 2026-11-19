@@ -176,7 +176,7 @@ test("固件未知的新档案策略显示待首次上报，不是固件不支�
   }
 });
 
-test("删除并抹除：档案保留到设备确认，期间上报只收到抹除指令，boot 后删旧档案并重新建档", async () => {
+test("删除并抹除：档案保留到设备确认，期间上报照常入库并附回抹除指令，boot 后删旧档案并重新建档", async () => {
   const { DeviceCommands } = await import("../src/settings/DeviceCommands.js");
   const dir = await mkdtemp(path.join(os.tmpdir(), "box-wipe-"));
   const db = await openDatabase(
@@ -209,17 +209,22 @@ test("删除并抹除：档案保留到设备确认，期间上报只收到抹�
     assert.equal(pending.mode, "full");
     assert.equal(pending.issued_at, null);
     assert.equal((await boxes.findByImei(box.imei)).id, box.id); // 档案还在
-    // 抹除之前的上报不入库，只回抹除指令；s 就是这包的 seq
+    // 抹除确认之前的上报照常入库，同时回抹除指令；s 就是这包的 seq
     const first = await ingest.accept(up("timer", "9"));
-    assert.equal(first.box, null);
+    assert.equal(first.box.id, box.id, "待抹除期间的上报不能丢");
+    assert.equal(first.record.kind, "timer");
     assert.equal(first.downlink.text, "wipe m=f s=9\n");
     assert.equal((await boxes.findByImei(box.imei)).id, box.id);
+    assert.equal((await boxes.listLogs(box.id, { kind: "timer" })).list.length, 1);
     assert.equal((await commands.wipeStates([box.imei])).get(box.imei).issued, false);
     await first.downlink.onSent();
     assert.equal((await commands.wipeStates([box.imei])).get(box.imei).issued, true);
-    // 重复上报继续回指令，档案仍在，直到设备重启后发出 opens=0 的 boot
-    assert.equal((await ingest.accept(up("timer", "10"))).downlink.text, "wipe m=f s=10\n");
+    // 重复上报继续回指令，数据继续入库，档案仍在，直到设备重启后发出 opens=0 的 boot
+    const again = await ingest.accept(up("timer", "10"));
+    assert.equal(again.box.id, box.id);
+    assert.equal(again.downlink.text, "wipe m=f s=10\n");
     assert.equal((await boxes.findByImei(box.imei)).id, box.id);
+    assert.equal((await boxes.listLogs(box.id, { kind: "timer" })).list.length, 2);
     const after = await ingest.accept(
       packet({ uart: "why=boot,opens=0,pv=0,rp=5,rc=0,fw=1.0.6,seq=1" })
     );

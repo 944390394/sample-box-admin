@@ -79,7 +79,12 @@ export interface BoxFlags {
 
 export interface BoxPage {
   list: SampleBox[];
+  /** 列表行数（含状态 / 快捷筛选口径），分页用它。等于 filteredTotal，老字段名保留。 */
   total: number;
+  /** 同上，名字写明是「筛过的」总数（L-P0-3）。 */
+  filteredTotal?: number;
+  /** 只按数据范围和搜索词统计的总台数：状态卡片、快捷筛选的 counts 就是它的一个切分，跟 life/flag 筛选无关。 */
+  scopeTotal?: number;
   page: number;
   pageSize: number;
   counts: Record<string, number>;

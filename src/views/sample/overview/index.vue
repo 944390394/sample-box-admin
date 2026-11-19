@@ -1,15 +1,10 @@
 <template>
   <div class="page-container page-flow">
-    <PageHeader title="集团总览" :subtitle="headerSub">
+    <PageHeader title="集团总览">
       <template #meta>
-        <span v-if="updatedAt" class="freshness" :class="{ stale: dataStale }">
-          <i class="dot" />
-          更新于 {{ ageText(updatedAt.toISOString()) }}
-          <em v-if="dataStale">旧</em>
-        </span>
-        <span v-if="!error" class="auto-hint">
-          <i class="pulse" />
-          每 5 秒自动刷新
+        <span class="head-meta">
+          <span v-if="headerSub">{{ headerSub }}</span>
+          <FreshnessMeta :updated-at="updatedAt" :error="error" :interval="5000" />
         </span>
       </template>
       <template #actions>
@@ -17,69 +12,116 @@
       </template>
     </PageHeader>
 
-    <el-alert v-if="error" type="warning" :closable="false" show-icon>
-      <template #title>
-        刷新失败：{{ error }}
-        <el-button link type="primary" size="small" @click="refresh">重试</el-button>
-      </template>
-    </el-alert>
+    <ErrorState v-if="error" :message="`刷新失败：${error}`" :retrying="loading" @retry="refresh" />
 
-    <el-skeleton v-if="!data && loading" :rows="8" animated />
-    <el-empty
+    <!-- 首载骨架：按真实版式占位，避免加载完成后布局跳动 -->
+    <div v-if="!data && loading" class="boot" aria-busy="true" aria-label="正在加载集团总览">
+      <div class="kpi-grid">
+        <el-skeleton v-for="i in 6" :key="i" animated class="kpi-skeleton">
+          <template #template>
+            <el-skeleton-item variant="text" style="width: 55%" />
+            <el-skeleton-item variant="h3" style="width: 40%; margin-top: 10px" />
+            <el-skeleton-item variant="text" style="width: 65%; margin-top: 10px" />
+          </template>
+        </el-skeleton>
+      </div>
+      <div class="charts">
+        <SectionCard title="箱子状态分布">
+          <el-skeleton :rows="5" animated />
+        </SectionCard>
+        <SectionCard title="箱子最多的分公司">
+          <el-skeleton :rows="5" animated />
+        </SectionCard>
+      </div>
+      <SectionCard title="单位列表">
+        <el-skeleton :rows="6" animated />
+      </SectionCard>
+    </div>
+
+    <EmptyState
       v-else-if="data && !data.branchTotal && !data.stationCount"
-      description="你的数据范围里没有单位，只能看到自己保管的箱子"
-    />
-    <template v-else-if="data">
-      <StatTiles
-        :items="tiles"
-        :max="6"
-        data-test="group-station-tiles"
-        @update:model-value="openTile"
-      />
+      description="你的数据范围里没有可总览的单位"
+    >
+      <div class="empty-guide">
+        <p class="text-muted guide-text">
+          总览按分公司 / 检测站统计箱子。你的数据范围未覆盖任何单位（例如「仅本人」），
+          可以回工作台处理待办，或到采样箱列表查看自己有权看的箱子。
+        </p>
+        <div class="guide-actions">
+          <el-button type="primary" :icon="Odometer" @click="goHome">去工作台</el-button>
+          <el-button :icon="Box" @click="goBoxes">查看采样箱</el-button>
+        </div>
+      </div>
+    </EmptyState>
 
-      <div v-if="flagChips.length" class="flag-strip">
+    <template v-else-if="data">
+      <div
+        class="kpi-grid"
+        :class="{ 'is-three': kpis.length === 3 }"
+        role="group"
+        aria-label="集团关键指标"
+        data-test="group-station-tiles"
+      >
+        <KpiCard v-for="item in kpis" :key="item.key" :item="item" @select="openTile" />
+      </div>
+
+      <div v-if="flagChips.length" class="flag-strip" role="group" aria-label="异常箱子快捷入口">
         <button
           v-for="chip in flagChips"
           :key="chip.key"
+          type="button"
           class="flag-chip"
           :class="`is-${chip.tone}`"
+          :aria-label="`${chip.label} ${chip.value} 台，点击查看箱子`"
           @click="openTile(chip.key)"
         >
-          <i class="dot" />
+          <i class="dot" aria-hidden="true" />
           {{ chip.label }}
           <b>{{ chip.value }}</b>
         </button>
       </div>
 
-      <div v-if="data.total && data.total.total > 0" class="charts">
-        <SectionCard title="箱子状态分布" :sub="`共 ${data.total.total.toLocaleString()} 台`">
+      <div class="charts">
+        <SectionCard title="箱子状态分布" :sub="donutSub">
           <div class="donut-wrap">
-            <ECharts :options="donutOptions" height="240px" />
-            <div class="donut-center">
-              <strong>{{ data.total.total.toLocaleString() }}</strong>
+            <InsightChart
+              :options="donutOptions"
+              height="260px"
+              :empty="!donutParts.length"
+              empty-text="暂无箱子数据"
+              @select="onDonutSelect"
+            />
+            <div v-if="donutParts.length" class="donut-center" aria-hidden="true">
+              <strong>{{ data.total?.total.toLocaleString() }}</strong>
               <span>台</span>
             </div>
           </div>
         </SectionCard>
-        <SectionCard title="箱子最多的分公司" sub="前 8 家 · 按总数">
-          <ECharts v-if="data.top.length" :options="topOptions" height="240px" />
-          <el-empty v-else description="暂无分公司箱子" :image-size="60" />
+        <SectionCard title="箱子最多的分公司" sub="前 8 家 · 点条形筛选列表">
+          <InsightChart
+            :options="topOptions"
+            height="260px"
+            :empty="!data.top.length"
+            empty-text="暂无分公司箱子"
+            @select="onTopSelect"
+          />
         </SectionCard>
       </div>
 
       <SectionCard
+        ref="unitsCard"
         title="单位列表"
         :sub="`${data.unitTotal.toLocaleString()} 家`"
         flush
         data-test="group-units"
       >
         <template #extra>
-          <el-radio-group v-model="typeFilter" size="small">
+          <el-radio-group v-model="typeFilter" size="small" aria-label="单位类型筛选">
             <el-radio-button value="">全部</el-radio-button>
             <el-radio-button value="branch">分公司</el-radio-button>
             <el-radio-button value="station">检测站</el-radio-button>
           </el-radio-group>
-          <el-select v-model="sort" size="small" style="width: 124px">
+          <el-select v-model="sort" size="small" style="width: 124px" aria-label="排序方式">
             <el-option label="箱子最多" value="total" />
             <el-option label="在途最多" value="moving" />
             <el-option label="异常最多" value="alert" />
@@ -92,21 +134,26 @@
             placeholder="搜索单位名称"
             :prefix-icon="Search"
             style="width: 190px"
+            aria-label="搜索单位名称"
           />
         </template>
 
-        <el-table
-          v-if="!isMobile"
-          v-loading="loading"
-          :data="data.units"
-          class="unit-table"
-          max-height="560"
+        <EntityList
+          :rows="unitRows"
+          :total="data.unitTotal"
+          :page="page"
+          :page-size="pageSize"
+          row-key="id"
+          :loading="loading"
+          empty-text="没有匹配的单位"
           @row-click="openUnit"
+          @update:page="(p) => (page = p)"
+          @update:page-size="(s) => (pageSize = s)"
         >
           <el-table-column label="单位" min-width="240">
             <template #default="{ row }">
               <div class="unit-cell" :data-test="`unit-${row.id}`">
-                <span class="avatar" :class="{ 'is-station': row.station }">
+                <span class="avatar" :class="{ 'is-station': row.station }" aria-hidden="true">
                   {{ row.name.slice(0, 1) }}
                 </span>
                 <div class="unit-name">
@@ -194,97 +241,97 @@
               <span v-else class="zero">—</span>
             </template>
           </el-table-column>
-          <template #empty>
-            <el-empty description="没有匹配的单位" :image-size="70">
-              <el-button v-if="keyword || typeFilter" size="small" @click="clearFilter">
-                清除筛选
-              </el-button>
-            </el-empty>
-          </template>
-        </el-table>
+          <el-table-column width="40" align="center">
+            <template #default>
+              <el-icon class="row-go" aria-hidden="true"><ArrowRight /></el-icon>
+            </template>
+          </el-table-column>
 
-        <div v-else v-loading="loading" class="unit-cards">
-          <button
-            v-for="row in data.units"
-            :key="row.id"
-            class="unit-card"
-            :data-test="`unit-${row.id}`"
-            @click="openUnit(row)"
-          >
-            <div class="name-line">
-              <b>{{ row.name }}</b>
-              <el-tag
-                size="small"
-                :type="row.station ? 'warning' : row.hq ? 'info' : 'primary'"
-                effect="plain"
-              >
-                {{ row.station ? "检测站" : row.hq ? "总部" : "分公司" }}
-              </el-tag>
-              <el-icon class="go"><ArrowRight /></el-icon>
+          <template #card="{ row }">
+            <div class="unit-card-body" :data-test="`unit-${u(row).id}`">
+              <div class="name-line">
+                <span class="avatar" :class="{ 'is-station': u(row).station }" aria-hidden="true">
+                  {{ u(row).name.slice(0, 1) }}
+                </span>
+                <b>{{ u(row).name }}</b>
+                <el-tag
+                  size="small"
+                  :type="u(row).station ? 'warning' : u(row).hq ? 'info' : 'primary'"
+                  effect="plain"
+                >
+                  {{ u(row).station ? "检测站" : u(row).hq ? "总部" : "分公司" }}
+                </el-tag>
+                <el-icon class="go" aria-hidden="true"><ArrowRight /></el-icon>
+              </div>
+              <div v-if="u(row).path !== u(row).name" class="text-muted path">
+                {{ u(row).path }}
+              </div>
+              <DistributionBar
+                v-if="u(row).stats"
+                :segments="segmentsOf(u(row))"
+                class="card-bar"
+              />
+              <div class="card-nums">
+                <span>
+                  箱子
+                  <b>{{ num(u(row), "total") }}</b>
+                </span>
+                <template v-if="u(row).station">
+                  <span>
+                    来站
+                    <b :class="{ zero: !u(row).station!.moving }">{{ u(row).station!.moving }}</b>
+                  </span>
+                  <span>
+                    待检
+                    <b :class="{ warn: u(row).station!.arrived, zero: !u(row).station!.arrived }">
+                      {{ u(row).station!.arrived }}
+                    </b>
+                  </span>
+                  <span>
+                    今检
+                    <b :class="{ ok: u(row).station!.inspected, zero: !u(row).station!.inspected }">
+                      {{ u(row).station!.inspected }}
+                    </b>
+                  </span>
+                </template>
+                <template v-else>
+                  <span>
+                    {{ lifeLabel("在途") }}
+                    <b :class="tone(u(row), 'moving', 'primary')">{{ num(u(row), "moving") }}</b>
+                  </span>
+                  <span>
+                    在仓库
+                    <b :class="tone(u(row), 'idle', 'success')">{{ num(u(row), "idle") }}</b>
+                  </span>
+                  <span>
+                    {{ lifeLabel("待激活") }}
+                    <b :class="tone(u(row), 'pending', 'warning')">{{ num(u(row), "pending") }}</b>
+                  </span>
+                </template>
+              </div>
+              <div v-if="u(row).stats && hasFlags(u(row))" class="flag-cell">
+                <el-tag v-if="u(row).stats!.flags.offline" size="small" type="info" effect="plain">
+                  离线 {{ u(row).stats!.flags.offline }}
+                </el-tag>
+                <el-tag v-if="u(row).stats!.flags.low" size="small" type="warning" effect="plain">
+                  低电 {{ u(row).stats!.flags.low }}
+                </el-tag>
+                <el-tag v-if="u(row).stats!.flags.alert" size="small" type="danger" effect="plain">
+                  告警 {{ u(row).stats!.flags.alert }}
+                </el-tag>
+              </div>
             </div>
-            <div v-if="row.path !== row.name" class="text-muted path">{{ row.path }}</div>
-            <DistributionBar v-if="row.stats" :segments="segmentsOf(row)" class="card-bar" />
-            <div class="card-nums">
-              <span>
-                箱子
-                <b>{{ num(row, "total") }}</b>
-              </span>
-              <template v-if="row.station">
-                <span>
-                  来站
-                  <b>{{ row.station.moving }}</b>
-                </span>
-                <span>
-                  待检
-                  <b :class="{ warn: row.station.arrived }">{{ row.station.arrived }}</b>
-                </span>
-                <span>
-                  今检
-                  <b :class="{ ok: row.station.inspected }">{{ row.station.inspected }}</b>
-                </span>
-              </template>
-              <template v-else>
-                <span>
-                  {{ lifeLabel("在途") }}
-                  <b :class="{ primary: valueOf(row, 'moving') }">{{ num(row, "moving") }}</b>
-                </span>
-                <span>
-                  在仓库
-                  <b :class="{ ok: valueOf(row, 'idle') }">{{ num(row, "idle") }}</b>
-                </span>
-              </template>
-            </div>
-            <div v-if="row.stats && hasFlags(row)" class="flag-cell">
-              <el-tag v-if="row.stats.flags.offline" size="small" type="info" effect="plain">
-                离线 {{ row.stats.flags.offline }}
-              </el-tag>
-              <el-tag v-if="row.stats.flags.low" size="small" type="warning" effect="plain">
-                低电 {{ row.stats.flags.low }}
-              </el-tag>
-              <el-tag v-if="row.stats.flags.alert" size="small" type="danger" effect="plain">
-                告警 {{ row.stats.flags.alert }}
-              </el-tag>
-            </div>
-          </button>
-          <el-empty v-if="!data.units.length" description="没有匹配的单位" :image-size="70">
+          </template>
+
+          <template #empty-action>
             <el-button v-if="keyword || typeFilter" size="small" @click="clearFilter">
               清除筛选
             </el-button>
-          </el-empty>
-        </div>
-
-        <div v-if="data.unitTotal > 0" class="table-foot">
-          <el-pagination
-            v-model:current-page="page"
-            v-model:page-size="pageSize"
-            background
-            :layout="
-              isMobile ? 'total, prev, pager, next' : 'total, sizes, prev, pager, next, jumper'
-            "
-            :total="data.unitTotal"
-            :page-sizes="[20, 50, 100]"
-          />
-        </div>
+            <el-button v-if="data.myUnitId" size="small" type="primary" @click="goMyUnit">
+              进入本单位总览
+            </el-button>
+          </template>
+        </EntityList>
       </SectionCard>
     </template>
   </div>
@@ -298,28 +345,34 @@ import {
   Box,
   CircleCheck,
   House,
+  Odometer,
   Position,
   Refresh,
   Search,
   Suitcase,
   Van,
 } from "@element-plus/icons-vue";
-import { refDebounced, useMediaQuery } from "@vueuse/core";
+import { refDebounced } from "@vueuse/core";
 import OverviewAPI, {
   type BoxStats,
   type GroupOverview,
+  type OverviewUnit,
   type StationCounts,
 } from "@/api/sample/overview";
 import DistributionBar, { type DistSegment } from "@/components/biz/DistributionBar.vue";
+import FreshnessMeta from "@/components/biz/FreshnessMeta.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import SectionCard from "@/components/biz/SectionCard.vue";
-import StatTiles, { type StatTile } from "@/components/biz/StatTiles.vue";
-import ECharts from "@/components/ECharts/index.vue";
+import EmptyState from "@/components/ov/EmptyState.vue";
+import EntityList from "@/components/ov/EntityList.vue";
+import ErrorState from "@/components/ov/ErrorState.vue";
+import InsightChart from "@/components/ov/InsightChart.vue";
+import KpiCard from "@/components/ov/KpiCard.vue";
+import type { ChartSelect, KpiItem } from "@/components/ov/types";
 import { useChartPalette } from "@/composables/useChartPalette";
 import { useOverviewPolling } from "@/composables/useOverviewPolling";
 import { lifeLabel } from "@/utils/labels";
-import { ageText } from "@/utils/position";
-import { clock } from "@/utils/time";
+import type { ComponentPublicInstance } from "vue";
 
 /**
  * 集团总览（补充协议 1.2.10）：全局指标、状态分布、Top 分公司，下面一张可搜索筛选排序的单位列表。
@@ -328,7 +381,8 @@ import { clock } from "@/utils/time";
 const router = useRouter();
 const data = ref<GroupOverview | null>(null);
 const palette = useChartPalette();
-const isMobile = useMediaQuery("(max-width: 767px)");
+/** 单位列表卡片：点 Top 分公司柱状图后滚到这里，用模板引用而不是查 data-test（U-P2-4）。 */
+const unitsCard = ref<ComponentPublicInstance | null>(null);
 
 const keyword = ref("");
 const debouncedKeyword = refDebounced(keyword, 300);
@@ -368,11 +422,12 @@ const headerSub = computed(() =>
     ? `${data.value.branchTotal.toLocaleString()} 家分公司 · ${data.value.stationCount} 个检测站`
     : ""
 );
-const dataStale = computed(
-  () =>
-    Boolean(error.value) ||
-    (updatedAt.value ? clock.value - updatedAt.value.getTime() > 20000 : false)
-);
+
+/** EntityList 的行是宽松 Record，这里还原成接口类型再用。 */
+function u(row: Record<string, unknown>): OverviewUnit {
+  return row as unknown as OverviewUnit;
+}
+const unitRows = computed(() => (data.value?.units ?? []) as unknown as Record<string, unknown>[]);
 
 type ColKey = "total" | "moving" | "idle" | "pending";
 /** el-table 插槽行是宽松类型，这里只要求用到的字段 */
@@ -411,15 +466,32 @@ function segmentsOf(unit: UnitLike): DistSegment[] {
   ];
 }
 
-const tiles = computed<StatTile[]>(() => {
+/** 真实占比：base 为 0 时返回 0%，不造假环比。 */
+function pct(value: number, base: number): string {
+  if (!base) return "0%";
+  const p = (value / base) * 100;
+  return `${p >= 10 ? Math.round(p) : Math.round(p * 10) / 10}%`;
+}
+
+const kpis = computed<KpiItem[]>(() => {
   const s = data.value?.total;
   if (!s) return [];
-  const list: StatTile[] = [
-    { key: "total", label: "箱子总数", value: s.total, clickable: false, icon: Box },
+  const total = s.total;
+  const moving = s.counts["在途"] ?? 0;
+  const list: KpiItem[] = [
+    {
+      key: "total",
+      label: "箱子总数",
+      value: total,
+      hint: `覆盖 ${(data.value?.branchTotal ?? 0) + (data.value?.stationCount ?? 0)} 家单位`,
+      clickable: false,
+      icon: Box,
+    },
     {
       key: "life:在途",
       label: lifeLabel("在途"),
-      value: s.counts["在途"] ?? 0,
+      value: moving,
+      hint: `占总数 ${pct(moving, total)}`,
       tone: "primary",
       icon: Van,
     },
@@ -427,6 +499,7 @@ const tiles = computed<StatTile[]>(() => {
       key: "life:未使用",
       label: "在仓库",
       value: s.counts["未使用"] ?? 0,
+      hint: `占总数 ${pct(s.counts["未使用"] ?? 0, total)}`,
       tone: "success",
       icon: House,
     },
@@ -438,6 +511,10 @@ const tiles = computed<StatTile[]>(() => {
         key: "moving",
         label: "运往检测站",
         value: st.moving,
+        // 「运往检测站」的台数是「在途」台数的子集，占比只按在途算。
+        // 以前在途为 0 时会换成按总数算，同一张卡在两种数据下写的不是同一个口径（L-P0-3）；
+        // 现在分母没了就不写占比，不换成另一个分母。
+        hint: moving ? `占在途 ${pct(st.moving, moving)}` : "",
         tone: "primary",
         clickable: false,
         icon: Position,
@@ -446,6 +523,7 @@ const tiles = computed<StatTile[]>(() => {
         key: "arrived",
         label: "已到检测站 · 未开箱检测",
         value: st.arrived,
+        hint: `占总数 ${pct(st.arrived, total)}`,
         tone: st.arrived ? "warning" : "default",
         clickable: false,
         icon: Suitcase,
@@ -454,6 +532,7 @@ const tiles = computed<StatTile[]>(() => {
         key: "inspected",
         label: "今日已检测",
         value: st.inspected,
+        hint: `占总数 ${pct(st.inspected, total)}`,
         tone: "success",
         clickable: false,
         icon: CircleCheck,
@@ -473,16 +552,25 @@ const flagChips = computed(() => {
   ].filter((chip) => chip.value > 0);
 });
 
-const donutOptions = computed(() => {
+/** 环图扇区：name 是显示名，key 是存储值，点击跳转时用 key。 */
+const donutParts = computed(() => {
   const p = palette.value;
   const s = data.value?.total;
-  if (!s) return {};
-  const parts = [
-    { name: lifeLabel("在途"), value: s.counts["在途"] ?? 0, color: p.primary },
-    { name: "在仓库", value: s.counts["未使用"] ?? 0, color: p.success },
-    { name: lifeLabel("待激活"), value: s.counts["待激活"] ?? 0, color: p.warning },
-    { name: lifeLabel("停用"), value: s.counts["停用"] ?? 0, color: p.info },
+  if (!s) return [];
+  return [
+    { key: "在途", name: lifeLabel("在途"), value: s.counts["在途"] ?? 0, color: p.primary },
+    { key: "未使用", name: "在仓库", value: s.counts["未使用"] ?? 0, color: p.success },
+    { key: "待激活", name: lifeLabel("待激活"), value: s.counts["待激活"] ?? 0, color: p.warning },
+    { key: "停用", name: lifeLabel("停用"), value: s.counts["停用"] ?? 0, color: p.info },
   ].filter((part) => part.value > 0);
+});
+
+const donutSub = computed(() =>
+  data.value?.total ? `共 ${data.value.total.total.toLocaleString()} 台 · 点扇区查看箱子` : ""
+);
+
+const donutOptions = computed(() => {
+  const p = palette.value;
   return {
     tooltip: { trigger: "item", formatter: "{b}：{c} 台（{d}%）" },
     legend: {
@@ -502,7 +590,7 @@ const donutOptions = computed(() => {
         itemStyle: { borderColor: p.bg, borderWidth: 2, borderRadius: 5 },
         label: { show: false },
         emphasis: { scaleSize: 4 },
-        data: parts.map((part) => ({
+        data: donutParts.value.map((part) => ({
           name: part.name,
           value: part.value,
           itemStyle: { color: part.color },
@@ -521,7 +609,7 @@ const topOptions = computed(() => {
     type: "bar",
     stack: "total",
     barWidth: 14,
-    itemStyle: { color },
+    itemStyle: { color, borderRadius: key === "pending" ? [0, 3, 3, 0] : 0 },
     emphasis: { focus: "series" },
     data: top.map((item) => item[key]),
   });
@@ -565,12 +653,39 @@ function openTile(key: string) {
   if (key.startsWith("life:") || key.startsWith("flag:"))
     void router.push({ path: "/device/boxes", query: { tile: key } });
 }
-function openUnit(row: { id: string }) {
-  void router.push(`/monitor/overview/${row.id}`);
+function onDonutSelect(p: ChartSelect) {
+  const part = donutParts.value.find((item) => item.name === p.name);
+  if (part) openTile(`life:${part.key}`);
+}
+function onTopSelect(p: ChartSelect) {
+  if (!p.name) return;
+  keyword.value = p.name;
+  nextTick(() => {
+    // SectionCard 的根就是一个 section，拿组件实例的 $el 滚过去；
+    // 原先用 document.querySelector('[data-test=...]') 是让生产逻辑依赖测试钩子（U-P2-4）
+    (unitsCard.value?.$el as HTMLElement | undefined)?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  });
+}
+function openUnit(row: Record<string, unknown>) {
+  void router.push(`/monitor/overview/${String(row.id)}`);
 }
 function clearFilter() {
   keyword.value = "";
   typeFilter.value = "";
+}
+/** 空态引导出口：范围里没有单位时不能把人困在空板上（R4）。 */
+function goHome() {
+  void router.push("/monitor/home");
+}
+function goBoxes() {
+  void router.push("/device/boxes");
+}
+function goMyUnit() {
+  const id = data.value?.myUnitId;
+  if (id) void router.push(`/monitor/overview/${id}`);
 }
 
 watch([debouncedKeyword, typeFilter, sort], () => {
@@ -583,55 +698,49 @@ watch([page, pageSize], () => {
 </script>
 
 <style scoped>
-.freshness {
+.head-meta {
   display: inline-flex;
-  gap: 5px;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   align-items: center;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-secondary);
 }
-.freshness .dot {
-  width: 6px;
-  height: 6px;
-  background: var(--status-ok);
-  border-radius: 50%;
+.boot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--page-gap);
 }
-.freshness.stale .dot {
-  background: var(--status-warn);
-}
-.freshness em {
-  padding: 0 4px;
-  font-size: 11px;
-  font-style: normal;
-  line-height: 16px;
-  color: var(--status-stale);
-  border: 1px solid currentcolor;
-  border-radius: 3px;
-}
-.auto-hint {
-  display: inline-flex;
-  gap: 5px;
+.empty-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   align-items: center;
-  margin-left: 10px;
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
 }
-.pulse {
-  width: 6px;
-  height: 6px;
-  background: var(--el-color-primary);
-  border-radius: 50%;
-  animation: pulse 2s ease-in-out infinite;
+.guide-text {
+  max-width: 460px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
 }
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.25;
-  }
+.guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+.kpi-skeleton {
+  padding: 14px 16px;
+  background: var(--content-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+}
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--page-gap);
+}
+.kpi-grid.is-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .flag-strip {
   display: flex;
@@ -650,10 +759,17 @@ watch([page, pageSize], () => {
   background: var(--content-bg);
   border: 1px solid var(--card-border);
   border-radius: 999px;
-  transition: border-color 0.15s;
+  transition:
+    border-color var(--motion-fast, 150ms),
+    box-shadow var(--motion-fast, 150ms);
 }
 .flag-chip:hover {
   border-color: var(--card-border-hover);
+  box-shadow: var(--card-shadow-hover);
+}
+.flag-chip:focus-visible {
+  outline: var(--focus-ring, 2px solid var(--el-color-primary));
+  outline-offset: 1px;
 }
 .flag-chip .dot {
   width: 6px;
@@ -703,12 +819,6 @@ watch([page, pageSize], () => {
 .donut-center span {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-}
-.unit-table {
-  width: 100%;
-}
-.unit-table :deep(.el-table__row) {
-  cursor: pointer;
 }
 .unit-cell {
   display: flex;
@@ -797,32 +907,24 @@ watch([page, pageSize], () => {
   flex-wrap: wrap;
   gap: 4px;
 }
-.table-foot {
-  display: flex;
-  justify-content: flex-end;
-  padding: 12px 16px;
-  border-top: 1px solid var(--card-divider);
+.row-go {
+  color: var(--el-text-color-placeholder);
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast, 150ms),
+    transform var(--motion-fast, 150ms);
 }
-.unit-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 80px;
-  padding: 12px;
+:deep(.el-table__row:hover) .row-go {
+  opacity: 1;
+  transform: translateX(2px);
 }
-.unit-card {
+.unit-card-body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  background: var(--content-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 8px;
+  min-width: 0;
 }
-.unit-card .go {
+.unit-card-body .go {
   margin-left: auto;
   color: var(--el-text-color-placeholder);
 }
@@ -841,18 +943,34 @@ watch([page, pageSize], () => {
   font-variant-numeric: tabular-nums;
   color: var(--el-text-color-primary);
 }
-.card-nums b.primary {
+.card-nums b.tone-primary {
   color: var(--el-color-primary);
 }
-.card-nums b.warn {
-  color: var(--el-color-warning);
-}
-.card-nums b.ok {
+.card-nums b.tone-success {
   color: var(--el-color-success);
 }
-@media (max-width: 1000px) {
+.card-nums b.tone-warning {
+  color: var(--el-color-warning);
+}
+.card-nums b.zero {
+  font-weight: 400;
+  color: var(--el-text-color-placeholder);
+}
+@media (max-width: 1280px) {
+  .kpi-grid,
+  .kpi-grid.is-three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1024px) {
   .charts {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .kpi-grid,
+  .kpi-grid.is-three {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>

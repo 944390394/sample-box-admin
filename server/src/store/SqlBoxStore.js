@@ -1,5 +1,5 @@
 import { defaultBoxName } from "../domain/boxName.js";
-import { currentBoxSettings } from "../settings/boxConfig.js";
+import { currentBoxSettings, offlineGraceSec } from "../settings/boxConfig.js";
 import { formatTimestamp } from "../domain/Clock.js";
 import { CommittedUplink } from "../domain/CommittedUplink.js";
 import { BoxState } from "../domain/BoxState.js";
@@ -14,6 +14,8 @@ import { UplinkBatch } from "./UplinkBatch.js";
 import { scopeSql } from "../auth/boxAccess.js";
 import { queueWipe } from "../settings/DeviceCommands.js";
 import { ENDED_SQL } from "../settings/taskFlow.js";
+import { ESCAPE_SQL, likePattern } from "./sqlText.js";
+import { badRequest } from "../domain/AppError.js";
 
 const UPLINK_LIST_COLUMNS = [
   "id",
@@ -125,6 +127,11 @@ export class SqlBoxStore extends BoxStore {
   /**
    * 清单页按页取。十万台时不能把整表送到浏览器。
    * 范围、快捷筛选、所属单位都落成 WHERE。按名称或编号（IMEI）搜。
+   *
+   * 两套 WHERE 各有用途，口径写清楚（L-P0-3）：
+   * - scopeWhere = 范围 + 搜索 + 单位，不含 life/flag，卡片数量和 scopeTotal 用它，所以点了状态卡片以后卡片数字本身不变，还能接着点另一张；
+   * - rowWhere = 上面那套再加 life/flag，列表行数和 filteredTotal 用它，分页也按它走。
+   * total 保留下来是给老调用点当「列表总数」用的，含义等同 filteredTotal；新代码要看口径就用这两个新字段。
    */
   async page({
     life = "",
@@ -138,8 +145,8 @@ export class SqlBoxStore extends BoxStore {
     orgId = "",
   } = {}) {
     await this.#ensureBoxIndex();
-    const base = boxWhere({ scope, q, matchImei, orgId });
-    const filter = boxWhere({
+    const scopeWhere = boxWhere({ scope, q, matchImei, orgId });
+    const rowWhere = boxWhere({
       scope,
       q,
       matchImei,
@@ -149,10 +156,10 @@ export class SqlBoxStore extends BoxStore {
       dialect: this.executor.dialect,
       orgId,
     });
-    const whereSql = filter.where.length ? `WHERE ${filter.where.join(" AND ")}` : "";
+    const whereSql = rowWhere.where.length ? `WHERE ${rowWhere.where.join(" AND ")}` : "";
     const totalRow = await this.executor.get(
       `SELECT COUNT(*) AS n FROM sample_box ${whereSql}`,
-      filter.params
+      rowWhere.params
     );
     const size = Math.min(100, Math.max(1, Number(pageSize) || 20));
     const offset = (Math.max(1, Number(page) || 1) - 1) * size;
@@ -162,12 +169,15 @@ export class SqlBoxStore extends BoxStore {
                 CASE WHEN alert <> '' THEN 0 ELSE 1 END,
                 last_report_at DESC
        LIMIT ? OFFSET ?`,
-      [...filter.params, size, offset]
+      [...rowWhere.params, size, offset]
     );
-    const summary = await this.#summarize(base, limits);
+    const summary = await this.#summarize(scopeWhere, limits);
+    const filtered = Number(totalRow?.n || 0);
     return {
       list: rows.map((row) => BoxState.fromRow(row)),
-      total: Number(totalRow?.n || 0),
+      total: filtered,
+      filteredTotal: filtered,
+      scopeTotal: summary.total,
       counts: summary.counts,
       flags: summary.flags,
     };
@@ -183,17 +193,18 @@ export class SqlBoxStore extends BoxStore {
   async statsByOrg(limits = null) {
     await this.#ensureBoxIndex();
     const lim = limits || { onlineSince: "9999", lowMv: 0, readyMv: 99999 };
-    const online = onlineSql(this.executor.dialect);
+    const online = onlineSql(this.executor.dialect, lim.onlineSince);
     const rows = await this.executor.all(
       `SELECT COALESCE(org_id,'') AS org_id, life, COUNT(*) AS n,
               SUM(CASE WHEN alert <> '' THEN 1 ELSE 0 END) AS alert,
-              SUM(CASE WHEN ${online} THEN 0 ELSE 1 END) AS offline,
+              SUM(CASE WHEN ${online.sql} THEN 0 ELSE 1 END) AS offline,
               SUM(CASE WHEN battery_mv > 0 AND battery_mv < ? THEN 1 ELSE 0 END) AS low,
               SUM(CASE WHEN lid = 1 THEN 1 ELSE 0 END) AS lid,
-              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online} AND battery_mv >= ?
+              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ?
                        THEN 1 ELSE 0 END) AS ready
        FROM sample_box GROUP BY org_id, life`,
-      [lim.onlineSince, lim.lowMv, lim.onlineSince, lim.readyMv]
+      // 参数顺序就是片段里 ? 出现的顺序：offline 的 onlineSince+now、low、ready 的 onlineSince+now、readyMv
+      [...online.params, lim.lowMv, ...online.params, lim.readyMv]
     );
     const map = new Map();
     for (const row of rows) {
@@ -218,18 +229,19 @@ export class SqlBoxStore extends BoxStore {
     const cached = this.summaryCache?.get(key);
     if (cached && Date.now() - cached.at < SUMMARY_TTL_MS) return cached.value;
     const whereSql = base.where.length ? `WHERE ${base.where.join(" AND ")}` : "";
-    const online = onlineSql(this.executor.dialect);
     const lim = limits || { onlineSince: "9999", lowMv: 0, readyMv: 99999 };
+    const online = onlineSql(this.executor.dialect, lim.onlineSince);
     const rows = await this.executor.all(
       `SELECT life, COUNT(*) AS n,
               SUM(CASE WHEN alert <> '' THEN 1 ELSE 0 END) AS alert,
-              SUM(CASE WHEN ${online} THEN 0 ELSE 1 END) AS offline,
+              SUM(CASE WHEN ${online.sql} THEN 0 ELSE 1 END) AS offline,
               SUM(CASE WHEN battery_mv > 0 AND battery_mv < ? THEN 1 ELSE 0 END) AS low,
               SUM(CASE WHEN lid = 1 THEN 1 ELSE 0 END) AS lid,
-              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online} AND battery_mv >= ?
+              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ?
                        THEN 1 ELSE 0 END) AS ready
        FROM sample_box ${whereSql} GROUP BY life`,
-      [lim.onlineSince, lim.lowMv, lim.onlineSince, lim.readyMv, ...base.params]
+      // 缓存键里没有 now：这批数量本来就允许旧 SUMMARY_TTL_MS，跟以前把 now 拼进 SQL 时一样
+      [...online.params, lim.lowMv, ...online.params, lim.readyMv, ...base.params]
     );
     const counts = { 在途: 0, 未使用: 0, 停用: 0, 待激活: 0 };
     const flags = { alert: 0, offline: 0, low: 0, lid: 0, ready: 0 };
@@ -497,7 +509,7 @@ export class SqlBoxStore extends BoxStore {
     let to = range.to;
     if (!from || !to) {
       const resolved = resolveTimeRange(range);
-      if (resolved.error) throw new Error(resolved.error);
+      if (resolved.error) throw badRequest(resolved.error);
       from = resolved.from;
       to = resolved.to;
     }
@@ -640,8 +652,10 @@ export class SqlBoxStore extends BoxStore {
     } else if (db.dialect === "mysql") {
       box = await this.#findByImei(db, uplink.imei, true);
     }
-    const kind = box.kindOf(uplink);
-    box.apply(uplink, receivedAt);
+    // apply 返回派生种类、不再就地改入参（R-12）。存储层显式把它标注到 uplink.kind，
+    // 供下游（录像、策略生效、指令确认、日志种类）统一读取——写回是编排层的显式决定，不是 apply 的隐藏副作用。
+    const kind = box.apply(uplink, receivedAt);
+    uplink.kind = kind;
     // 上报只改工况和位置；状态、归属、名称由管理操作和任务改，避免并发时被这一包的旧值盖回去
     await this.#save(db, box, MANAGED_COLUMNS);
     const record = UplinkRecord.capture(box, uplink, receivedAt, kind);
@@ -720,12 +734,16 @@ function boxWhere({
   }
   const text = String(q || "").trim();
   if (text) {
-    // MySQL 默认把反斜杠当字符串转义符，ESCAPE '\' 会让字面量不闭合，所以换成 !
-    const like = `%${text.replace(/[!%_]/g, (char) => `!${char}`)}%`;
-    // 编号就是 IMEI；名称和编号都能搜。matchImei 只为兼容旧调用，不再区分
-    void matchImei;
-    where.push("(name LIKE ? ESCAPE '!' OR id LIKE ? ESCAPE '!')");
-    params.push(like, like);
+    const like = likePattern(text);
+    // 编号就是 IMEI。没有「设备标识」权限的角色只让它搜名称，
+    // 不然拿编号当筛选器就能把整队箱子的 IMEI 一台台试出来（和列表里 IMEI 打码是同一件事）。
+    if (matchImei) {
+      where.push(`(name LIKE ? ${ESCAPE_SQL} OR id LIKE ? ${ESCAPE_SQL})`);
+      params.push(like, like);
+    } else {
+      where.push(`name LIKE ? ${ESCAPE_SQL}`);
+      params.push(like);
+    }
   }
   if (orgId != null && orgId !== "") {
     where.push("org_id = ?");
@@ -736,11 +754,11 @@ function boxWhere({
     params.push(life);
   }
   if (flag && limits) {
-    const online = onlineSql(dialect);
+    const online = onlineSql(dialect, limits.onlineSince);
     if (flag === "alert") where.push("alert <> ''");
     if (flag === "offline") {
-      where.push(`NOT ${online}`);
-      params.push(limits.onlineSince);
+      where.push(`NOT ${online.sql}`);
+      params.push(...online.params);
     }
     if (flag === "low") {
       where.push("battery_mv > 0 AND battery_mv < ?");
@@ -748,8 +766,8 @@ function boxWhere({
     }
     if (flag === "lid") where.push("lid = 1");
     if (flag === "ready") {
-      where.push(`life = '未使用' AND alert = '' AND ${online} AND battery_mv >= ?`);
-      params.push(limits.onlineSince, limits.readyMv);
+      where.push(`life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ?`);
+      params.push(...online.params, limits.readyMv);
     }
   }
   return { where, params };
@@ -760,13 +778,30 @@ function sqlId(value) {
   return Number.isSafeInteger(number) ? number : value;
 }
 
-/** 当前箱子自己的周期用于离线判断；仅充电模式且未充电时不据缺心跳断言掉线。 */
-function onlineSql(dialect) {
+/**
+ * 在线判断的 SQL 片段。当前箱子自己的周期用于离线判断；仅充电模式且未充电时不据缺心跳断言掉线。
+ *
+ * 「现在几点」以前是直接拼进 SQL 文本的：同一句查询每次文字都不一样，语句缓存用不上，
+ * 时间还绕过了参数通道（L-P2-8）。现在 now 和阈值 onlineSince 一起放 params 里返回，
+ * 顺序就是它们在片段里出现的顺序（先 onlineSince，再 now），调用点按这个顺序展开。
+ */
+function onlineSql(dialect, onlineSince) {
   const now = formatTimestamp(new Date(Math.floor(Date.now() / 5000) * 5000)).slice(0, 19);
   const chargeOnly = currentBoxSettings().reportOnlyWhenCharging ? 1 : 0;
   const elapsed =
     dialect === "mysql"
-      ? `TIMESTAMPDIFF(SECOND, last_report_at, '${now}')`
-      : `(julianday('${now}') - julianday(last_report_at))*86400`;
-  return `(last_report_at <> '' AND ((COALESCE(policy_charge_only,${chargeOnly})=1 AND charge=0) OR (CASE WHEN policy_period_sec IS NULL THEN last_report_at >= ? ELSE ${elapsed} <= policy_period_sec*3 END)))`;
+      ? "TIMESTAMPDIFF(SECOND, last_report_at, ?)"
+      : "(julianday(?) - julianday(last_report_at))*86400";
+  // B3/#18 宽限分支：被未结束任务占用且从未上报的箱子，建单后 grace 内不算离线（中性），超 grace 才算离线。
+  // bound_task_at 与 now 同格式（formatTimestamp 墙钟），grace 为服务端整数秒，内插安全。
+  const grace = offlineGraceSec();
+  const elapsedBound =
+    dialect === "mysql"
+      ? "TIMESTAMPDIFF(SECOND, bound_task_at, ?)"
+      : "(julianday(?) - julianday(bound_task_at))*86400";
+  return {
+    // 外层必须整体括号：调用点有 `NOT ${sql}`，SQL 的 NOT 优先级高于 OR，不包裹会短路宽限分支
+    sql: `((last_report_at <> '' AND ((COALESCE(policy_charge_only,${chargeOnly})=1 AND charge=0) OR (CASE WHEN policy_period_sec IS NULL THEN last_report_at >= ? ELSE ${elapsed} <= policy_period_sec*3 END))) OR (last_report_at = '' AND bound_task_at <> '' AND ${elapsedBound} <= ${grace}))`,
+    params: [onlineSince, now, now],
+  };
 }

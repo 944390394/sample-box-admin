@@ -5,7 +5,12 @@
  * AppID、AppSecret 在「系统设置 › 集成 › 微信小程序」里配置。
  * 本机调试没有 AppSecret 时，可以在启动服务前设环境变量 SAMPLE_WECHAT_FAKE_OPENID，
  * 跳过微信接口、把所有 code 都当成这个 openid；同时可设 SAMPLE_WECHAT_FAKE_PHONE 当作授权的手机号。线上服务不要设。
+ *
+ * 抛错一律带码（domain/AppError）：没配置是 A0409「未开通」，参数不对是 A0400，
+ * 微信侧失败或连不上是 B0503。普通 Error 会被接口层兜底当成内部异常，只能回「系统出错」。
  */
+import { badRequest, notConfigured, upstreamUnavailable } from "../domain/AppError.js";
+
 export class WechatMini {
   constructor({
     settings,
@@ -22,13 +27,15 @@ export class WechatMini {
   /** code 换 openid（和 UnionID，没绑开放平台时为空）；失败抛出给人看的错误。 */
   async openid(code) {
     if (typeof code !== "string" || !code || code.length > 128)
-      throw new Error("微信登录凭证无效，请重新打开小程序");
+      throw badRequest("微信登录凭证无效，请重新打开小程序");
     if (this.fakeOpenid) return { openid: this.fakeOpenid, appId: "dev", unionid: "" };
     const { appId, appSecret } = this.#credentials();
     const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}&js_code=${encodeURIComponent(code)}&grant_type=authorization_code`;
     const data = await this.#call(url);
     if (!data?.openid)
-      throw new Error(`微信登录失败：${data?.errmsg || data?.errcode || "没有返回 openid"}`);
+      throw upstreamUnavailable(
+        `微信登录失败：${data?.errmsg || data?.errcode || "没有返回 openid"}`
+      );
     return {
       openid: String(data.openid),
       appId,
@@ -39,9 +46,9 @@ export class WechatMini {
   /** 手机号快速验证组件的 code 换手机号（不带区号的 11 位）。凭证过期时刷新一次再试。 */
   async phoneNumber(code) {
     if (typeof code !== "string" || !code || code.length > 256)
-      throw new Error("手机号授权无效，请重新点「手机号快捷登录」");
+      throw badRequest("手机号授权无效，请重新点「手机号快捷登录」");
     if (this.fakeOpenid) {
-      if (!this.fakePhone) throw new Error("本机调试没有设 SAMPLE_WECHAT_FAKE_PHONE");
+      if (!this.fakePhone) throw notConfigured("本机调试没有设 SAMPLE_WECHAT_FAKE_PHONE");
       return this.fakePhone;
     }
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -53,15 +60,19 @@ export class WechatMini {
       if (data?.errcode === 0 && data.phone_info)
         return String(data.phone_info.purePhoneNumber || data.phone_info.phoneNumber || "");
       if (![40001, 42001].includes(data?.errcode))
-        throw new Error(`获取手机号失败：${data?.errmsg || data?.errcode || "微信没有返回手机号"}`);
+        throw upstreamUnavailable(
+          `获取手机号失败：${data?.errmsg || data?.errcode || "微信没有返回手机号"}`
+        );
     }
-    throw new Error("获取手机号失败：接口调用凭证无效");
+    throw upstreamUnavailable("获取手机号失败：接口调用凭证无效");
   }
 
   #credentials() {
     const { appId, appSecret } = this.settings();
     if (!appId || !appSecret)
-      throw new Error("还没配置小程序 AppID 和 AppSecret，请联系管理员到「系统设置 › 集成」填写");
+      throw notConfigured(
+        "小程序登录未开通：还没配置 AppID 和 AppSecret，请联系管理员到「系统设置 › 集成」填写"
+      );
     return { appId, appSecret };
   }
 
@@ -77,7 +88,9 @@ export class WechatMini {
       force_refresh: force,
     });
     if (!data?.access_token)
-      throw new Error(`获取微信接口凭证失败：${data?.errmsg || data?.errcode || "没有返回凭证"}`);
+      throw upstreamUnavailable(
+        `获取微信接口凭证失败：${data?.errmsg || data?.errcode || "没有返回凭证"}`
+      );
     this.token = {
       appId,
       token: String(data.access_token),
@@ -100,7 +113,7 @@ export class WechatMini {
       });
       return await res.json();
     } catch {
-      throw new Error("连不上微信服务器，请稍后再试");
+      throw upstreamUnavailable("连不上微信服务器，请稍后再试");
     }
   }
 }

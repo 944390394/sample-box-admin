@@ -48,13 +48,19 @@ export class Uplink {
     this.raw = fields.raw;
   }
 
-  /** 给人看的日志摘要，和详情页里的上报类型一致。 */
+  /** 给人看的日志摘要，和详情页里的上报类型一致。派生 kind 优先，没派生过（纯解析、迁移回看）才用原始 why。 */
   get label() {
-    if (this.why === "boot") return "上电上报";
-    if (this.why === "timer") return "定时上报";
-    if (this.why === "pad") return "开箱上报";
-    if (this.why === "shut") return "关箱上报";
-    if (this.why === "chg") return "充电上报";
+    return Uplink.labelOf(this.kind ?? this.why);
+  }
+
+  /** 上报种类 → 中文名。kindOf 派生出的种类也走这张表，摘要不会写成「定时上报」。 */
+  static labelOf(kind) {
+    if (kind === "boot") return "上电上报";
+    if (kind === "timer") return "定时上报";
+    if (kind === "pad") return "开箱上报";
+    if (kind === "shut") return "关箱上报";
+    if (kind === "chg") return "充电上报";
+    if (kind === "chgs") return "充电状态";
     return "设备上报";
   }
 

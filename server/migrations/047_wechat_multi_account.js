@@ -2,6 +2,14 @@
  * 一个微信可以绑多个账号：绑定表的主键从 openid 改成（openid, user_id）。
  * 一个账号在同一个应用里仍只绑一个微信（uk_user_wechat_user_app 不变）。
  * SQLite 改不了主键，按新结构建表、搬数据、换名；MySQL 直接换主键。已经是新结构的跳过。
+ *
+ * 迁移号 047 重复（R-8，论证保留）：本文件与 047_task_opens_from_create.js 共用数字前缀 047，
+ * 是两条独立改动并行落盘的历史产物。db.js migrate() 以「全文件名」作 schema_migrations.version
+ * （不是数字前缀），按文件名字典序执行：047_task_opens_from_create 排在 047_wechat_multi_account 之前，
+ * 两者都会执行、顺序确定、各自幂等（本文件先查主键是否已含 user_id，已是新结构直接 return），
+ * 不存在「一个被当成已应用而跳过」。**不改名/不改号**：已应用过的库以全文件名为 version 键，
+ * 改名会让生产把它当新迁移重跑（本脚本幂等可安全重跑，但没必要制造重跑）。序号只用于人工排序，版本号=文件名。
+ * 守卫用例见 server/test/migration-047-prefix.test.js。
  */
 export async function up(db) {
   if (db.dialect === "mysql") {

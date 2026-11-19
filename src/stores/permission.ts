@@ -7,6 +7,8 @@ import { isExternal } from "@/utils";
 
 import MenuAPI from "@/api/system/menu";
 import type { RouteItem } from "@/api/system/menu";
+import { buildLocalMenus, mergeLocalMenus } from "@/router/local-menus";
+import { loadBoxFeatures, useBoxFeatures } from "@/composables/useBoxFeatures";
 const modules = import.meta.glob("../views/**/*.vue");
 const Layout = () => import("../layouts/index.vue");
 
@@ -21,7 +23,13 @@ export const usePermissionStore = defineStore("permission", () => {
   async function generateRoutes(): Promise<RouteRecordRaw[]> {
     try {
       const routeData = await MenuAPI.getRoutes();
-      const menuRoutes = transformRoutes(routeData);
+      const serverRoutes = transformRoutes(routeData);
+      // 划拨/送检独立页菜单在前端注入（本批不改 server/menus.js），按功能开关 + 权限 gating
+      await loadBoxFeatures();
+      const { enableTransferInspect } = useBoxFeatures();
+      const perms = useUserStoreHook().userInfo.perms || [];
+      const local = buildLocalMenus({ enabled: enableTransferInspect.value, perms });
+      const menuRoutes = mergeLocalMenus(serverRoutes, local);
       const registerRoutes = filterRoutes(menuRoutes);
 
       routes.value = [...constantRoutes, ...menuRoutes];

@@ -1,5 +1,6 @@
 import {
   BOX,
+  boxNameCell,
   canSee,
   EVENT_KINDS,
   EVENT_PERMS,
@@ -7,8 +8,11 @@ import {
   FLAGS,
   flagAllowed,
   flagMatch,
+  identityGranted,
   maskBox,
+  maskImei,
   maskUplink,
+  scopeSql,
   usableMv,
 } from "../auth/boxAccess.js";
 import { bucketBattery } from "../domain/BatterySeries.js";
@@ -76,6 +80,10 @@ export class SampleController {
     ctx.ok({
       list: result.list.map((box) => view(ctx, box)),
       total: result.total,
+      // 两份口径分开给：filteredTotal 跟 total 一样是列表行数，scopeTotal 是不含状态/快捷筛选的总台数，
+      // 状态卡片上的数字加起来等于后者（L-P0-3）。
+      filteredTotal: result.filteredTotal ?? result.total,
+      scopeTotal: result.scopeTotal ?? null,
       page: filter.page,
       pageSize: filter.pageSize,
       counts: result.counts,
@@ -152,10 +160,14 @@ export class SampleController {
       if (used.has(box.id)) continue;
       used.add(box.id);
       if (box.life === "停用" || box.life === "在途") {
+        // 没起名的箱子不能把编号原样写进 name——现在的编号就是整串 IMEI（M-1）。
+        // skipped 这一份不走 maskBox，直接按「设备标识」权限给整串或打码副本，
+        // 小程序这类只渲染 name 的消费者才不会漏出标识。
+        const granted = identityGranted(ctx.access?.perms);
         skipped.push({
           key,
           id: box.id,
-          name: box.name || box.id,
+          name: box.name || (granted ? box.id : maskImei(box.id)),
           reason: box.life === "停用" ? "已停用" : "已在其他任务中",
         });
         continue;
@@ -218,6 +230,19 @@ export class SampleController {
     const access = ctx.access;
     const has = (perm) => !access?.perms || access.perms.has(perm);
     const scope = access?.scope || null;
+    // 任务待办按「经手」的历史快照算，箱子指标若只按当前组织/保管人算，箱子改挂后会对不上（全 0）；
+    // 工作台把本人保管和可见进行中任务的箱子并入范围，与 myBoxes / 待我处理同口径。不改全局 resolveScope，列表页范围不变。
+    const mine = ctx.user?.id ? String(ctx.user.id) : "";
+    const taskBoxIds =
+      this.policy && scope && !scope.all ? await this.policy.activeBoxIds(ctx) : [];
+    const benchScope =
+      scope && !scope.all
+        ? {
+            ...scope,
+            ownerIds: [...new Set([...(scope.ownerIds || []), ...(mine ? [mine] : [])])],
+            boxIds: taskBoxIds,
+          }
+        : scope;
     const lim = limits();
     // cards：勾了哪几张卡片（逐张授权）。卡片还要有看里面内容的权限才给数据
     const card = (name) => has(`monitor:card:${name}`);
@@ -246,18 +271,25 @@ export class SampleController {
     };
     const pick = async (filter) => {
       if (typeof this.boxes.page !== "function") return { total: 0, list: [] };
-      const page = await this.boxes.page({ ...filter, page: 1, pageSize: 5, scope, limits: lim });
+      const page = await this.boxes.page({
+        ...filter,
+        page: 1,
+        pageSize: 5,
+        scope: benchScope,
+        limits: lim,
+      });
       return { total: page.total, list: page.list.map(brief) };
     };
     if (has(BOX.list)) {
       if (typeof this.boxes.stats === "function") {
-        const stats = await this.boxes.stats({ scope, limits: lim });
+        const stats = await this.boxes.stats({ scope: benchScope, limits: lim });
         result.stats = { ...stats, flags: visibleFlags(stats.flags, access?.perms) };
       }
       if (card("pending") && has(BOX.activate))
         result.boxTodo.pending = await pick({ life: "待激活" });
       if (card("alert")) result.boxTodo.alert = await pick({ flag: "alert" });
-      if (card("offline")) result.boxTodo.offline = await pick({ flag: "offline", life: "在途" });
+      // 010：离线卡不再额外滤 life=在途，否则与落地列表/flags.offline 口径不一致（KPI≠行数）
+      if (card("offline")) result.boxTodo.offline = await pick({ flag: "offline" });
       if (card("low") && has(BOX.power)) result.boxTodo.low = await pick({ flag: "low" });
       if (card("lid") && has(BOX.lid)) result.boxTodo.lid = await pick({ flag: "lid" });
       if (card("myBoxes") && ctx.user?.id && typeof this.boxes.page === "function") {
@@ -296,14 +328,20 @@ export class SampleController {
     if (card("feed") && kinds.length && this.boxes.executor) {
       // 最近三天，按数据范围过滤；同一台箱子连续的同类事件合成一条（见 foldBoxEvents）
       const since = formatTimestamp(new Date(Date.now() - 3 * 86400000));
-      const scoped = scope && !scope.all ? scopeSqlFor(scope) : null;
+      const scoped = scopeSql(benchScope, "b.");
       const rows = await this.boxes.executor.all(
         `SELECT u.box_id, u.received_at, u.kind, b.name FROM sample_uplink u JOIN sample_box b ON b.id = u.box_id
          WHERE u.kind IN (${kinds.map(() => "?").join(",")}) AND u.received_at >= ?${scoped ? ` AND ${scoped.sql}` : ""}
          ORDER BY u.received_at DESC LIMIT 500`,
         [...kinds, since, ...(scoped ? scoped.params : [])]
       );
-      result.feed.push(...foldBoxEvents(rows).slice(0, 20));
+      // foldBoxEvents 在名称为空时把编号写进 boxName，而现在的编号就是整串 IMEI（M-1）；
+      // 合成后的这一份不走 maskBox，按「设备标识」权限换成整串或打码副本再下发
+      const events = foldBoxEvents(rows).map((item) => ({
+        ...item,
+        boxName: boxNameCell({ id: item.boxId, name: item.boxName }, access?.perms),
+      }));
+      result.feed.push(...events.slice(0, 20));
     }
     ctx.ok(result);
   }
@@ -439,9 +477,14 @@ export class SampleController {
     }
     const perms = ctx.access?.perms;
     const has = (perm) => !perms || perms.has(perm);
+    const granted = identityGranted(perms);
+    // 导出走的是 toJSON，名称为空时 name 就是编号回显、编号就是 IMEI（M-1），
+    // 所以名称列按 toJSON 的结果遮，IMEI 列按「设备标识」权限给整串或打码副本。
+    const nameCell = (json) => boxNameCell(json, perms, true);
+    const imeiCell = (json) => (granted ? json.id : maskImei(json.id));
     const columns = [
-      ["名称", (box) => box.name],
-      ["IMEI", (box) => box.id],
+      ["名称", nameCell],
+      ["IMEI", imeiCell],
       ["状态", (box) => box.life],
       ["所属单位", (box) => box.org],
       ["保管人", (box) => (box.owner === "—" ? "" : box.owner)],
@@ -570,7 +613,7 @@ export class SampleController {
     }
     await record(ctx, "导出单箱上报日志", box.id);
     await ctx.download(
-      `${box.name || box.id}-上报日志-${formatTimestamp(new Date()).slice(0, 10)}.csv`,
+      `${fileStem(box, ctx.access?.perms)}-上报日志-${formatTimestamp(new Date()).slice(0, 10)}.csv`,
       lines()
     );
   }
@@ -624,7 +667,10 @@ export class SampleController {
     }
     await record(ctx, "导出设备本机日志", box.id);
     await ctx.download(
-      `${box.id}-设备本机日志-${formatTimestamp(new Date()).slice(0, 10)}.csv`,
+      `${fileStem(box, ctx.access?.perms)}-设备本机日志-${formatTimestamp(new Date()).slice(
+        0,
+        10
+      )}.csv`,
       lines()
     );
   }
@@ -798,21 +844,6 @@ function allowed(ctx, perm) {
   return false;
 }
 
-/** 工作台事件查询的范围条件，列名带上 b. 前缀。 */
-function scopeSqlFor(scope) {
-  const parts = [],
-    params = [];
-  if (scope.orgIds.length) {
-    parts.push(`b.org_id IN (${scope.orgIds.map(() => "?").join(", ")})`);
-    params.push(...scope.orgIds);
-  }
-  if (scope.ownerIds.length) {
-    parts.push(`b.owner_id IN (${scope.ownerIds.map(() => "?").join(", ")})`);
-    params.push(...scope.ownerIds);
-  }
-  return parts.length ? { sql: `(${parts.join(" OR ")})`, params } : { sql: "1 = 0", params: [] };
-}
-
 function allowedTo(ctx, perm) {
   const perms = ctx.access?.perms;
   return !perms || perms.has(perm);
@@ -822,9 +853,13 @@ function view(ctx, box) {
   return maskBox(box.toJSON(), ctx.access?.perms);
 }
 
-/** IMEI 就是箱子编号，谁都能按 IMEI 搜。 */
-function canMatchImei() {
-  return true;
+/**
+ * 能不能按 IMEI 搜。箱子编号现在就是 IMEI，所以「按名称搜」和「按 IMEI 搜」是同一条 SQL；
+ * 没有「设备标识」权限的角色（现场采样员默认就是这样）不该拿整队箱子的 IMEI 去试，
+ * 所以这里按 identity 口径收口：只能搜名称。
+ */
+function canMatchImei(ctx) {
+  return identityGranted(ctx.access?.perms);
 }
 
 /** 低电量、开着盖、可调配的计数要对应的字段权限，没有就不给这几个数。 */
@@ -876,12 +911,12 @@ function pageInMemory(ctx, rows, filter, lim) {
   const matched = rows.filter(
     (box) =>
       !text ||
-      box.id.toLowerCase().includes(text) ||
+      // 编号就是 IMEI，只能按名称搜时（没有设备标识权限）这一项不参与
+      (imei && box.id.toLowerCase().includes(text)) ||
       String(box.name || "")
         .toLowerCase()
         .includes(text)
   );
-  void imei;
   for (const box of matched) {
     if (Object.prototype.hasOwnProperty.call(counts, box.life)) counts[box.life] += 1;
     for (const name of FLAGS) if (flagMatch(box, name, lim)) flags[name] += 1;
@@ -896,11 +931,25 @@ function pageInMemory(ctx, rows, filter, lim) {
   return {
     list: picked.slice(start, start + filter.pageSize).map((box) => view(ctx, box)),
     total: picked.length,
+    // 和 SqlBoxStore.page 同一份口径：picked 含 life/flag，matched 只到搜索词（L-P0-3）
+    filteredTotal: picked.length,
+    scopeTotal: matched.length,
     page: filter.page,
     pageSize: filter.pageSize,
     counts,
     flags,
   };
+}
+
+/**
+ * 下载文件名里的箱子称谓（M-1）。
+ * 没起名时不能把编号写进文件名——现在的编号就是整串 IMEI；打码串里的星号在 Windows 上
+ * 又不是合法文件名字符，所以无权时用不含标识的占位。有「设备标识」权限的照旧给整串。
+ */
+function fileStem(box, perms) {
+  const name = String(box?.name ?? "").trim();
+  if (name) return name.replace(/[\\/:*?"<>|]/g, "_");
+  return identityGranted(perms) ? String(box?.id ?? "").trim() || "未命名采样箱" : "未命名采样箱";
 }
 
 function csvCell(value) {

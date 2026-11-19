@@ -1,21 +1,42 @@
-/** 任务状态的颜色和每类任务的步骤，列表和详情共用。 */
+/**
+ * 任务状态的颜色和每类任务的步骤，列表和详情共用。
+ *
+ * 结束状态、步骤序列的唯一一份在 `shared/taskFlow.js`，服务端流程校验用的就是它，
+ * 这里只做展示层的映射；以前前端自己抄了一份只有「调拨/采样」两步表的 fallback，
+ * 送检（待检测/已检测）和拒收退回（退回中/已退回）都画不出来，进度条是空白。
+ */
+import {
+  ENDED_OK,
+  ENDED_VOID,
+  isEnded,
+  stepsOf as flowStepsOf,
+} from "../../../../shared/taskFlow.js";
+
 export function taskStatusType(status: string) {
-  if (["已签收", "已完成", "已检测"].includes(status)) return "success";
-  if (["已取消", "已拒收", "已退回"].includes(status)) return "info";
+  if (ENDED_OK.includes(status)) return "success";
+  if (ENDED_VOID.includes(status)) return "info";
   if (["待签收", "待核验", "待检测", "退回中"].includes(status)) return "warning";
   return "primary";
 }
 
-export const TASK_STEPS: Record<string, string[]> = {
-  调拨: ["待寄出", "运送中", "待签收", "已签收"],
-  采样: ["待采样", "采样中", "已封箱", "在途", "待核验", "已签收"],
-};
+/**
+ * 这张单的步骤：优先用服务端给的，没给（老接口）时按同一份流程表推。
+ * 参数写成 object 是因为调用方有三种形状：列表行（Record<string, unknown>）、
+ * PolicyTask、任务详情里的 task，都只读 steps/kind/status/trip 这几项。
+ */
+export function stepsOf(task: object): string[] {
+  const steps = (task as { steps?: unknown }).steps;
+  return Array.isArray(steps) && steps.length
+    ? (steps as string[])
+    : (flowStepsOf(task as Record<string, unknown>) as string[]);
+}
 
-/** 这张单的步骤：服务端按类型和寄送方式给出，旧接口没给时按类型取。 */
-export function stepsOf(task: { kind?: unknown; steps?: unknown }) {
-  return Array.isArray(task.steps) && task.steps.length
-    ? (task.steps as string[])
-    : TASK_STEPS[String(task.kind)] || [];
+/** 已经结束、不用再刷新的单子。 */
+export { isEnded };
+
+/** 结束的单子页头配色：按流程走完是 done，中途作废是 error。 */
+export function endedTone(status?: string) {
+  return ENDED_OK.includes(String(status || "")) ? "done" : "error";
 }
 
 /** 采样单的寄送方式，建单页和详情页的说明共用。 */

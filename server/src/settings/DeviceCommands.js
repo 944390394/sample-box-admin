@@ -35,7 +35,9 @@ export class DeviceCommands {
     const row = await this.db.get("SELECT * FROM box_wipe_pending WHERE imei=?", [uplink.imei]);
     if (!row) return null;
     if (Date.now() - Date.parse(row.requested_at) > WIPE_KEEP_MS) return this.#drop(uplink.imei);
-    if (uplink.why === "boot" && uplink.opens === 0 && row.issued_at)
+    // 这一包在入库前就走到这里（BoxState.apply 还没派生 kind），所以只能退回原始 why；
+    // 派生值有就用派生值，将来调用顺序调整也不用再改这里。
+    if ((uplink.kind ?? uplink.why) === "boot" && uplink.opens === 0 && row.issued_at)
       return { done: { boxId: row.box_id } };
     if (!firmwareSupportsRemote(uplink.firmware) || uplink.seq == null)
       return this.#drop(uplink.imei);

@@ -1,3 +1,4 @@
+import { badRequest } from "../domain/AppError.js";
 /**
  * 外部集成：邮件服务（SMTP）和视频平台。存在 db.config.json 的 smtp、video 里。
  * 密码、令牌只写不读：页面上显示是否已设置，保存时留空表示不改。
@@ -33,11 +34,11 @@ export function mergeSmtpSettings(current, input) {
   const secure = SECURE.includes(body.secure) ? body.secure : "ssl";
   const fromAddress = String(body.fromAddress || "").trim();
   const enabled = Boolean(body.enabled);
-  if (enabled && !host) throw new Error("请填写 SMTP 服务器");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("端口不正确");
-  if (fromAddress && !/^[^\s@]+@[^\s@]+$/.test(fromAddress)) throw new Error("发件地址格式不正确");
+  if (enabled && !host) throw badRequest("请填写 SMTP 服务器");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw badRequest("端口不正确");
+  if (fromAddress && !/^[^\s@]+@[^\s@]+$/.test(fromAddress)) throw badRequest("发件地址格式不正确");
   if (host.length > 255 || String(body.user || "").length > 255)
-    throw new Error("服务器或账号过长");
+    throw badRequest("服务器或账号过长");
   const typed = String(body.password || "");
   return {
     ...base,
@@ -78,10 +79,10 @@ export function mergeVideoSettings(current, input) {
   const previous = readVideo(base);
   const url = String(body.url || "").trim();
   const enabled = Boolean(body.enabled);
-  if (enabled && !/^https?:\/\/\S+$/.test(url)) throw new Error("请填写 http(s) 开头的接口地址");
+  if (enabled && !/^https?:\/\/\S+$/.test(url)) throw badRequest("请填写 http(s) 开头的接口地址");
   const timeoutMs = Number(body.timeoutMs);
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000)
-    throw new Error("超时要在 1000–60000 毫秒之间");
+    throw badRequest("超时要在 1000–60000 毫秒之间");
   const typed = String(body.token || "");
   return { ...base, video: { enabled, url, token: typed || previous.token, timeoutMs } };
 }
@@ -103,8 +104,8 @@ export function mergeWechatSettings(current, input) {
   const previous = readWechat(base);
   const appId = String(body.appId || "").trim();
   if (appId && !/^wx[0-9a-zA-Z]{16}$/.test(appId))
-    throw new Error("AppID 格式不对，应为 wx 开头的 18 位");
+    throw badRequest("AppID 格式不对，应为 wx 开头的 18 位");
   const typed = String(body.appSecret || "").trim();
-  if (typed && !/^[0-9a-zA-Z]{16,64}$/.test(typed)) throw new Error("AppSecret 格式不对");
+  if (typed && !/^[0-9a-zA-Z]{16,64}$/.test(typed)) throw badRequest("AppSecret 格式不对");
   return { ...base, wechat: { appId, appSecret: typed || previous.appSecret } };
 }

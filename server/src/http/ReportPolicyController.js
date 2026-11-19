@@ -1,18 +1,35 @@
 import { filterEvents, limits } from "./SampleController.js";
-import { canSee, flagAllowed, scopeSql, BOX } from "../auth/boxAccess.js";
-import { POLICY_PERMS as P, supportsDispatch, validatePolicy } from "../settings/ReportPolicy.js";
+import { BOX, canSee, flagAllowed, historicalScopeSql, scopeSql } from "../auth/boxAccess.js";
+import {
+  POLICY_PERMS as P,
+  supportsDispatch,
+  validatePolicy,
+  transferBlock,
+} from "../settings/ReportPolicy.js";
 import { audit } from "../log/audit.js";
-import { currentBoxSettings } from "../settings/boxConfig.js";
+import { currentBoxSettings, transferInspectEnabled } from "../settings/boxConfig.js";
 import { effectiveDeptLocation, hasCoords, readPlace } from "../geo/place.js";
 import { taskTrack, taskWindow } from "../settings/taskTrack.js";
-import { maskBox, maskUplink } from "../auth/boxAccess.js";
+import { maskBox, maskImei, maskUplink, identityGranted, boxNameCell } from "../auth/boxAccess.js";
 import { readCameras } from "../settings/deptCameras.js";
 import { receiveCheck } from "../settings/receiveCheck.js";
+import {
+  badRequest,
+  conflict,
+  noPermission,
+  notConfigured,
+  notVisible,
+} from "../domain/AppError.js";
+import { logSystem } from "../log/systemLog.js";
+import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
+import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 
 /** 任务相关的新权限码，见 permCatalog TASK_PERMS。 */
 const T = {
   createTransfer: "task:create:transfer",
   createSample: "task:create:sample",
+  createInspect: "task:create:inspect",
+  transferRevoke: "task:transfer:revoke",
   policy: "task:policy",
   send: "task:send",
   arrive: "task:arrive",
@@ -53,6 +70,35 @@ function inScope(ctx, orgId) {
   return !scope || scope.all || scope.orgIds.includes(String(orgId ?? ""));
 }
 
+/**
+ * 这个部门是不是那个单位本身、或在它下面（科室、班组）。
+ * 建单时选的寄出人、签收人必须是那个单位里的人：
+ * 只校验「账号存在且未停用」的话，建单方可以把签收人写成任意单位的任意用户，
+ * 那张单对这个用户不可见（读 404），他却能凭 signerId 走签收、把箱子归属改到自己名下。
+ */
+function deptUnder(depts, deptId, orgId) {
+  if (orgId == null || orgId === "") return true;
+  const tree = buildDeptTree(depts);
+  const ids = collectDeptIds(tree, String(orgId)) || [];
+  // 没分配部门的人归总公司（根单位），与读路径 userScopeSql 承认 NULL dept 的口径一致，别误拒
+  const rootId = String(tree[0]?.id ?? "1");
+  const effective = deptId == null || deptId === "" ? rootId : String(deptId);
+  return ids.includes(effective);
+}
+
+/**
+ * 单位 id 优先；旧调用只写单位名时，名字能唯一对上一个部门才认，对不上返回空表示校验不了。
+ * 校验寄出人、签收人属于哪一方时用，避免因为老数据没有 orgId 就直接放行。
+ */
+function resolveOrgId(depts, orgId, orgName) {
+  const id = String(orgId ?? "");
+  if (id) return id;
+  const name = String(orgName ?? "").trim();
+  if (!name) return "";
+  const hits = depts.filter((row) => String(row.name).trim() === name);
+  return hits.length === 1 ? String(hits[0].id) : "";
+}
+
 /** 当前用户是不是调拨单指定的签收人。 */
 function isSigner(ctx, task) {
   return Boolean(task.signerId) && String(ctx.user?.id ?? "") === String(task.signerId);
@@ -78,8 +124,7 @@ export class ReportPolicyController {
     this.db = policies.db;
   }
   require(ctx, perm) {
-    if (!ctx.access?.perms?.has(perm))
-      throw Object.assign(new Error("没有这项操作权限"), { httpStatus: 403, publicCode: "A0301" });
+    if (!ctx.access?.perms?.has(perm)) throw noPermission("没有这项操作权限");
   }
   async targets(ctx, ids) {
     if (
@@ -88,7 +133,7 @@ export class ReportPolicyController {
       ids.length > 10000 ||
       ids.some((id) => typeof id !== "string" || id.length > 64)
     )
-      throw new Error("请选择 1–10000 台采样箱");
+      throw badRequest("请选择 1–10000 台采样箱");
     const unique = [...new Set(ids)],
       result = [];
     for (let i = 0; i < unique.length; i += 200) {
@@ -97,6 +142,7 @@ export class ReportPolicyController {
         `SELECT * FROM sample_box WHERE id IN (${part.map(() => "?").join(",")})`,
         part
       );
+      // 不存在和不在范围内给同一个 404：不给「这台箱子存不存在」的线索，也不再把内部文案原文回给客户端
       if (
         rows.length !== part.length ||
         rows.some(
@@ -107,7 +153,7 @@ export class ReportPolicyController {
             })
         )
       )
-        throw new Error("部分采样箱不存在或不在你的管理范围内，请刷新选择");
+        throw notVisible("部分采样箱不存在或不在你的管理范围内，请刷新选择");
       result.push(...rows);
     }
     return result;
@@ -136,11 +182,11 @@ export class ReportPolicyController {
         (filter.life && !["待激活", "未使用", "在途", "停用"].includes(filter.life)) ||
         (filter.flag && !["alert", "offline", "low", "lid", "ready"].includes(filter.flag))
       )
-        throw new Error("筛选条件不正确");
+        throw badRequest("筛选条件不正确");
       if (filter.flag && !flagAllowed(filter.flag, ctx.access.perms))
         this.require(ctx, filter.flag === "lid" ? BOX.lid : BOX.power);
       if (Object.keys(filter).some((k) => !["q", "life", "flag"].includes(k)))
-        throw new Error("筛选条件不正确");
+        throw badRequest("筛选条件不正确");
       const rows = [];
       // 只分页读取当前状态表，冻结本次目标，提交时不会扩大到新匹配的箱子。
       for (let page = 1; page <= 101; page++) {
@@ -150,10 +196,10 @@ export class ReportPolicyController {
           pageSize: 100,
           limits: limits(),
           scope: ctx.access.scope,
-          matchImei: ctx.access.perms.has(BOX.identity),
+          matchImei: identityGranted(ctx.access.perms),
         });
         if (result.total > 10000)
-          throw new Error("单次最多设置 10000 台，请缩小筛选范围后分批操作");
+          throw badRequest("单次最多设置 10000 台，请缩小筛选范围后分批操作");
         rows.push(...result.list.map((b) => b.id));
         if (rows.length >= result.total) break;
       }
@@ -192,28 +238,40 @@ export class ReportPolicyController {
   }
   async createTask(ctx) {
     const input = ctx.body;
-    this.require(ctx, input?.kind === "调拨" ? T.createTransfer : T.createSample);
+    const inspectEnabled = transferInspectEnabled();
+    // 划拨提交即生效，必须走 /sample/transfers；通用建单端点不收（§6.1）
+    if (inspectEnabled && input?.kind === "划拨")
+      throw conflict("划拨单没有物流步骤，请使用划拨接口提交");
+    this.require(
+      ctx,
+      input?.kind === "调拨"
+        ? T.createTransfer
+        : inspectEnabled && input?.kind === "送检"
+          ? T.createInspect
+          : T.createSample
+    );
     // 任务期间的上报策略、单箱例外单独授权
     if (input?.policy != null || Object.keys(input?.overrides || {}).length)
       this.require(ctx, T.policy);
     const boxes = await this.targets(ctx, input.boxIds);
-    if (boxes.length > 100) throw new Error("一张任务单最多绑定 100 台箱子");
-    if (boxes.some((b) => b.life === "停用")) throw new Error("停用的箱子不能绑定任务");
+    if (boxes.length > 100) throw badRequest("一张任务单最多绑定 100 台箱子");
+    if (boxes.some((b) => b.life === "停用")) throw badRequest("停用的箱子不能绑定任务");
+    // 开关关时白名单与旧版完全一致（采样/调拨）；开时才收送检（B1），划拨恒拒
     if (
       typeof input.name !== "string" ||
       !input.name.trim() ||
       input.name.length > 120 ||
-      !["采样", "调拨"].includes(input.kind)
+      !(inspectEnabled ? ["采样", "调拨", "送检"] : ["采样", "调拨"]).includes(input.kind)
     )
-      throw new Error("请填写任务名称和类型");
+      throw badRequest("请填写任务名称和类型");
     if (
       input.overrides != null &&
       (typeof input.overrides !== "object" || Array.isArray(input.overrides))
     )
-      throw new Error("单箱策略格式不正确");
+      throw badRequest("单箱策略格式不正确");
     const overrides = {};
     for (const [id, value] of Object.entries(input.overrides || {})) {
-      if (!boxes.some((b) => b.id === id)) throw new Error("单箱策略必须属于任务绑定的箱子");
+      if (!boxes.some((b) => b.id === id)) throw badRequest("单箱策略必须属于任务绑定的箱子");
       overrides[id] = validatePolicy(value);
     }
     const metadata = {};
@@ -228,21 +286,25 @@ export class ReportPolicyController {
       "sample",
     ]) {
       if (input[key] != null && (typeof input[key] !== "string" || input[key].length > 1000))
-        throw new Error("任务字段格式不正确");
+        throw badRequest("任务字段格式不正确");
       metadata[key] = input[key] || "";
     }
-    const depts = await this.db.all("SELECT id,name,status,type FROM sys_dept");
+    // parentId 给 deptUnder 用：寄出人、签收人要在对应单位的部门树里找
+    const depts = await this.db.all(
+      "SELECT id,parent_id AS parentId,name,code,sort,status,type FROM sys_dept"
+    );
     const deptOf = (id) =>
       id == null || id === "" ? null : depts.find((row) => String(row.id) === String(id)) || null;
-    if (input.kind === "调拨") {
+    // 送检单与旧调拨共用物流表单校验（寄出/接收单位、寄出人、签收人、地址）；送检没有 direct 旁路
+    if (input.kind === "调拨" || input.kind === "送检") {
       // 新页面选单位，名称以库里为准；旧调用只给文字时照旧保存
       if (input.fromOrgId != null || input.toOrgId != null) {
         const from = deptOf(input.fromOrgId),
           to = deptOf(input.toOrgId);
-        if (!from || !to) throw new Error("请选择寄出和接收单位");
-        if (String(from.id) === String(to.id)) throw new Error("寄出和接收单位不能相同");
+        if (!from || !to) throw badRequest("请选择寄出和接收单位");
+        if (String(from.id) === String(to.id)) throw badRequest("寄出和接收单位不能相同");
         if (!inScope(ctx, from.id) && !isSystemAdmin(ctx))
-          throw new Error("寄出单位不在你的管理范围内");
+          throw badRequest("寄出单位不在你的管理范围内");
         Object.assign(metadata, {
           fromOrgId: String(from.id),
           fromOrg: from.name,
@@ -252,36 +314,46 @@ export class ReportPolicyController {
       }
       metadata.fromPlace = readPlace(input.fromPlace);
       metadata.toPlace = readPlace(input.toPlace);
-      // 直接调拨：不定位、不发货，建单后待签收。地址和寄出人、签收人不写入
-      if (input.direct === true) {
+      // 直接调拨（仅旧调拨）：不定位、不发货，建单后待签收。地址和寄出人、签收人不写入
+      if (input.kind === "调拨" && input.direct === true) {
         metadata.direct = true;
         metadata.fromPlace = null;
         metadata.toPlace = null;
         metadata.sender = "";
         metadata.signer = "";
       }
-      for (const [idKey, nameKey] of [
-        ["senderId", "sender"],
-        ["signerId", "signer"],
+      for (const [idKey, nameKey, label, idOrgKey, nameOrgKey] of [
+        ["senderId", "sender", "寄出人", "fromOrgId", "fromOrg"],
+        ["signerId", "signer", "签收人", "toOrgId", "toOrg"],
       ]) {
         if (input[idKey] == null || input[idKey] === "") continue;
-        const user = await this.db.get("SELECT id,nickname FROM sys_user WHERE id=? AND status=1", [
-          String(input[idKey]),
-        ]);
-        if (!user) throw new Error("寄出人或签收人不存在或已停用");
-        if (metadata.direct) continue;
+        const user = await this.db.get(
+          "SELECT id,nickname,dept_id AS deptId FROM sys_user WHERE id=? AND status=1",
+          [String(input[idKey])]
+        );
+        if (!user) throw badRequest("寄出人或签收人不存在或已停用");
+        // 寄出人、签收人必须是那一方单位里的人：只校验「账号存在且未停用」时，
+        // 建单方能把签收人写成任意单位的任意用户，那人再凭 signerId 签收、把箱子改挂到自己名下。
+        // direct（免物流）单同样校验，不再跳过。
+        const orgId = resolveOrgId(depts, metadata[idOrgKey], metadata[nameOrgKey]);
+        if (!orgId)
+          throw badRequest(`${label}的所属单位无法确认，请补全单位信息或改用单位选择后再建单`);
+        if (!deptUnder(depts, user.deptId, orgId))
+          throw badRequest(
+            `${label}必须是${metadata[nameOrgKey] || "该单位"}的人员，请重新选择或先调整人员所属部门`
+          );
         metadata[idKey] = String(user.id);
         metadata[nameKey] = user.nickname;
       }
     } else {
       if (input.trip != null && input.trip !== "") {
         // 带寄送：寄出单位把箱子寄给采样单位；双向的封箱后寄回寄出单位
-        if (!TRIPS.includes(input.trip)) throw new Error("寄送方式只能是单向或双向");
+        if (!TRIPS.includes(input.trip)) throw badRequest("寄送方式只能是单向或双向");
         const from = deptOf(input.fromOrgId),
           org = deptOf(input.orgId);
-        if (!from || !org) throw new Error("寄送采样箱要选择寄出单位和采样单位");
-        if (String(from.id) === String(org.id)) throw new Error("寄出单位和采样单位不能相同");
-        if (!inScope(ctx, from.id)) throw new Error("寄出单位不在你的管理范围内");
+        if (!from || !org) throw badRequest("寄送采样箱要选择寄出单位和采样单位");
+        if (String(from.id) === String(org.id)) throw badRequest("寄出单位和采样单位不能相同");
+        if (!inScope(ctx, from.id)) throw badRequest("寄出单位不在你的管理范围内");
         Object.assign(metadata, {
           trip: input.trip,
           fromOrgId: String(from.id),
@@ -290,17 +362,20 @@ export class ReportPolicyController {
         });
         if (input.senderId != null && input.senderId !== "") {
           const user = await this.db.get(
-            "SELECT id,nickname FROM sys_user WHERE id=? AND status=1",
+            "SELECT id,nickname,dept_id AS deptId FROM sys_user WHERE id=? AND status=1",
             [String(input.senderId)]
           );
-          if (!user) throw new Error("寄出人不存在或已停用");
+          if (!user) throw badRequest("寄出人不存在或已停用");
+          // 同调拨：寄出人要在寄出单位（含下级部门）里
+          if (!deptUnder(depts, user.deptId, metadata.fromOrgId))
+            throw badRequest(`寄出人必须是${metadata.fromOrg}的人员，请重新选择`);
           Object.assign(metadata, { senderId: String(user.id), sender: user.nickname });
         }
-        if (!metadata.sender) throw new Error("请填写寄出人");
+        if (!metadata.sender) throw badRequest("请填写寄出人");
       }
       if (input.orgId != null && input.orgId !== "") {
         const org = deptOf(input.orgId);
-        if (!org) throw new Error("采样单位不存在");
+        if (!org) throw badRequest("采样单位不存在");
         metadata.orgId = String(org.id);
         metadata.org = org.name;
       }
@@ -310,47 +385,54 @@ export class ReportPolicyController {
       if (input.recordVideo) {
         const org = deptOf(input.orgId);
         if (!org || org.type !== "采样机构")
-          throw new Error("只有采样单位是采样机构时才能要求开箱录像");
+          throw badRequest("只有采样单位是采样机构时才能要求开箱录像");
         metadata.recordVideo = true;
       }
     }
-    if (input.kind === "调拨" && input.recordVideo) throw new Error("调拨任务不能要求开箱录像");
-    // 签收方是采样机构（就是检测站；调拨的接收单位、双向采样单寄回的寄出单位）：签收后待检测，逐台扫码开始检测
+    if ((input.kind === "调拨" || input.kind === "送检") && input.recordVideo)
+      throw badRequest("调拨任务不能要求开箱录像");
+    // 签收方是采样机构（就是检测站；调拨/送检的接收单位、双向采样单寄回的寄出单位）：签收后待检测，逐台扫码开始检测
     const receiver =
-      input.kind === "调拨"
+      input.kind === "调拨" || input.kind === "送检"
         ? deptOf(metadata.toOrgId)
         : metadata.trip === "双向"
           ? deptOf(metadata.fromOrgId)
           : null;
     if (receiver?.type === "采样机构") metadata.inspect = true;
+    // 送检单本身就是送检测站：恒走检测站流程（签收→待检测→已检测）
+    if (input.kind === "送检") metadata.inspect = true;
     metadata.createdBy = actorOf(ctx).name;
     // 任务期间每台箱子最多开几次箱，不填不限
     // 没填就是不限。填了就按这张单上的次数判断，采样和调拨一样。
     if (input.maxOpens != null && input.maxOpens !== "") {
       const max = Number(input.maxOpens);
       if (!Number.isInteger(max) || max < 0 || max > 999)
-        throw new Error("开箱次数上限要在 0 到 999 之间");
+        throw badRequest("开箱次数上限要在 0 到 999 之间");
       metadata.maxOpens = max;
     }
     if (
-      input.kind === "调拨" &&
+      (input.kind === "调拨" || input.kind === "送检") &&
       (!metadata.fromOrg || !metadata.toOrg || metadata.fromOrg === metadata.toOrg)
     )
-      throw new Error(
+      throw badRequest(
         metadata.direct
           ? "请选择不同的调出单位和调入单位"
           : "请填写不同的寄出、接收公司及寄出人、签收人"
       );
-    if (input.kind === "调拨" && !metadata.direct && (!metadata.sender || !metadata.signer))
-      throw new Error("请填写不同的寄出、接收公司及寄出人、签收人");
+    if (
+      (input.kind === "调拨" || input.kind === "送检") &&
+      !metadata.direct &&
+      (!metadata.sender || !metadata.signer)
+    )
+      throw badRequest("请填写不同的寄出、接收公司及寄出人、签收人");
     if (metadata.direct && (!metadata.fromOrgId || !metadata.toOrgId))
-      throw new Error("请选择调出单位和调入单位");
+      throw badRequest("请选择调出单位和调入单位");
     // 一张直接调拨单只含同一个单位的箱子，多个单位由页面拆成多张
     if (metadata.direct && !isSystemAdmin(ctx)) {
       const foreign = boxes.filter(
         (box) => String(box.org_id ?? "") !== String(metadata.fromOrgId)
       );
-      if (foreign.length) throw new Error("直接调拨的箱子必须都属于调出单位，请按单位分开建单");
+      if (foreign.length) throw badRequest("直接调拨的箱子必须都属于调出单位，请按单位分开建单");
     }
     const id = await this.policies.createTask(
       {
@@ -373,20 +455,33 @@ export class ReportPolicyController {
   /**
    * 能看到的任务：绑定的箱子都在自己范围内（按历史快照），
    * 或者自己是调拨单的寄出、接收单位——接收方看不到寄出方的箱子，也要能签收。
+   * 采样单位同样是参与方：单向采样单的采样单位只记在 body.orgId（from/to 列为空），
+   * 箱子快照又属寄出单位，不认 body.orgId 的话采样单位在总览里看得到这张单、
+   * 任务列表却为空、点进详情 404（R4）。与 OverviewController.#tasks、#abilities 同口径。
    */
   #visible(ctx) {
-    const scope = scopeSql(ctx.access.scope);
-    if (!scope) return { sql: "", params: [] };
-    const historicalScope = scope.sql
-      .replace(/\borg_id\b/g, "COALESCE(b.org_id,m.org_id,'')")
-      .replace(/\bowner_id\b/g, "COALESCE(b.owner_id,m.owner_id,'')");
-    const orgIds = ctx.access.scope.orgIds;
+    const scope = ctx.access.scope;
+    if (!scope || scope.all) return { sql: "", params: [] };
+    const historical = historicalScopeSql(scope);
+    const orgIds = scope.orgIds;
     const own = orgIds.length
       ? ` OR t.from_org_id IN (${orgIds.map(() => "?").join(",")}) OR t.to_org_id IN (${orgIds.map(() => "?").join(",")})`
       : "";
+    const samplingIds = orgIds.filter(Boolean);
+    const sampling = samplingIds.length
+      ? ` OR (${samplingIds.map(() => `t.body LIKE ? ${ESCAPE_SQL}`).join(" OR ")})`
+      : "";
+    // 一台箱子都不挂的单（箱子被解绑或删除）不算「范围内」：只按寄出、接收、采样单位认参与方，
+    // 否则 NOT EXISTS 恒真会把这张单对所有人放出去。
     return {
-      sql: `(NOT EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND NOT (${historicalScope}))${own})`,
-      params: [...scope.params, ...orgIds, ...orgIds],
+      sql: `((EXISTS (SELECT 1 FROM sample_task_box l WHERE l.task_id = t.id) AND NOT EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND NOT (${historical.sql})))${own}${sampling})`,
+      params: [
+        ...historical.params,
+        ...orgIds,
+        ...orgIds,
+        // 单位编号是服务端的，不带通配符；% _ 一律按 ! 转义，双引号先去掉（与 #tasks 同口径）
+        ...samplingIds.map((id) => likePattern(`"orgId":"${String(id).replace(/"/g, "")}"`)),
+      ],
     };
   }
 
@@ -419,14 +514,25 @@ export class ReportPolicyController {
       clauses.push("EXISTS (SELECT 1 FROM sample_task_box m WHERE m.task_id=t.id AND m.box_id=?)");
       params.push(ctx.query.boxId);
     }
-    if (["采样", "调拨"].includes(ctx.query.kind)) {
+    // 开关开时（D-1）：任务单页默认只放采样，allKinds=1 兜底回全部；kind 白名单扩为四值。
+    // 开关关时与旧版完全一致：白名单 采样/调拨，不传 kind 返回全部。
+    const inspectEnabled = transferInspectEnabled();
+    if (
+      (inspectEnabled ? ["采样", "送检", "划拨", "调拨"] : ["采样", "调拨"]).includes(
+        ctx.query.kind
+      )
+    ) {
       clauses.push("t.kind=?");
       params.push(ctx.query.kind);
+    } else if (inspectEnabled && ctx.query.allKinds !== "1") {
+      clauses.push("t.kind='采样'");
     }
     const orgId = typeof ctx.query.orgId === "string" ? ctx.query.orgId.slice(0, 32) : "";
     if (orgId) {
-      clauses.push("(t.from_org_id=? OR t.to_org_id=? OR t.body LIKE ?)");
-      params.push(orgId, orgId, `%"orgId":"${orgId.replace(/[%_]/g, "")}"%`);
+      clauses.push(`(t.from_org_id=? OR t.to_org_id=? OR t.body LIKE ? ${ESCAPE_SQL})`);
+      // 以前是把关键字里的 % 和 _ 直接删掉再拼：搜索词被改了样子，匹配范围反而变窄。
+      // 现在原样保留、按 ! 转义，跟箱子列表、日志查询同一个口径（L-P2-5）。
+      params.push(orgId, orgId, likePattern(`"orgId":"${orgId}"`));
     }
     const day = (value, endOfDay) => {
       if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -445,10 +551,11 @@ export class ReportPolicyController {
     }
     const q = typeof ctx.query.q === "string" ? ctx.query.q.trim().slice(0, 60) : "";
     if (q) {
+      const like = likePattern(q);
       clauses.push(
-        "(t.id LIKE ? OR t.name LIKE ? OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (m.box_id LIKE ? OR b.name LIKE ?)))"
+        `(t.id LIKE ? ${ESCAPE_SQL} OR t.name LIKE ? ${ESCAPE_SQL} OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (m.box_id LIKE ? ${ESCAPE_SQL} OR b.name LIKE ? ${ESCAPE_SQL})))`
       );
-      params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+      params.push(like, like, like, like);
     }
     const base = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     // 各状态数量（不受状态筛选影响）
@@ -530,11 +637,351 @@ export class ReportPolicyController {
     ctx.ok({ list, total, counts });
   }
 
+  /** 划拨/送检特性开关（box.enableTransferInspect，默认关）：关时新端点明确报未开通，旧 /tasks 不受影响。 */
+  #requireTransferFeature() {
+    if (!transferInspectEnabled()) throw notConfigured("划拨/送检功能未开通，请先在系统设置中开启");
+  }
+
+  /**
+   * 创建划拨单（POST /sample/transfers）：提交即生效，归属在单据同一事务里转移。
+   * 箱子可见性沿用 targets（不存在/范围外同一个 404）；提交守卫与 candidate-boxes 同一函数。
+   */
+  async createTransfer(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, T.createTransfer);
+    const input = ctx.body || {};
+    if (typeof input.name !== "string" || !input.name.trim() || input.name.length > 120)
+      throw badRequest("请填写划拨单名称");
+    if (input.toOrgId == null || String(input.toOrgId) === "") throw badRequest("请选择目标公司");
+    if (input.note != null && (typeof input.note !== "string" || input.note.length > 1000))
+      throw badRequest("备注格式不正确");
+    if (
+      input.clientToken != null &&
+      (typeof input.clientToken !== "string" || input.clientToken.length > 64)
+    )
+      throw badRequest("clientToken 格式不正确");
+    const boxes = await this.targets(ctx, input.boxIds);
+    if (boxes.length > 500) throw badRequest("一张划拨单最多 500 台箱子，请分批提交");
+    const result = await this.policies.createTransfer(
+      {
+        name: input.name.trim(),
+        toOrgId: String(input.toOrgId),
+        boxIds: boxes.map((b) => b.id),
+        note: input.note || "",
+        clientToken: input.clientToken || "",
+      },
+      { ...actorOf(ctx), scope: ctx.access?.scope }
+    );
+    // 事务外副作用：归属变了，箱子汇总缓存清一次（失败不影响单据，口径同 createTask）
+    this.boxes.summaryCache?.clear();
+    const data = await this.policies.transferView(result.id);
+    if (!data) throw notVisible("划拨单不存在或不在你的管理范围内");
+    await this.log(
+      ctx,
+      result.idempotent ? "提交划拨（重复提交，返回原单）" : "提交划拨",
+      result.id
+    );
+    ctx.ok(
+      {
+        ...data,
+        idempotent: result.idempotent,
+        abilities: {
+          revoke: data.status === "已划拨" && ctx.access.perms.has(T.transferRevoke),
+          cancel: false,
+        },
+      },
+      result.idempotent
+        ? "已提交过，返回原划拨单"
+        : `已提交，${data.boxCount} 台箱子归属已转到 ${data.toOrg.name}`
+    );
+  }
+
+  /** 撤销划拨（POST /sample/transfers/:id/revoke）：整单禁撤守卫在服务端事务内实时判定。 */
+  async revokeTransfer(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, T.transferRevoke);
+    const row = await this.#visibleTask(ctx);
+    if (row.kind !== "划拨") throw conflict("只有划拨单可以撤销");
+    const reason = typeof ctx.body?.reason === "string" ? ctx.body.reason.trim() : "";
+    if (!reason || reason.length > 100) throw badRequest("请填写撤销原因（100 字以内）");
+    const result = await this.policies.revokeTransfer(row.id, { reason, actor: actorOf(ctx) });
+    this.boxes.summaryCache?.clear();
+    await this.log(ctx, "撤销划拨", row.id);
+    const orgs = [...new Set(result.restored.map((r) => r.toOrg))].join("、");
+    ctx.ok(result, `已撤销，${result.restoredCount} 台箱子归属已退回 ${orgs}`);
+  }
+
+  /**
+   * 划拨向导的箱子集下发（GET /sample/transfers/candidate-boxes，§6.5）：
+   * 替换预览页的 16 台 POOL 副本。selectable/reasonCode 与提交守卫同一函数（transferBlock），
+   * 不会「向导能选、提交被拒」。历史上开过盖/做过检测不下发也不拦（D-9，撤销时才判）。
+   */
+  async transferCandidates(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, T.createTransfer);
+    const q = typeof ctx.query.q === "string" ? ctx.query.q.trim().slice(0, 100) : "";
+    const orgId = typeof ctx.query.orgId === "string" ? ctx.query.orgId.slice(0, 32) : "";
+    const life = ["待激活", "未使用", "在途", "停用"].includes(ctx.query.life)
+      ? ctx.query.life
+      : "";
+    const toOrgId = String(ctx.query.toOrgId ?? "");
+    let target = null;
+    if (toOrgId) {
+      target = await this.db.get("SELECT id,name FROM sys_dept WHERE id=? AND status=1", [toOrgId]);
+      if (!target) throw badRequest("目标公司不存在或已停用");
+    }
+    const page = Math.max(1, Math.floor(Number(ctx.query.page) || 1));
+    const pageSize = Math.min(100, Math.max(1, Math.floor(Number(ctx.query.pageSize) || 50)));
+    const where = [];
+    const params = [];
+    const scoped = scopeSql(ctx.access?.scope);
+    if (scoped) {
+      where.push(scoped.sql);
+      params.push(...scoped.params);
+    }
+    if (q) {
+      const like = likePattern(q);
+      // 编号就是 IMEI：没有设备标识权限只搜名称/保管人，与箱子列表同一口径
+      if (identityGranted(ctx.access.perms)) {
+        where.push(
+          `(name LIKE ? ${ESCAPE_SQL} OR id LIKE ? ${ESCAPE_SQL} OR owner LIKE ? ${ESCAPE_SQL})`
+        );
+        params.push(like, like, like);
+      } else {
+        where.push(`(name LIKE ? ${ESCAPE_SQL} OR owner LIKE ? ${ESCAPE_SQL})`);
+        params.push(like, like);
+      }
+    }
+    if (orgId) {
+      where.push("org_id=?");
+      params.push(orgId);
+    }
+    if (life) {
+      where.push("life=?");
+      params.push(life);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const total = Number(
+      (await this.db.get(`SELECT COUNT(*) AS n FROM sample_box ${whereSql}`, params)).n
+    );
+    const rows = await this.db.all(
+      `SELECT id,name,org,org_id,owner,owner_id,life,last_report_at,battery_mv FROM sample_box ${whereSql} ORDER BY id LIMIT ? OFFSET ?`,
+      [...params, pageSize, (page - 1) * pageSize]
+    );
+    const seePower = ctx.access.perms.has(BOX.power);
+    const list = [];
+    let selectableCount = 0;
+    let blockedCount = 0;
+    for (const row of rows) {
+      const hit = await transferBlock(
+        this.db,
+        row,
+        target ? { id: String(target.id), name: target.name } : null
+      );
+      // 占用关系与 busy 守卫同一判定（未结束单 × 未开始检测），多单取最早建单那张
+      const bound = await this.db.get(
+        `SELECT t.id,t.name,t.kind,t.status,t.created_at FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.status NOT IN (${ENDED_SQL}) AND m.inspected_at IS NULL ORDER BY t.created_at LIMIT 1`,
+        [row.id]
+      );
+      if (hit) blockedCount += 1;
+      else selectableCount += 1;
+      list.push({
+        boxId: row.id,
+        code: row.id,
+        name: boxNameCell({ name: row.name || row.id, id: row.id }, ctx.access.perms),
+        orgId: String(row.org_id ?? ""),
+        org: row.org,
+        ownerId: String(row.owner_id ?? ""),
+        owner: row.owner || "—",
+        life: row.life,
+        lastReportAt: row.last_report_at || "",
+        batteryMv: seePower
+          ? row.battery_mv == null || row.battery_mv === ""
+            ? null
+            : Number(row.battery_mv)
+          : null,
+        boundTask: bound
+          ? {
+              id: bound.id,
+              name: bound.name,
+              kind: bound.kind,
+              status: bound.status,
+              createdAt: bound.created_at,
+            }
+          : null,
+        selectable: !hit,
+        ...(hit ? { reasonCode: hit.reasonCode, reason: hit.reason } : {}),
+      });
+    }
+    ctx.ok({ list, total, selectableCount, blockedCount, page, pageSize });
+  }
+
+  /**
+   * 划拨列表（GET /sample/transfers，kind=划拨）：counts 与列表同口径（同一 WHERE 去掉 status），
+   * boxCountTotal 是箱次累计口径（同一箱子出现在多单计多次，§6.2）。
+   */
+  async transfers(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, BOX.task);
+    const visible = this.#visible(ctx);
+    const clauses = ["t.kind='划拨'", ...(visible.sql ? [visible.sql] : [])];
+    const params = [...visible.params];
+    const orgId = typeof ctx.query.orgId === "string" ? ctx.query.orgId.slice(0, 32) : "";
+    if (orgId) {
+      // from 匹配建单快照（跨公司批量时 from_org_id 为 NULL），to 匹配 to_org_id
+      clauses.push(
+        "(t.to_org_id=? OR EXISTS (SELECT 1 FROM sample_task_box m WHERE m.task_id=t.id AND m.org_id=?))"
+      );
+      params.push(orgId, orgId);
+    }
+    const day = (value, endOfDay) => {
+      if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+      const date = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}`);
+      return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    };
+    const from = day(ctx.query.from, false),
+      to = day(ctx.query.to, true);
+    if (from) {
+      clauses.push("t.created_at>=?");
+      params.push(from);
+    }
+    if (to) {
+      clauses.push("t.created_at<=?");
+      params.push(to);
+    }
+    const q = typeof ctx.query.q === "string" ? ctx.query.q.trim().slice(0, 60) : "";
+    if (q) {
+      const like = likePattern(q);
+      clauses.push(
+        `(t.id LIKE ? ${ESCAPE_SQL} OR t.name LIKE ? ${ESCAPE_SQL} OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (m.box_id LIKE ? ${ESCAPE_SQL} OR b.name LIKE ? ${ESCAPE_SQL})))`
+      );
+      params.push(like, like, like, like);
+    }
+    const base = `WHERE ${clauses.join(" AND ")}`;
+    const grouped = await this.db.all(
+      `SELECT t.status, COUNT(*) AS n FROM sample_task t ${base} GROUP BY t.status`,
+      params
+    );
+    const counts = { 全部: 0, 已划拨: 0, 已撤销: 0 };
+    for (const row of grouped) {
+      const n = Number(row.n);
+      counts[row.status] = n;
+      counts.全部 += n;
+    }
+    counts.boxCountTotal = Number(
+      (
+        await this.db.get(
+          `SELECT COUNT(*) AS n FROM sample_task_box m JOIN sample_task t ON t.id=m.task_id ${base}`,
+          params
+        )
+      ).n
+    );
+    const statusClauses = [...clauses],
+      statusParams = [...params];
+    if (["已划拨", "已撤销"].includes(ctx.query.status)) {
+      statusClauses.push("t.status=?");
+      statusParams.push(ctx.query.status);
+    }
+    const where = `WHERE ${statusClauses.join(" AND ")}`;
+    const page = Math.max(1, Math.floor(Number(ctx.query.page) || 1));
+    const pageSize = Math.min(100, Math.max(1, Math.floor(Number(ctx.query.pageSize) || 20)));
+    const rows = await this.db.all(
+      `SELECT t.* FROM sample_task t ${where} ORDER BY created_at DESC,id DESC LIMIT ${pageSize} OFFSET ?`,
+      [...statusParams, (page - 1) * pageSize]
+    );
+    const total = Number(
+      (await this.db.get(`SELECT COUNT(*) AS n FROM sample_task t ${where}`, statusParams)).n
+    );
+    const depts = await this.db.all("SELECT id,name FROM sys_dept");
+    const orgNameOf = new Map(depts.map((d) => [String(d.id), d.name]));
+    const list = [];
+    for (const row of rows) {
+      const body = JSON.parse(row.body);
+      const links = await this.db.all("SELECT org_id FROM sample_task_box WHERE task_id=?", [
+        row.id,
+      ]);
+      const fromMap = new Map();
+      for (const link of links) {
+        const id = String(link.org_id ?? "");
+        const bucket = fromMap.get(id) || {
+          orgId: id,
+          orgName: orgNameOf.get(id) || id || "总公司",
+          count: 0,
+        };
+        bucket.count += 1;
+        fromMap.set(id, bucket);
+      }
+      const revokeLog =
+        row.status === "已撤销"
+          ? await this.db.get(
+              "SELECT created_at,note FROM sample_task_log WHERE task_id=? AND action='撤销划拨' ORDER BY created_at DESC LIMIT 1",
+              [row.id]
+            )
+          : null;
+      list.push({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        createdAt: row.created_at,
+        boxCount: links.length,
+        from: [...fromMap.values()],
+        toOrg: {
+          id: String(row.to_org_id ?? ""),
+          name: body.toOrg || orgNameOf.get(String(row.to_org_id ?? "")) || "",
+        },
+        by: body.createdBy || "",
+        byId: body.createdById || "",
+        ...(revokeLog
+          ? { revokedAt: revokeLog.created_at, revokeReason: revokeLog.note || "" }
+          : {}),
+      });
+    }
+    ctx.ok({
+      list,
+      total,
+      counts,
+      kpiHints: { boxCountTotal: "箱次口径：同一箱子出现在多单计多次" },
+    });
+  }
+
+  /** 划拨详情（GET /sample/transfers/:id）：逐台快照 + 实时撤销守卫结论 + 审计线。 */
+  async transferDetail(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, BOX.task);
+    const row = await this.#visibleTask(ctx);
+    if (row.kind !== "划拨") throw notVisible("划拨单不存在或不在你的管理范围内");
+    const data = await this.policies.transferView(row.id);
+    const logs = await this.db.all(
+      "SELECT * FROM sample_task_log WHERE task_id=? ORDER BY created_at, id",
+      [row.id]
+    );
+    ctx.ok({
+      ...data,
+      abilities: {
+        revoke: row.status === "已划拨" && ctx.access.perms.has(T.transferRevoke),
+        cancel: false,
+      },
+      logs: logs.map((log) => ({
+        status: log.status,
+        action: log.action,
+        by: log.actor_name || "",
+        note: log.note || "",
+        time: log.created_at,
+        detail: log.detail ? JSON.parse(log.detail) : null,
+      })),
+    });
+  }
+
   /** 创建页的候选：所有启用单位（含有效位置、是否在自己范围内），选了单位再取人员。 */
   async taskOptions(ctx) {
     if (!ctx.access?.perms?.has(T.createTransfer)) this.require(ctx, T.createSample);
+    // 列明白写出来（L-P2-4）：这张表后面还长过 cameras、perm_limited、max_data_scope 这些
+    // 只给授权页用的列，SELECT d.* 早晚把它们带到只给创建页的响应里。
     const rows = await this.db.all(
-      "SELECT d.*, u.nickname AS leader_name FROM sys_dept d LEFT JOIN sys_user u ON u.id = d.leader_user_id AND u.status = 1 WHERE d.status = 1"
+      `SELECT d.id, d.parent_id, d.name, d.type, d.sort, d.address, d.lng, d.lat, d.contact, d.phone,
+              d.leader_user_id, u.nickname AS leader_name
+         FROM sys_dept d LEFT JOIN sys_user u ON u.id = d.leader_user_id AND u.status = 1
+        WHERE d.status = 1`
     );
     const byId = new Map(rows.map((row) => [String(row.id), row]));
     const pathOf = (id) => {
@@ -579,11 +1026,16 @@ export class ReportPolicyController {
         dept: pathOf(row.dept_id),
       }));
     }
+    // 创建任务页的默认值都从系统设置来：前端不要再写死一个「60 秒」，
+    // 管理员把默认上报周期改了，页面上的「本任务统一」初始值要跟着变。
+    const settings = currentBoxSettings();
     ctx.ok({
       orgs,
       users,
       myOrgId: String(ctx.user?.dept_id || ""),
-      arriveRadiusM: currentBoxSettings().arriveRadiusM,
+      arriveRadiusM: settings.arriveRadiusM,
+      defaultReportPeriodSec: settings.reportPeriodSec,
+      defaultReportOnlyWhenCharging: settings.reportOnlyWhenCharging,
     });
   }
 
@@ -605,6 +1057,27 @@ export class ReportPolicyController {
       "SELECT * FROM sample_task_log WHERE task_id=? ORDER BY created_at, id",
       [row.id]
     );
+    // detail 只解析一次：距离快照按位置权限遮挡；签收交接结果（R-5）不含位置，单独暴露
+    const logDetails = logs.map((log) => {
+      try {
+        return log.detail ? JSON.parse(log.detail) : null;
+      } catch {
+        return null;
+      }
+    });
+    // 最近一次签收交接：存在签收流转记录的 detail.handOver 里，倒序找第一条
+    let handOver = null;
+    for (let i = logs.length - 1; i >= 0 && !handOver; i -= 1) {
+      const info = logDetails[i]?.handOver;
+      if (info)
+        handOver = {
+          movedCount: info.movedCount ?? null,
+          skippedCount: info.skippedCount ?? (info.skipped || []).length,
+          skipped: info.skipped || [],
+          at: logs[i].created_at,
+          by: logs[i].actor_name || "",
+        };
+    }
     const target = targetOf(task, row.status);
     const withPosition = ctx.access.perms.has(BOX.location);
     const counts = await openCounts(this.db, row.id);
@@ -693,13 +1166,15 @@ export class ReportPolicyController {
       },
       arriveRadiusM: radiusOf(target),
       ...(await this.#receiveDetail(ctx, task, row)),
-      logs: logs.map((log) => ({
+      // 最近一次签收交接的跳过明细（R-5）：页面据此显示「N 台箱子未随单交接」警示
+      handOver,
+      logs: logs.map((log, index) => ({
         status: log.status,
         action: log.action,
         by: log.actor_name || "",
         note: log.note || "",
         time: log.created_at,
-        detail: log.detail && withPosition ? JSON.parse(log.detail) : null,
+        detail: logDetails[index] && withPosition ? logDetails[index] : null,
       })),
     });
   }
@@ -902,6 +1377,21 @@ export class ReportPolicyController {
   }
 
   /**
+   * 工作台指标口径：可见的进行中任务绑定的箱子（历史快照，与 todo 同一批任务）。
+   * 箱子后来改挂单位/保管人时，任务待办还在、箱子指标不能掉成 0。
+   */
+  async activeBoxIds(ctx) {
+    if (!ctx.access.perms.has(BOX.task)) return [];
+    const visible = this.#visible(ctx);
+    const rows = await this.db.all(
+      `SELECT DISTINCT m.box_id FROM sample_task t JOIN sample_task_box m ON m.task_id = t.id
+       WHERE t.status NOT IN (${ENDED_SQL})${visible.sql ? ` AND ${visible.sql}` : ""} LIMIT 2000`,
+      visible.params
+    );
+    return rows.map((row) => String(row.box_id));
+  }
+
+  /**
    * 扫箱码（小程序扫箱子上的二维码进来）。箱子在自己范围内：给状态（按权限遮挡），能建任务时 canCreate=true；
    * 不在范围内（比如调拨单的接收方）：只给名称，但和自己相关的任务照样列出、能签收。
    */
@@ -969,15 +1459,18 @@ export class ReportPolicyController {
         publicCode: "A0301",
       });
     const json = box.toJSON();
+    // 范围外、只在任务单上见过的箱子：给得越少越好，IMEI 同样按「设备标识」权限打码
+    const hidden = {
+      id: box.id,
+      // 名称为空时 toJSON 是编号回显，编号就是整串 IMEI（M-1）：这一份不走 maskBox，自己遮一次
+      name: boxNameCell(json, perms),
+      life: json.life,
+      masked: ["status", "location", "identity"],
+      imei: identityGranted(perms) ? json.imei || box.id : maskImei(json.imei || box.id),
+    };
+    if (!identityGranted(perms)) hidden.masked = [...hidden.masked, "imei"];
     ctx.ok({
-      box: visible
-        ? maskBox(json, perms)
-        : {
-            id: box.id,
-            name: json.name,
-            life: json.life,
-            masked: ["status", "location", "identity"],
-          },
+      box: visible ? maskBox(json, perms) : hidden,
       visible,
       tasks,
       canCreate:
@@ -1122,11 +1615,7 @@ export class ReportPolicyController {
       `SELECT t.* FROM sample_task t WHERE t.id=?${visible.sql ? ` AND ${visible.sql}` : ""}`,
       [ctx.params.id, ...visible.params]
     );
-    if (!row)
-      throw Object.assign(new Error("任务不存在或不在你的管理范围内"), {
-        httpStatus: 404,
-        publicCode: "A0404",
-      });
+    if (!row) throw notVisible("任务不存在或不在你的管理范围内");
     return row;
   }
 
@@ -1135,14 +1624,17 @@ export class ReportPolicyController {
     const asked = ctx.body?.status;
     const force = asked === FORCE_SIGN;
     const note = typeof ctx.body?.note === "string" ? ctx.body.note.slice(0, 1000) : "";
-    const row = await this.db.get("SELECT * FROM sample_task WHERE id=?", [ctx.params.id]);
-    if (!row) throw new Error("任务不存在");
+    // 入口先按数据范围取单：裸 SELECT 让范围外账号改一个 :id 就能推进别人的单（L-P0-1）
+    const row = await this.#visibleTask(ctx);
+    const id = row.id;
     const task = JSON.parse(row.body);
+    // 划拨单没有物流步骤（§6.3）：只能走撤销端点。nextOf 恒空也会拦，这里给明确文案
+    if (task.kind === "划拨") throw conflict("划拨单没有物流步骤，请使用撤销接口");
     const signTo = signTargetOf(task);
     const status = force ? signTo : asked;
-    const ids = (
-      await this.db.all("SELECT box_id FROM sample_task_box WHERE task_id=?", [ctx.params.id])
-    ).map((b) => b.box_id);
+    const ids = (await this.db.all("SELECT box_id FROM sample_task_box WHERE task_id=?", [id])).map(
+      (b) => b.box_id
+    );
     const transfer = task.kind === "调拨" && task.toOrgId;
     // 签收、强制签收、拒收：先做签收核验，有问题时不能直接签收
     const receiving = [signTo, FORCE_SIGN, "已拒收", "退回中"].includes(asked);
@@ -1167,16 +1659,26 @@ export class ReportPolicyController {
             : transfer && [signTo, "已拒收", "已检测"].includes(status)
               ? "只有接收单位的人员可以签收、拒收或开始检测"
               : "没有这项操作权限";
-      throw Object.assign(new Error(message), { httpStatus: 403, publicCode: "A0301" });
+      throw noPermission(message);
     }
-    if (force && !note.trim()) throw new Error("请填写强制签收的原因");
-    if (status === "退回中" && !note.trim()) throw new Error("请填写拒收原因");
+    if (force && !note.trim()) throw badRequest("请填写强制签收的原因");
+    if (status === "退回中" && !note.trim()) throw badRequest("请填写拒收原因");
+    if (!status) throw badRequest("请选择要推进到的状态");
+    // 建单时已经要求签收人在接收单位里；这里再认一次，兜住建单后人被调走、以及改造前留下的外来 signerId。
+    // 正常签收只拦「以签收人身份」这条路：接收单位里其他人本来就走强制签收，要写原因。
+    // 同一次判定交给交接用：外来用户不能因为这张单把自己变成这批箱子的保管人。
+    const signerFit =
+      transfer && status === signTo && task.signerId
+        ? await this.#signerFitsReceiver(task)
+        : "none";
+    if (asked === signTo && isSigner(ctx, task) && signerFit === "foreign")
+      throw noPermission("签收人已不属于这张单的接收单位，请由接收单位有签收权限的人强制签收");
     // 接收方看不到寄出方的箱子，签收、到达不再按箱子范围拦
-    // 带寄送的采样单同理：采样单位、寄出单位按任务上的单位放行
+    // 采样单同理：采样单位按任务上的单位放行——单向采样单的箱子可能仍属寄出单位，
+    // 采样单位在现场经手箱子，#abilities 也承认它是参与方，不能再用箱子范围拦它的推进（R4）
     const party =
       task.kind === "采样" &&
-      task.trip &&
-      (inScope(ctx, task.orgId) || inScope(ctx, task.fromOrgId));
+      (inScope(ctx, task.orgId) || (task.trip && inScope(ctx, task.fromOrgId)));
     if (
       !party &&
       !(
@@ -1196,20 +1698,47 @@ export class ReportPolicyController {
         : null;
     // 运送中直接扫码签收、拒收：先自动记一笔确认到达
     if (transfer && row.status === "运送中" && [signTo, "已拒收", "退回中"].includes(status)) {
-      await this.policies.transition(ctx.params.id, "待签收", {
+      await this.policies.transition(id, "待签收", {
         actor: actorOf(ctx),
         note: "扫码收货时自动确认到达",
       });
     }
-    await this.policies.transition(ctx.params.id, status, {
+    // 签收交接（R-5）：归属迁移并入 transition 的同一事务，任一台失败整体回滚，
+    // 不再出现「已签收但归属只移了一半」。跳过守卫（已改挂/不在寄出方）语义不变。
+    const result = await this.policies.transition(id, status, {
       actor: actorOf(ctx),
       note,
       detail,
       action: force ? FORCE_SIGN : undefined,
+      handOver: transfer && status === signTo ? { signerFit } : null,
     });
-    if (transfer && status === signTo) await this.#handOver(task, ids);
-    await this.log(ctx, force ? "任务单强制签收" : `任务单推进到「${status}」`, ctx.params.id);
-    ctx.ok({ saved: true });
+    const handOver = result.handOver;
+    // 旧字段兼容：handOverSkipped 仍是 [{id, reason}]；新字段 handOver 给全量 moved/skipped
+    const handOverSkipped = (handOver?.skipped || []).map(({ boxId, reason }) => ({
+      id: boxId,
+      reason,
+    }));
+    await this.log(ctx, force ? "任务单强制签收" : `任务单推进到「${status}」`, id);
+    // 跳过的台数进操作日志，每台箱子为什么被跳过进运行日志（提交后才记，回滚不留假日志）
+    if (handOverSkipped.length) {
+      await this.log(
+        ctx,
+        `调拨签收跳过 ${handOverSkipped.length} 台箱子：建单后已改挂到别的单位，未自动改归属`,
+        id
+      );
+      for (const item of handOver.skipped)
+        if (item.where) this.#logHandOverSkip(ctx, id, item.boxId, item.where);
+    }
+    ctx.ok({
+      saved: true,
+      handOverSkipped,
+      handOver: handOver
+        ? {
+            moved: handOver.moved,
+            skipped: handOver.skipped.map(({ boxId, reason }) => ({ boxId, reason })),
+          }
+        : null,
+    });
   }
 
   /**
@@ -1218,35 +1747,58 @@ export class ReportPolicyController {
    */
   async inspect(ctx) {
     this.require(ctx, BOX.task);
-    const row = await this.db.get("SELECT * FROM sample_task WHERE id=?", [ctx.params.id]);
-    if (!row)
-      throw Object.assign(new Error("任务不存在"), { httpStatus: 404, publicCode: "A0404" });
+    const row = await this.#visibleTask(ctx);
     const task = JSON.parse(row.body);
     if (row.status !== "待检测")
-      throw new Error(
+      throw badRequest(
         row.status === "已检测" ? "这张单的箱子都已开始检测" : "签收以后才能开始检测"
       );
     if (!this.#abilities(ctx, task, row.status)["已检测"])
-      throw Object.assign(new Error("只有检测站有签收权限的人员可以开始检测"), {
-        httpStatus: 403,
-        publicCode: "A0301",
-      });
+      throw noPermission("只有检测站有签收权限的人员可以开始检测");
     const boxId = String(ctx.params.boxId || "").slice(0, 64);
+    // 这台箱子也得在自己的范围内：否则能给范围外的箱子盖「开始检测」
+    await this.targets(ctx, [boxId]);
     const result = await this.policies.inspectBox(row.id, boxId, { actor: actorOf(ctx) });
     await this.log(ctx, `采样箱 ${boxId} 开始检测`, row.id);
     ctx.ok(result);
   }
 
-  /** 签收后箱子归接收单位；签收人选的是系统用户时成为保管人，否则清空保管人。 */
-  async #handOver(task, ids) {
-    for (const id of ids) {
-      await this.boxes.updateBox(id, (box) => {
-        box.org = task.toOrg;
-        box.orgId = String(task.toOrgId);
-        box.owner = task.signerId ? task.signer : "—";
-        box.ownerId = task.signerId ? String(task.signerId) : "";
-      });
-    }
+  /**
+   * 单上的签收人还挂不在这张单的接收单位（含下级部门）名下。
+   * 建单时校验过一次，这里独立再校验：防止建单后人被调到别的单位，
+   * 也防止改造前留下的外来 signerId 被用来签收、并把这批箱子的保管人写成自己。
+   *
+   * 返回三态：
+   * - local：确实在接收单位里；
+   * - foreign：确实不在，正常签收要拦，交接时也不把他记成保管人；
+   * - unknown：判不出（旧单只写了单位名、或账号已删）。unknown 保持改造前的行为，
+   *   不因为数据不全就把合法签收拦死；账号已删的人本来就登不进来。
+   */
+  async #signerFitsReceiver(task) {
+    const depts = await this.db.all("SELECT id,parent_id AS parentId,name,sort FROM sys_dept");
+    const orgId = resolveOrgId(depts, task.toOrgId, task.toOrg);
+    if (!orgId) return "unknown";
+    const signer = await this.db.get("SELECT dept_id FROM sys_user WHERE id=?", [
+      String(task.signerId),
+    ]);
+    if (!signer) return "unknown";
+    return deptUnder(depts, signer.dept_id, orgId) ? "local" : "foreign";
+  }
+
+  /**
+   * 跳过的箱子逐台进运行日志：谁在签收哪张单时没带走哪台、它现在在谁名下。
+   * 操作日志只在 transition 里按台数记一条汇总，避免一张大单签收刷出几百条审计。
+   * R-5 后交接在 ReportPolicy.transition 事务内执行，这里在事务提交后才记，回滚不留假日志。
+   */
+  #logHandOverSkip(ctx, taskId, boxId, orgName) {
+    logSystem({
+      source: "task",
+      level: "warn",
+      kind: "hand-over-skipped",
+      message: `调拨单 #${taskId} 签收时跳过一台箱子：这台现在挂在${orgName}名下，未自动改为接收单位`,
+      deviceId: boxId,
+      actorId: ctx.user?.id,
+    });
   }
   async log(ctx, action, id) {
     await audit(this.db, {

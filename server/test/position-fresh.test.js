@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { migrate, openDatabase } from "../db.js";
+import { BOX, maskBox } from "../src/auth/boxAccess.js";
 import { BoxState } from "../src/domain/BoxState.js";
 import { Uplink } from "../src/domain/Uplink.js";
 import { boxPosition } from "../src/geo/place.js";
@@ -65,6 +66,38 @@ test("基站位置记下更新时间，只在这次上报带了基站坐标时�
   box.apply(new Uplink({ imei: "864317080992517" }), new Date("2026-11-05T10:00:00"));
   assert.match(box.toJSON().lbsAt, /^2026-11-05 09:00:00/);
   assert.equal(BoxState.fromRow(box.toRow()).lbsAt, box.lbsAt);
+});
+
+test("位置卡用的 lastGpsAt / lastLbsAt：跟 gpsInfo.at、lbsAt 同步，没记录留空", () => {
+  const box = BoxState.createPending(
+    "864317080992517",
+    new Uplink({ imei: "864317080992517" }),
+    new Date("2026-11-05T08:00:00")
+  );
+  const pending = box.toJSON();
+  // 一次都没定到位：留空串，页面写「无记录」，不能拿上报时间冒充定位时间
+  assert.equal(pending.lastGpsAt, "");
+  assert.equal(pending.lastLbsAt, "");
+  box.apply(
+    new Uplink({ imei: "864317080992517", gpsfix: 1, gpsLng: 114.1, gpsLat: 22.6 }),
+    new Date("2026-11-05T09:00:00")
+  );
+  const withGps = box.toJSON();
+  assert.match(withGps.lastGpsAt, /^2026-11-05 09:00:00/);
+  // 只是把 gpsInfo.at 换个字段名下发，gpsAt（任务里那次定位的时间）语义不动
+  assert.equal(withGps.lastGpsAt, withGps.gpsInfo.at);
+  box.apply(
+    new Uplink({ imei: "864317080992517", lbsLng: 114.2, lbsLat: 22.7 }),
+    new Date("2026-11-05T10:00:00")
+  );
+  const both = box.toJSON();
+  assert.match(both.lastLbsAt, /^2026-11-05 10:00:00/);
+  assert.match(both.lastGpsAt, /^2026-11-05 09:00:00/);
+  // 两个字段都归「当前位置」管，没权限时从 JSON 里拿掉
+  const masked = maskBox(both, new Set([BOX.list]));
+  assert.equal(masked.lastGpsAt, undefined);
+  assert.equal(masked.lastLbsAt, undefined);
+  assert.ok(masked.masked.includes("location"));
 });
 
 test("任务里箱子的距离按新鲜的位置算；迁移 040 给老数据补上基站时间", async () => {

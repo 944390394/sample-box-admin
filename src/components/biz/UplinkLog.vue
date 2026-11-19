@@ -22,7 +22,7 @@
         style="width: 180px"
         @change="reload"
       >
-        <el-option v-for="box in boxOptions" :key="box.id" :label="box.name" :value="box.id" />
+        <el-option v-for="box in boxOptions" :key="box.id" :label="boxTitle(box)" :value="box.id" />
       </el-select>
       <el-input v-model="seqText" placeholder="按 seq 查" clearable style="width: 120px" />
       <el-switch v-if="!eventsOnly" v-model="folded" active-text="折叠定时上报" />
@@ -116,6 +116,7 @@ import { ArrowRight } from "@element-plus/icons-vue";
 import type { BoxLogItem, UplinkPage } from "@/api/sample/box";
 import DataPager from "@/components/biz/DataPager.vue";
 import { fullTime, lastDays, toDate } from "@/utils/time";
+import { boxTitle } from "@/utils/boxLabel";
 import { groupRuns, KIND_FILTERS, uplinkFacts, type UplinkRow } from "@/views/sample/boxes/uplink";
 import UplinkLine from "./UplinkLine.vue";
 
@@ -170,7 +171,7 @@ const opened = ref(new Set<string>());
 const boxOptions = computed(() => props.boxes);
 const showBox = computed(() => props.boxes.length > 1);
 const names = computed(() => Object.fromEntries(props.boxes.map((b) => [b.id, b.name])));
-const nameOf = (id: string) => names.value[id] || id;
+const nameOf = (id: string) => boxTitle({ id, name: names.value[id] });
 
 function params(): UplinkLoadParams {
   const out: UplinkLoadParams = {

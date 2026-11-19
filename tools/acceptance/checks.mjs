@@ -304,19 +304,35 @@ export const CHECKS = [
     async run({ open, expect, page, shot, noHorizontalScroll, mobile }) {
       await open(`/monitor/overview/${STATION.id}`);
       const tiles = (await page.locator('[data-test="station-tiles"]').innerText().catch(() => "")).replace(/\s+/g, " ");
-      expect(/已到 · 未开箱检测 2/.test(tiles), `已到未开箱检测 2 台（${tiles}）`);
+      expect(/2 已到 · 未开箱检测/.test(tiles), `已到未开箱检测 2 台（${tiles}）`);
       const waiting = (await page.locator('[data-test="station-waiting"]').innerText().catch(() => "")).replace(/\s+/g, " ");
       expect(waiting.includes(BOXES.inspectA.name) && waiting.includes(BOXES.inspectB.name), "待检测列表里有两台送检箱");
       expect(/1 次/.test(waiting) && /3 次 超限/.test(waiting), `A 开 1 次、B 开 3 次标超限（${waiting.slice(0, 160)}）`);
       const day = (await page.locator('[data-test="unit-day"]').innerText().catch(() => "")).replace(/\s+/g, " ");
       expect(day.includes("验收-送检总部"), "今天的任务里有送检单");
-      expect((await page.locator('[data-test="unit-day"] .cell.picked').count()) === 1, "日历上选中了今天");
+      expect((await page.locator('[data-test="unit-day"] .cal-cell.picked').count()) === 1, "日历上选中了今天");
       await noHorizontalScroll("宽屏");
       await shot("检测站总览");
       await mobile(async () => {
         await noHorizontalScroll("手机 390 宽");
         await shot("检测站总览 · 手机", { fullPage: true });
       });
+    },
+  },
+  {
+    name: "单位总览：选过去日期后 5 秒轮询不重置选中日",
+    role: "admin",
+    async run({ open, expect, page }) {
+      await open("/monitor/overview/2");
+      const past = await page.evaluate(() => {
+        const d = new Date(Date.now() - 3 * 86400000);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      });
+      await page.click(`[data-test="unit-day"] .cal-cell[data-day="${past}"]`);
+      await page.waitForTimeout(15000); // 3 轮轮询
+      const picked = await page.locator('[data-test="unit-day"] .cal-cell.picked').getAttribute("data-day");
+      expect(picked === past, `轮询 15s 后选中日仍是 ${past}（实际 ${picked}）`);
+      expect(page.url().includes(`day=${past}`), `URL 保留所选日期（${page.url()}）`);
     },
   },
   {
@@ -362,7 +378,7 @@ export const CHECKS = [
       await shot("检测完成的送检单");
       await open(`/monitor/overview/${STATION.id}`);
       const tiles = (await page.locator('[data-test="station-tiles"]').innerText().catch(() => "")).replace(/\s+/g, " ");
-      expect(/今天已开箱检测 1/.test(tiles) && /未开箱检测 0/.test(tiles), `检测站总览：今天已检测 1、待检测 0（${tiles}）`);
+      expect(/1 今天已开箱检测/.test(tiles) && /0 已到 · 未开箱检测/.test(tiles), `检测站总览：今天已检测 1、待检测 0（${tiles}）`);
     },
   },
   {

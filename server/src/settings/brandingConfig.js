@@ -1,3 +1,4 @@
+import { badRequest } from "../domain/AppError.js";
 /**
  * 系统名称和图标：网页后台的登录页、侧栏、浏览器标签，小程序的登录页、首页标题都用这里的。
  * 存在 db.config.json 的 branding 里。图标是上传的图片转成的 data URL；为空时各端用自带的默认图标。
@@ -26,15 +27,15 @@ export function mergeBrandingSettings(current, input) {
   const body = input && typeof input === "object" ? input : {};
   const previous = readBranding(base);
   const title = String(body.title ?? previous.title).trim();
-  if (!title || title.length > 20) throw new Error("系统名称要 1–20 个字");
+  if (!title || title.length > 20) throw badRequest("系统名称要 1–20 个字");
   const slogan = String(body.slogan ?? previous.slogan).trim();
-  if (slogan.length > 40) throw new Error("标语最多 40 个字");
+  if (slogan.length > 40) throw badRequest("标语最多 40 个字");
   let logo = previous.logo;
   if (body.logo !== undefined) {
     logo = String(body.logo || "");
     if (logo && !/^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(logo))
-      throw new Error("图标只支持 PNG、JPG、WebP 图片");
-    if (logo.length > LOGO_MAX) throw new Error("图标太大，请换一张 200 KB 以内的图片");
+      throw badRequest("图标只支持 PNG、JPG、WebP 图片");
+    if (logo.length > LOGO_MAX) throw badRequest("图标太大，请换一张 200 KB 以内的图片");
   }
   return { ...base, branding: { title, slogan, logo } };
 }

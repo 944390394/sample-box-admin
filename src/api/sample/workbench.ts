@@ -11,6 +11,8 @@ export interface BoxBrief {
   batteryUsable: number | null;
   lid: number | null;
   address: string;
+  /** 占用单建单时间（ISO）；工作台 brief 默认不下发，首页离线卡按 id 从箱子列表补齐，用于宽限徽标。 */
+  boundTaskAt?: string;
 }
 
 export interface TaskBrief {

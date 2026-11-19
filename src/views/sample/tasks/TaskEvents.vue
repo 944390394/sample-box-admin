@@ -15,7 +15,7 @@
         size="small"
         style="width: 180px"
       >
-        <el-option v-for="id in boxIds" :key="id" :label="names[id] || id" :value="id" />
+        <el-option v-for="id in boxIds" :key="id" :label="nameOf(id)" :value="id" />
       </el-select>
     </div>
     <el-table
@@ -33,7 +33,7 @@
         </template>
       </el-table-column>
       <el-table-column label="采样箱" min-width="160">
-        <template #default="{ row }">{{ names[row.boxId] || row.boxId }}</template>
+        <template #default="{ row }">{{ nameOf(row.boxId) }}</template>
       </el-table-column>
       <el-table-column label="上报内容" min-width="240" show-overflow-tooltip prop="text" />
     </el-table>
@@ -45,10 +45,13 @@ import type { TaskEvent } from "@/api/sample/report-policy";
 import TimeText from "@/components/biz/TimeText.vue";
 import { toDate } from "@/utils/time";
 import { kindTone } from "@/utils/tone";
+import { boxTitle } from "@/utils/boxLabel";
 
 /** 任务详情 · 事件：任务期间所有箱子的开箱、关箱、上电，新的在上。点一行在地图上定位那台箱子。 */
 const props = defineProps<{ events: TaskEvent[]; names: Record<string, string> }>();
 const emit = defineEmits<{ focus: [boxId: string] }>();
+/** names 里可能是服务端回显的编号（编号就是 IMEI），统一走 boxTitle 再显示。 */
+const nameOf = (id: string) => boxTitle({ id, name: props.names[id] });
 const kind = ref("");
 const boxId = ref("");
 const boxIds = computed(() => [...new Set(props.events.map((e) => e.boxId))]);

@@ -51,6 +51,9 @@ export class BoxState {
     this.batteryModel = fields.batteryModel ?? parseBatteryModel("");
     this.activateStep = fields.activateStep;
     this.poweredAt = fields.poweredAt;
+    /** 占用锚点（B3/#18）：当前未结束任务的 id 与建单时间快照，离线宽限判定用。 */
+    this.boundTaskId = fields.boundTaskId || "";
+    this.boundTaskAt = fields.boundTaskAt || "";
   }
 
   /** 未知 IMEI 的第一包：待激活，所属总公司。密钥还没下发。编号就是 IMEI，name 是默认名称。 */
@@ -105,6 +108,8 @@ export class BoxState {
       org: row.org,
       orgId: row.org_id == null ? "" : String(row.org_id),
       owner: row.owner || "—",
+      boundTaskId: row.bound_task_id || "",
+      boundTaskAt: row.bound_task_at || "",
       ownerId: row.owner_id == null ? "" : String(row.owner_id),
       life: row.life,
       alert: row.alert || "",
@@ -147,17 +152,48 @@ export class BoxState {
    * 补传的旧记录或中间漏了序号时，不知道前一个状态，照常算事件。
    */
   kindOf(uplink) {
-    if (uplink.why !== "chg") return uplink.why;
-    if (this.charge == null || uplink.charge == null) return "chg";
-    if (uplink.seq != null && this.lastSeq != null && uplink.seq !== this.lastSeq + 1) return "chg";
-    return isPlugged(this.charge) === isPlugged(uplink.charge) ? "chgs" : "chg";
+    if (uplink.why === "chg") {
+      if (this.charge == null || uplink.charge == null) return "chg";
+      if (uplink.seq != null && this.lastSeq != null && uplink.seq !== this.lastSeq + 1)
+        return "chg";
+      return isPlugged(this.charge) === isPlugged(uplink.charge) ? "chgs" : "chg";
+    }
+    // 连续上报固件只发 why=timer：开箱、关箱、上电、插拔充电器都藏在字段变化里，
+    // 不在这里补判事件，事件卡/动态/小程序时间线就永远是空的。补传旧包的前态不可靠，不补判。
+    if (uplink.why === "timer" && !uplink.backfill && this.lastSeq != null) {
+      if (uplink.seq != null && uplink.seq < this.lastSeq) return "boot";
+      if (
+        (uplink.opens != null && this.deviceOpens != null && uplink.opens > this.deviceOpens) ||
+        (uplink.lid === 1 && this.lid === 0)
+      )
+        return "pad";
+      if (uplink.lid === 0 && this.lid === 1) return "shut";
+      if (
+        this.charge != null &&
+        uplink.charge != null &&
+        isPlugged(this.charge) !== isPlugged(uplink.charge)
+      )
+        return "chg";
+    }
+    return uplink.why;
   }
 
   /**
    * 刷新电压、信号和位置。
    * 生命周期不在这里改，激活和停用走管理操作。
+   *
+   * 开头用 kindOf 算出这一包的派生种类（局部变量 kind）：连续上报固件只发 why=timer，
+   * 开箱、关箱、重启都藏在字段变化里。下游（开箱录像、策略生效、指令确认、日志种类）
+   * 一律读派生种类，不再各读各的原始 why——读 why 的分支对 timer 包永远不成立。
+   *
+   * R-12：apply 不再就地改写调用方传入的 uplink.kind（避免同一 Uplink 对象复用到第二台箱子/
+   * 第二次 apply 时带上上一台的派生结果）。派生种类作为返回值给出，由存储层显式标注到 uplink.kind
+   * 供下游读取；apply 自身对入参只读不写，每次调用都按当前箱子的前态重算。
+   *
+   * @returns {string} 这一包的派生种类（boot/pad/shut/chg/chgs/timer/…）
    */
   apply(uplink, receivedAt) {
+    const kind = this.kindOf(uplink);
     const previousLast = this.last;
     const seqRestarted = uplink.seq != null && this.lastSeq != null && uplink.seq < this.lastSeq;
     if (uplink.firmware) this.firmware = uplink.firmware;
@@ -193,14 +229,14 @@ export class BoxState {
       };
     }
     if (uplink.storageFree != null) this.storageFree = uplink.storageFree;
-    if (uplink.why === "boot" || seqRestarted) {
+    if (kind === "boot" || seqRestarted) {
       this.bootedAt = uplink.deviceTime || formatTimestamp(receivedAt);
     }
     if (seqRestarted && !uplink.powerOff && previousLast) this.lastPowerOff = previousLast;
-    if (uplink.why === "pad" && uplink.deviceTime) this.lastOpen = uplink.deviceTime;
+    if (kind === "pad" && uplink.deviceTime) this.lastOpen = uplink.deviceTime;
     if (uplink.powerOff) this.lastPowerOff = uplink.powerOff;
     if (uplink.seq != null) this.lastSeq = uplink.seq;
-    if (uplink.why !== "shut" && uplink.openAge != null) {
+    if (kind !== "shut" && uplink.openAge != null) {
       const lastOpen = shiftDeviceTime(uplink.deviceTime, uplink.openAge);
       if (lastOpen) this.lastOpen = lastOpen;
     }
@@ -222,7 +258,7 @@ export class BoxState {
     } else if (this.gpsLng == null) {
       this.gps = "未定位";
     }
-    return this;
+    return kind;
   }
 
   toRow() {
@@ -304,6 +340,15 @@ export class BoxState {
       gpsAddress: this.gpsAddress,
       storageFree: this.storageFree,
       gpsInfo: this.gpsInfo,
+      /**
+       * 位置卡两行的时效：GPS 取最后一次定位成功的时间，基站取基站位置最近更新时间。
+       * 值和 gpsInfo.at / lbsAt 是同一个，单独立两个字段是给网页和小程序一个不用解析 gpsInfo 的入口，
+       * 空串就是「无记录」。gpsAt（任务详情里「这个位置是什么时候的」）语义不变，不复用这两个名字。
+       */
+      lastGpsAt: this.gpsInfo?.at || "",
+      lastLbsAt: this.lbsAt || "",
+      boundTaskId: this.boundTaskId,
+      boundTaskAt: this.boundTaskAt,
       ...this.#batteryView(),
       reportPeriodSec:
         this.reportPolicy?.effective.reportPeriodSec ??

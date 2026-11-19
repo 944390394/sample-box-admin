@@ -8,6 +8,8 @@ import { onActivated, onBeforeUnmount, onMounted, ref } from "vue";
 export function useOverviewPolling(load: () => Promise<boolean | void>, interval = 5000) {
   const updatedAt = ref<Date | null>(null);
   const error = ref("");
+  /** 失败的业务码（如 A0404 单位不存在/不在范围），页面按码渲染友好错态而不是只留重试。 */
+  const errorCode = ref("");
   const loading = ref(false);
 
   let timer = 0;
@@ -33,10 +35,12 @@ export function useOverviewPolling(load: () => Promise<boolean | void>, interval
       if (applied !== false) {
         updatedAt.value = new Date();
         error.value = "";
+        errorCode.value = "";
         delay = interval;
       }
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
+      errorCode.value = (e as { code?: string } | null)?.code ?? "";
       delay = Math.min(delay * 2, 30000);
     } finally {
       inflight = false;
@@ -62,5 +66,5 @@ export function useOverviewPolling(load: () => Promise<boolean | void>, interval
     document.removeEventListener("visibilitychange", onVisible);
   });
 
-  return { updatedAt, error, loading, refresh: () => run(true) };
+  return { updatedAt, error, errorCode, loading, refresh: () => run(true) };
 }

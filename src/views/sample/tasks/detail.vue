@@ -1,13 +1,19 @@
 <template>
   <div class="page-container page-flow">
-    <PageHeader :title="task?.name || '任务详情'" back="/task/tasks">
+    <PageHeader
+      :title="task?.name || '任务详情'"
+      :back="task?.kind === '送检' ? '/sample/inspections' : '/task/tasks'"
+    >
       <template v-if="task" #tags>
-        <el-tag :type="task.kind === '调拨' ? 'primary' : 'success'" effect="plain">
+        <el-tag :type="kindTone(task.kind)" effect="plain">
           {{ task.kind }}
         </el-tag>
         <el-tag :type="taskStatusType(task.status)">{{ task.status }}</el-tag>
         <el-tag v-if="task.trip" type="warning" effect="plain">{{ task.trip }}寄送</el-tag>
         <el-tag v-if="task.recordVideo" type="success" effect="plain">开箱录像</el-tag>
+        <el-tag v-if="stale" type="warning" effect="plain" data-test="task-stale">
+          刷新失败，内容可能不是最新
+        </el-tag>
       </template>
       <template v-if="task" #meta>
         {{ task.id }} · {{ task.createdBy || "—" }} 创建于 {{ fullTime(task.createdAt) }}
@@ -18,6 +24,22 @@
     <el-empty v-else-if="!detail" :description="error || '没有这张任务单'" />
 
     <template v-else-if="task">
+      <!-- R-5：最近一次签收交接有跳过的箱子（已改挂他单位/已删除）：不能让「签收成功」盖住归属未全移 -->
+      <el-alert
+        v-if="handOverSkipped.length"
+        type="warning"
+        :closable="false"
+        class="block handover-warn"
+        data-test="handover-skipped"
+        :title="`${handOverSkippedCount} 台箱子未随单交接：未自动改归属，仍归原单位`"
+      >
+        <div v-for="item in handOverSkipped" :key="item.boxId" class="handover-line">
+          {{ handOverBoxTitle(item.boxId) }}：{{ item.reason }}
+        </div>
+        <div v-if="handOverSkippedCount > handOverSkipped.length" class="handover-line">
+          …仅列出前 {{ handOverSkipped.length }} 台，其余见运行日志
+        </div>
+      </el-alert>
       <!-- 概况：状态、操作、步骤、关键数字和安排信息放在一张卡里，地图和动态紧跟其后 -->
       <el-card shadow="never" class="block hero" :class="`tone-${headTone}`">
         <div class="hero-head">
@@ -69,8 +91,8 @@
           </div>
         </div>
 
-        <!-- 调拨、带寄送的采样单：寄出方 → 接收方（采样单位）；双向的箭头两头都有，表示采样后寄回 -->
-        <div v-if="task.kind === '调拨' || task.trip" class="route">
+        <!-- 调拨/送检、带寄送的采样单：寄出方 → 接收方（采样单位/检测站）；双向的箭头两头都有，表示采样后寄回 -->
+        <div v-if="logistics || task.trip" class="route">
           <div class="party">
             <span class="role from">寄出方</span>
             <b>{{ task.fromOrg || "—" }}</b>
@@ -84,8 +106,8 @@
             </el-icon>
             <small v-if="task.trip">{{ task.trip === "双向" ? "寄去 · 寄回" : "只寄去" }}</small>
           </div>
-          <div v-if="task.kind === '调拨'" class="party">
-            <span class="role to">接收方</span>
+          <div v-if="logistics" class="party">
+            <span class="role to">{{ task.kind === "送检" ? "检测站" : "接收方" }}</span>
             <b>{{ task.toOrg || "—" }}</b>
             <span class="who">签收人 {{ task.signer || "—" }}</span>
             <span class="addr"><PlaceText :place="task.toPlace" /></span>
@@ -115,7 +137,7 @@
             <dd :class="{ empty: !task.sample }">{{ task.sample || "未填写" }}</dd>
           </div>
         </dl>
-        <dl v-else-if="task.kind !== '调拨'" class="facts">
+        <dl v-else-if="!logistics" class="facts">
           <div>
             <dt>采样单位</dt>
             <dd>{{ task.org || "—" }}</dd>
@@ -146,7 +168,7 @@
         type="error"
         :closable="false"
         class="block"
-        :title="`${overLimit.map((b) => `${b.name || b.id} 开了 ${b.opensDuring} 次`).join('，')}，超过任务上限 ${task.maxOpens} 次`"
+        :title="`${overLimit.map((b) => `${boxTitle(b)} 开了 ${b.opensDuring} 次`).join('，')}，超过任务上限 ${task.maxOpens} 次`"
       />
 
       <el-row :gutter="12" class="block equal">
@@ -180,7 +202,7 @@
                 @click="focus(box.id, true)"
               >
                 <i :style="{ background: colors[box.id] }" />
-                <b>{{ box.name || box.id }}</b>
+                <b>{{ boxTitle(box) }}</b>
                 <span
                   v-if="box.status?.batteryUsable != null"
                   :class="{ warn: box.status.batteryUsable < 20 }"
@@ -207,11 +229,11 @@
               height="440px"
             >
               <template #legend>
-                <span v-if="task.kind === '调拨' || task.trip">
+                <span v-if="logistics || task.trip">
                   <i :style="{ background: COLORS.from }" />
                   寄出地址
                 </span>
-                <span v-if="task.kind === '调拨'">
+                <span v-if="logistics">
                   <i :style="{ background: COLORS.to }" />
                   收货地址
                 </span>
@@ -363,7 +385,7 @@
           type="warning"
           :closable="false"
           class="far"
-          :title="`${far.map((b) => `${b.name || b.id} 相距 ${formatDistance(b.distanceM)}`).join('，')} 超过 ${formatDistance(detail.arriveRadiusM)}，请确认箱子确实在${detail.target.role}`"
+          :title="`${far.map((b) => `${boxTitle(b)} 相距 ${formatDistance(b.distanceM)}`).join('，')} 超过 ${formatDistance(detail.arriveRadiusM)}，请确认箱子确实在${detail.target.role}`"
         />
         <el-alert
           v-else-if="unknown.length === detail.boxes.length"
@@ -422,8 +444,18 @@ import TrackMap from "@/components/biz/TrackMap.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import UplinkLog, { type UplinkLoadParams } from "@/components/biz/UplinkLog.vue";
 import SampleBoxAPI, { type BoxLogItem } from "@/api/sample/box";
-import { NEEDS_REASON, TASK_ACTIONS, TRIP_TEXT, stepsOf, taskStatusType } from "./status";
+import {
+  NEEDS_REASON,
+  TASK_ACTIONS,
+  TRIP_TEXT,
+  endedTone,
+  isEnded,
+  stepsOf,
+  taskStatusType,
+} from "./status";
 import { ago, fullTime, shortTime, span, trackColor } from "@/utils/time";
+import { boxTitle, imeiText } from "@/utils/boxLabel";
+import { kindTone } from "../doc-flow";
 
 const routeInfo = useRoute();
 /** 地图图标和图例共用的颜色。 */
@@ -437,13 +469,21 @@ const COLORS = {
 };
 const detail = ref<TaskDetail | null>(null),
   loading = ref(false),
-  error = ref("");
+  error = ref(""),
+  /** 后台刷新失败但单子还在屏幕上：标一下，不清空 */
+  stale = ref(false);
 const task = computed(() => detail.value?.task || null);
+/** 送检与旧调拨共用物流形详情（寄出方→接收方/检测站、收货地址、签收交接）；采样是另一套。 */
+const logistics = computed(() => task.value?.kind === "调拨" || task.value?.kind === "送检");
 const steps = computed(() => (task.value ? stepsOf(task.value) : []));
-const ended = computed(() => ["已取消", "已拒收"].includes(task.value?.status || ""));
+// 结束口径和流程校验同一份（shared/taskFlow.js）：以前这里只认「已取消/已拒收」，
+// 已签收、已完成、已检测、已退回的单子被当成没结束，15 秒轮询一直不停。
+const ended = computed(() => isEnded(task.value?.status));
+// 走完最后一步结束的：进度条全绿。已取消/已拒收不在步骤里，另按流转记录停在最后一步。
+const finished = computed(() => ended.value && steps.value.includes(task.value?.status || ""));
 const stepIndex = computed(() => {
   const status = task.value?.status || "";
-  if (status === "已签收" || status === "已完成") return steps.value.length;
+  if (finished.value) return steps.value.length;
   const index = steps.value.indexOf(status);
   if (ended.value) {
     // 结束在哪一步：取流转记录里最后一个正常状态
@@ -458,19 +498,19 @@ const stepIndex = computed(() => {
 const stepView = computed(() => {
   const logs = detail.value?.logs || [];
   const lastLog = (status: string) => [...logs].reverse().find((log) => log.status === status);
-  const finished = ["已签收", "已完成"].includes(task.value?.status || "");
   const list = steps.value.map((name, index) => ({
     name,
     no: index + 1,
     log: index <= stepIndex.value ? lastLog(name) : undefined,
     state:
-      index < stepIndex.value || (finished && index === steps.value.length - 1)
+      index < stepIndex.value || (finished.value && index === steps.value.length - 1)
         ? "done"
         : index === stepIndex.value && !ended.value
           ? "current"
           : "todo",
   }));
-  if (ended.value)
+  // 已取消/已拒收不在步骤里，末尾补一格；已签收、已检测、已退回这些走完最后一步的不用再补
+  if (ended.value && !finished.value)
     list.push({
       name: task.value!.status,
       no: list.length + 1,
@@ -479,13 +519,7 @@ const stepView = computed(() => {
     });
   return list;
 });
-const headTone = computed(() =>
-  ended.value
-    ? "error"
-    : ["已签收", "已完成"].includes(task.value?.status || "")
-      ? "done"
-      : "current"
-);
+const headTone = computed(() => (ended.value ? endedTone(task.value?.status) : "current"));
 const summary = computed(() => {
   const t = task.value,
     d = detail.value;
@@ -495,7 +529,7 @@ const summary = computed(() => {
     return last?.note ? `原因：${last.note}` : "任务已结束";
   }
   if (headTone.value === "done")
-    return `${d.boxes.length} 台采样箱${t.kind === "调拨" ? `已归 ${t.toOrg}` : "已完成"}`;
+    return `${d.boxes.length} 台采样箱${logistics.value ? `已归 ${t.toOrg}` : "已完成"}`;
   if (!d.target) return `${d.boxes.length} 台采样箱`;
   const near = d.boxes.filter((b) => b.near === true).length;
   return `${d.boxes.length} 台采样箱，${near} 台已到${d.target.role}附近（${formatDistance(d.arriveRadiusM)}内）`;
@@ -555,6 +589,15 @@ const overLimit = computed(() => {
   if (max == null) return [];
   return (detail.value?.boxes || []).filter((b) => b.opensDuring != null && b.opensDuring > max);
 });
+/** R-5：最近一次签收交接跳过的箱子（建单后已改挂他单位/已删除），非空时页面顶部警示。 */
+const handOverSkipped = computed(() => detail.value?.handOver?.skipped || []);
+const handOverSkippedCount = computed(
+  () => detail.value?.handOver?.skippedCount ?? handOverSkipped.value.length
+);
+function handOverBoxTitle(boxId: string) {
+  const box = detail.value?.boxes.find((b) => b.id === boxId);
+  return box ? boxTitle(box) : imeiText({ id: boxId });
+}
 const actions = computed(() =>
   Object.entries(detail.value?.can || {})
     .filter(([to, ok]) => ok && to !== "退回中")
@@ -563,11 +606,11 @@ const actions = computed(() =>
 const waitingFor = computed(() => {
   const t = task.value;
   if (!t || !Object.keys(detail.value?.can || {}).length) return "";
-  if (t.kind === "调拨" && t.status === "待签收") return `等待 ${t.toOrg} 签收`;
+  if (logistics.value && t.status === "待签收") return `等待 ${t.toOrg} 签收`;
   if (t.status === "退回中") return `已拒收，等待 ${t.fromOrg} 接收退回的箱子`;
   if (t.status === "待检测")
-    return `等待 ${t.kind === "调拨" ? t.toOrg : t.fromOrg} 逐台扫码开始检测`;
-  if (t.kind === "调拨" && t.status === "待寄出") return `等待 ${t.fromOrg} 寄出`;
+    return `等待 ${logistics.value ? t.toOrg : t.fromOrg} 逐台扫码开始检测`;
+  if (logistics.value && t.status === "待寄出") return `等待 ${t.fromOrg} 寄出`;
   return "你没有推进这一步的权限";
 });
 
@@ -592,7 +635,7 @@ const points = computed<TiandituPoint[]>(() => {
         marker: { glyph, color, shape: "pin" },
       });
   };
-  if (t.kind === "调拨") {
+  if (logistics.value) {
     place("from", `寄出 · ${t.fromOrg || ""}`, "寄", COLORS.from, t.fromPlace);
     place("to", `收货 · ${t.toOrg || ""}`, "收", COLORS.to, t.toPlace);
   } else {
@@ -607,7 +650,7 @@ const points = computed<TiandituPoint[]>(() => {
       id: `box-${box.id}`,
       lng: box.position.lng,
       lat: box.position.lat,
-      title: box.name || box.id,
+      title: boxTitle(box),
       marker: { glyph: box.position.source === "GPS" ? "G" : "基", color, shape: "badge" },
       lines: [
         `${box.position.source} · ${box.last || ""}`,
@@ -622,7 +665,7 @@ const circles = computed<TiandituCircle[]>(() => {
   if (target?.lng == null || target?.lat == null || ended.value) return [];
   const color = target.role.includes("寄出")
     ? COLORS.from
-    : task.value?.kind === "调拨"
+    : logistics.value
       ? COLORS.to
       : COLORS.plan;
   return [{ lng: target.lng, lat: target.lat, radiusM: detail.value!.arriveRadiusM, color }];
@@ -642,14 +685,18 @@ const hasMap = computed(
 /** 调拨单寄出地址到收货地址的灰色虚线。 */
 const routeLines = computed<TiandituLine[]>(() => {
   const t = task.value;
-  if (!t || (t.kind !== "调拨" && !t.trip)) return [];
-  const ends = [t.fromPlace, t.kind === "调拨" ? t.toPlace : t.placeAt].filter(
+  if (!t || (!logistics.value && !t.trip)) return [];
+  const ends = [t.fromPlace, logistics.value ? t.toPlace : t.placeAt].filter(
     (p): p is { lng: number; lat: number; address: string } => p?.lng != null && p?.lat != null
   );
   return ends.length === 2
     ? [{ points: ends, color: "#94a3b8", weight: 2, opacity: 0.8, dashed: true }]
     : [];
 });
+/**
+ * names / boxList 是给子组件的「编号 → 原始 name」查表：name 可能就是服务端回显的整串 IMEI，
+ * 所以显示一律由消费方（TrackMap、TaskTimeline、TaskEvents、TaskVideos、UplinkLog）过一遍 boxTitle。
+ */
 const names = computed(() =>
   Object.fromEntries((detail.value?.boxes || []).map((b) => [b.id, b.name || b.id]))
 );
@@ -683,21 +730,31 @@ function policyText(p: Policy) {
   return `${p.reportPeriodSec} 秒 · ${p.reportOnlyWhenCharging ? "仅充电时" : "持续定时"} · ${p.periodicGps === false ? "关闭卫星定位" : p.periodicGps ? "随定时上报定位" : "定位随任务默认"}`;
 }
 
-/** silent：后台刷新时不显示骨架屏，出错也保留已有内容。 */
+/**
+ * silent：后台刷新时不显示骨架屏，出错也保留已有内容。
+ * 15 秒轮询 + 切单号会叠在一起：每轮一个序号，旧响应回来时已经不是最新一轮就整轮丢掉，
+ * 免得上一张单的内容贴到这张单上（详情接口慢的时候特别容易撞上）。
+ */
+let seq = 0;
 async function load(silent = false) {
   const id = String(routeInfo.params.id || "");
   if (!id || !routeInfo.path.startsWith("/task/detail/")) return;
+  const mine = ++seq;
   if (!silent) loading.value = true;
   error.value = "";
   try {
-    detail.value = await API.task(id);
+    const next = await API.task(id);
+    if (mine !== seq) return;
+    detail.value = next;
+    stale.value = false;
   } catch (e) {
+    if (mine !== seq) return;
     if (!silent) {
       detail.value = null;
       error.value = e instanceof Error ? e.message : "";
-    }
+    } else if (detail.value) stale.value = true;
   } finally {
-    loading.value = false;
+    if (mine === seq) loading.value = false;
   }
 }
 
@@ -731,7 +788,7 @@ async function inspectBox(boxId: string) {
   const box = detail.value?.boxes.find((b) => b.id === boxId);
   try {
     await ElMessageBox.confirm(
-      `${box?.name || boxId} 开始检测后，这台箱子的本次任务结束，开箱次数从下一张任务单重新算。`,
+      `${box ? boxTitle(box) : `采样箱 ${imeiText({ id: boxId })}`} 开始检测后，这台箱子的本次任务结束，开箱次数从下一张任务单重新算。`,
       "开始检测",
       { confirmButtonText: "开始检测", cancelButtonText: "取消" }
     );
@@ -779,7 +836,7 @@ const actionText = computed(() => {
     const over = overLimit.value.length
       ? `其中 ${overLimit.value.length} 台开箱次数超过上限，异常的可以拒收。`
       : "";
-    return `签收 ${n} 台采样箱${t.kind === "调拨" ? `，箱子改归 ${t.toOrg}` : ""}。签收后开箱次数不再累计，开箱检测时每台扫码点「开始检测」。${over}`;
+    return `签收 ${n} 台采样箱${logistics.value ? `，箱子改归 ${t.toOrg}` : ""}。签收后开箱次数不再累计，开箱检测时每台扫码点「开始检测」。${over}`;
   }
   if (action.to === "已检测") {
     const left = (detail.value?.boxes || []).filter((b) => !b.inspectedAt && !b.voided).length;
@@ -829,8 +886,18 @@ async function confirmAction() {
     // 拒收时勾了退回：推进到「退回中」
     const to =
       action.to === "已拒收" && action.back && detail.value?.can?.["退回中"] ? "退回中" : action.to;
-    await API.transition(String(routeInfo.params.id), to, action.note.trim());
-    ElMessage.success(`已${TASK_ACTIONS[to] || "更新"}`);
+    const result = await API.transition(String(routeInfo.params.id), to, action.note.trim());
+    // R-5：签收交接有跳过的箱子时明确警示，不让成功文案盖住「归属未全移」
+    const skipped = result.handOver?.skipped || [];
+    if (skipped.length)
+      ElMessage.warning({
+        message: `签收成功，但 ${skipped.length} 台箱子未随单交接：${skipped
+          .slice(0, 3)
+          .map((s) => `${handOverBoxTitle(s.boxId)} ${s.reason}`)
+          .join("；")}${skipped.length > 3 ? "等" : ""}。详见页面顶部警示`,
+        duration: 8000,
+      });
+    else ElMessage.success(`已${TASK_ACTIONS[to] || "更新"}`);
     action.open = false;
     await load();
   } finally {
@@ -841,7 +908,11 @@ async function confirmAction() {
 watch(
   () => routeInfo.params.id,
   (id) => {
-    if (id) void load();
+    if (!id) return;
+    // 切到另一张单：旧内容、旧的「不是最新」标记都不能留，否则新单加载期间显示的是上一张单
+    detail.value = null;
+    stale.value = false;
+    void load();
   }
 );
 // 任务进行中位置、开箱、录像都在变：15 秒刷新一次，切回这个页签时也立即刷新
@@ -874,6 +945,13 @@ onBeforeUnmount(() => window.clearInterval(poll));
 }
 .block {
   margin-top: 12px;
+}
+/* R-5 交接警示：逐台列出跳过原因，行距放宽便于扫读 */
+.handover-warn :deep(.el-alert__description) {
+  margin-top: 6px;
+}
+.handover-line {
+  line-height: 1.8;
 }
 /* 概况卡：顶部一条状态色，状态名和圆点跟着变色 */
 .hero {

@@ -25,6 +25,11 @@
   --custom-radius: 8px;
   --page-padding: 16px;
   --page-gap: 12px;
+  /* ov 总览组件令牌 */
+  --focus-ring: 2px solid var(--el-color-primary);
+  --motion-fast: 150ms;
+  --motion-num: 300ms;
+  --skeleton-bg: #f2f3f5;
 
   /* 状态色：只用在状态上 */
   --status-ok: #00b42a;
