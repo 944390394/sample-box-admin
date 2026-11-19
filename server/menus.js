@@ -125,6 +125,17 @@ export const menuRoutes = [
       menu("boxes", "sample/boxes/index", "SampleBoxes", "采样箱", "el-icon-Box", false, {
         perm: BOX,
       }),
+      // 上报记录独立页（远端维护的报文查询入口）。保留远端路由路径 /monitor/reports 以兼容深链；
+      // 页面先拉箱子列表再查单箱报文，故按「采样箱列表」权限 gating，报文/原文仍由后端逐条鉴权。
+      menu(
+        "/monitor/reports",
+        "sample/reports/index",
+        "SampleReports",
+        "上报记录",
+        "el-icon-List",
+        false,
+        { perm: BOX }
+      ),
       menu(
         "boxes/:id",
         "sample/boxes/detail",
@@ -250,6 +261,7 @@ const MENU_IDS = {
   SampleOverviewUnit: 103,
   SampleTasks: 200,
   SampleBoxes: 300,
+  SampleReports: 301,
   SampleScreen: 101,
   Dept: 403,
   User: 400,

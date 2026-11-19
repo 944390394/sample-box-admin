@@ -1,6 +1,6 @@
 /**
  * 一包已经拆开的设备上报。
- * raw 保留设备发来的原始 JSON，后续日志直接存这串文本。
+ * raw 保留设备发来的原始 JSON。入库时再压缩，不在这里改写。
  */
 export class Uplink {
   constructor(fields) {

@@ -29,8 +29,7 @@ export const constantRoutes: RouteRecordRaw[] = [
     meta: { hidden: true },
   },
 
-  // 旧页面并进了新页面：上报记录、调试记录都在采样箱详情的「上报记录」里
-  { path: "/monitor/reports", redirect: "/device/boxes", meta: { hidden: true } },
+  // 旧调试记录页并进了采样箱详情的「上报记录」；上报记录独立页已恢复（/monitor/reports，见 server/menus.js）
   {
     path: "/device/boxes/:id/debug",
     redirect: (to) => ({ path: `/device/boxes/${String(to.params.id)}`, query: { tab: "log" } }),

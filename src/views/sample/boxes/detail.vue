@@ -108,14 +108,22 @@
             <BoxTrack :box="box" />
           </el-tab-pane>
           <el-tab-pane v-if="EVENT_PERMS.some((perm) => can(perm))" label="事件" name="event" lazy>
-            <UplinkLog :load="loadLogs" events-only />
+            <UplinkLog ref="eventLogRef" :load="loadLogs" :live="liveUplink" events-only />
           </el-tab-pane>
           <el-tab-pane v-if="can(BOX_PERM.task)" label="任务" name="task" lazy>
             <BoxTasks :box-id="box.id" />
           </el-tab-pane>
           <el-tab-pane v-if="can(BOX_PERM.log)" label="上报记录" name="log" lazy>
-            <UplinkLog :load="loadLogs" :load-raw="loadRaw">
+            <UplinkLog ref="uplinkLogRef" :load="loadLogs" :load-raw="loadRaw" :live="liveUplink">
               <template #actions>
+                <el-tag
+                  v-if="serverMode"
+                  size="small"
+                  :type="streamLive ? 'success' : 'info'"
+                  effect="plain"
+                >
+                  {{ streamState }}
+                </el-tag>
                 <el-button
                   v-if="can(BOX_PERM.logExport) || can(BOX_PERM.dump)"
                   size="small"
@@ -180,6 +188,7 @@ import { policyPerm } from "@/api/sample/report-policy";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import UplinkLog, { type UplinkLoadParams } from "@/components/biz/UplinkLog.vue";
 import { usePerm } from "@/composables/usePerm";
+import { AuthStorage } from "@/utils/auth";
 import { lifeLabel } from "@/utils/labels";
 import { clock } from "@/utils/time";
 import { lifeTone } from "@/utils/tone";
@@ -210,6 +219,7 @@ import {
  * 采样箱详情：页头放名称、状态和常用操作，下面一条状态条（电量、箱盖、信号、最近上报、位置）切换标签也一直在；
  * 内容分标签页——概览、轨迹、事件、任务、上报记录（原文，要权限）、设备。
  * 标签页写在地址栏 ?tab=，旧的调试记录页会跳到「上报记录」。10 秒刷新一次。
+ * 收到的报文走实时通道上屏（事件/上报记录标签），连不上退回短轮询。
  */
 const route = useRoute();
 const router = useRouter();
@@ -295,6 +305,122 @@ function onTab(name: string | number) {
 const loadLogs = (params: UplinkLoadParams) => SampleBoxAPI.logs(box.value!.id, params);
 const loadRaw = async (item: BoxLogItem) =>
   (await SampleBoxAPI.raw(box.value!.id, item.id || "", item.time)).raw;
+
+/**
+ * 收到的报文实时上屏（远端功能）：连 /api/v1/sample/stream，箱子状态随推送合并，
+ * 新报文交给 UplinkLog 插到列表最前。连不上就退回 3 秒短轮询，5 秒后重试连接。
+ */
+const serverMode = import.meta.env.VITE_MOCK_DEV_SERVER !== "true";
+const POLL_MS = 3000;
+const STREAM_RETRY_MS = 5000;
+const streamLive = ref(false);
+const polling = ref(false);
+const streamState = computed(() => {
+  if (streamLive.value) return "实时";
+  if (polling.value) return "轮询";
+  return "连接中";
+});
+const liveUplink = ref<BoxLogItem | null>(null);
+const eventLogRef = ref<{ reload: () => Promise<void> } | null>(null);
+const uplinkLogRef = ref<{ reload: () => Promise<void> } | null>(null);
+
+let pollTimer = 0;
+let retryTimer = 0;
+let connectTimer = 0;
+let socket: WebSocket | null = null;
+let streamStopped = false;
+
+function reloadLogs() {
+  void eventLogRef.value?.reload();
+  void uplinkLogRef.value?.reload();
+}
+
+function streamUrl() {
+  const token = encodeURIComponent(AuthStorage.getAccessToken());
+  const base = String(import.meta.env.VITE_APP_BASE_API || "").replace(/\/$/, "");
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${base}/api/v1/sample/stream?token=${token}`;
+}
+
+function refreshLive() {
+  void load();
+  reloadLogs();
+}
+
+function startPoll() {
+  if (pollTimer || streamStopped) return;
+  polling.value = true;
+  refreshLive();
+  pollTimer = window.setInterval(refreshLive, POLL_MS);
+}
+
+function stopPoll() {
+  window.clearInterval(pollTimer);
+  pollTimer = 0;
+  polling.value = false;
+}
+
+function onStreamMessage(raw: string) {
+  let message: { type?: string; box?: SampleBox; uplink?: BoxLogItem };
+  try {
+    message = JSON.parse(raw) as { type?: string; box?: SampleBox; uplink?: BoxLogItem };
+  } catch {
+    return;
+  }
+  const live = message.box;
+  const id = box.value?.id || String(route.params.id || "");
+  if (message.type !== "box" || !live || live.id !== id) return;
+  // 推送里的 wipe 是箱状态自带的空值，抹除进度以详情轮询为准，别被冲掉
+  if (box.value && live.id === box.value.id)
+    box.value = { ...box.value, ...live, wipe: live.wipe ?? box.value.wipe };
+  if (message.uplink) liveUplink.value = message.uplink;
+}
+
+function connectStream() {
+  if (!serverMode || streamStopped) return;
+  window.clearTimeout(retryTimer);
+  if (!AuthStorage.getAccessToken()) {
+    streamLive.value = false;
+    startPoll();
+    return;
+  }
+  const current = new WebSocket(streamUrl());
+  socket = current;
+  window.clearTimeout(connectTimer);
+  connectTimer = window.setTimeout(() => {
+    if (streamStopped || socket !== current) return;
+    if (current.readyState !== WebSocket.OPEN) startPoll();
+  }, POLL_MS);
+  current.onopen = () => {
+    if (socket !== current) return;
+    streamLive.value = true;
+    stopPoll();
+    // 连上之前漏掉的报文补一次，之后只靠这条通道追加。
+    reloadLogs();
+  };
+  current.onmessage = (event) => {
+    if (socket !== current) return;
+    onStreamMessage(String(event.data));
+  };
+  current.onclose = () => {
+    if (socket !== current) return;
+    socket = null;
+    streamLive.value = false;
+    if (streamStopped) return;
+    startPoll();
+    retryTimer = window.setTimeout(connectStream, STREAM_RETRY_MS);
+  };
+}
+
+function stopStream() {
+  streamStopped = true;
+  window.clearTimeout(retryTimer);
+  window.clearTimeout(connectTimer);
+  stopPoll();
+  const current = socket;
+  socket = null;
+  current?.close();
+}
 
 interface MoreItem {
   cmd: string;
@@ -383,6 +509,7 @@ watch(
       box.value = null;
       error.value = "";
       stale.value = false;
+      liveUplink.value = null;
       void load();
     }
   }
@@ -390,8 +517,12 @@ watch(
 onMounted(() => {
   void load();
   poll = window.setInterval(() => void load(), 10000);
+  connectStream();
 });
-onBeforeUnmount(() => window.clearInterval(poll));
+onBeforeUnmount(() => {
+  window.clearInterval(poll);
+  stopStream();
+});
 </script>
 
 <style scoped>

@@ -147,8 +147,17 @@ const props = withDefaults(
     /** 多台箱子时可以按箱子筛选，并在每行显示箱子名称。 */
     boxes?: { id: string; name: string }[];
     initialKind?: string;
+    /** 实时通道推来的最新报文：非空时插到列表最前（采样箱详情的「显示收到的报文」）。 */
+    live?: BoxLogItem | null;
   }>(),
-  { ranges: true, boxes: () => [], initialKind: "", loadRaw: undefined, eventsOnly: false }
+  {
+    ranges: true,
+    boxes: () => [],
+    initialKind: "",
+    loadRaw: undefined,
+    eventsOnly: false,
+    live: null,
+  }
 );
 
 const kindOptions = computed(() =>
@@ -211,6 +220,34 @@ async function loadMore() {
     loading.value = false;
   }
 }
+
+/** 实时报文按当前筛选插入列表头部；随后对一次账，把断线间隙漏掉的补齐。 */
+let reconcileTimer = 0;
+function sameUplink(left: BoxLogItem, right: BoxLogItem) {
+  if (left.id && right.id) return left.id === right.id;
+  return left.time === right.time && left.kind === right.kind && left.text === right.text;
+}
+function prependLive(item: BoxLogItem) {
+  const kinds = kind.value.split(",").filter(Boolean);
+  if (kinds.length && !kinds.includes(item.kind || "unknown")) return;
+  if (boxId.value && item.box !== boxId.value) return;
+  const next = { ...item };
+  delete next.raw;
+  if (list.value.some((row) => sameUplink(row, next))) return;
+  list.value = [next, ...list.value].sort((left, right) => {
+    if (left.time !== right.time) return left.time < right.time ? 1 : -1;
+    return (Number(right.id) || 0) - (Number(left.id) || 0);
+  });
+  window.clearTimeout(reconcileTimer);
+  reconcileTimer = window.setTimeout(() => void reload(), 300);
+}
+watch(
+  () => props.live,
+  (item) => {
+    if (item) prependLive(item);
+  }
+);
+onBeforeUnmount(() => window.clearTimeout(reconcileTimer));
 
 const shown = computed(() => {
   const text = seqText.value.trim();
