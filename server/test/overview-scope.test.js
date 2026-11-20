@@ -273,3 +273,202 @@ test("采样单位参与方：body.orgId 在范围内就能看到单（列表/�
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/** 模拟视角要查真实角色行/部门行，给测试库补上角色与管理员账号（migrate 不种子）。 */
+async function seedViewAsRoles(db) {
+  for (const [id, code, name, scope] of [
+    ["2", "ADMIN", "系统管理员", 1],
+    ["12", "BRANCH_ADMIN", "分公司管理员", 2],
+    ["15", "SAMPLER", "现场采样员", 4],
+    ["10", "DUTY", "值班员", 1],
+  ]) {
+    await db.run(
+      "INSERT INTO sys_role (id,name,code,data_scope,sort,status) VALUES (?,?,?,?,1,1)",
+      [id, name, code, scope]
+    );
+  }
+  await db.run(
+    "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('2','admin','系统管理员','x','1',1)"
+  );
+}
+
+/** 真实系统管理员的请求上下文：access.roles 含 ADMIN、全量范围；query 带模拟参数。 */
+const adminView = (query = {}, params = {}) => ({
+  user: { id: "2", nickname: "系统管理员", username: "admin", dept_id: "1" },
+  access: {
+    roles: ["ADMIN"],
+    perms: new Set(ALL_PERMS.map((p) => p.code)),
+    scope: { all: true, orgIds: [], ownerIds: [] },
+  },
+  query,
+  params,
+});
+
+test("模拟视角：admin 按单位×角色只读预览——分公司子树 / 仅本人空 / 检测站见站 KPI，真实 access 不被污染", async () => {
+  const { dir, db, o } = await setup();
+  try {
+    await seedViewAsRoles(db);
+
+    // 1) 模拟分公司管理员@华南：scope=该子树，单位只剩华南，myUnitId 锚到它，KPI 只算子树
+    const branch = await call(
+      o.group.bind(o),
+      adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" })
+    );
+    assert.deepEqual(
+      branch.units.map((u) => u.id),
+      ["2"]
+    );
+    assert.equal(branch.myUnitId, "2");
+    assert.equal(branch.unitTotal, 1);
+    assert.equal(branch.units[0].stats.total, 2); // A 在调度室(21)、B 在分公司本部(2)
+    assert.deepEqual(branch.viewAs, {
+      orgId: "2",
+      orgName: "华南分公司",
+      roleCode: "BRANCH_ADMIN",
+      roleLabel: "分公司管理员",
+    });
+    // 单位页同口径：模拟范围内可达、范围外 404；viewAs 回传
+    const branchUnit = await call(
+      o.unit.bind(o),
+      adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" }, { orgId: "2" })
+    );
+    assert.equal(branchUnit.unit.name, "华南分公司");
+    assert.equal(branchUnit.stats.total, 2);
+    assert.equal(branchUnit.viewAs.orgId, "2");
+    await assert.rejects(
+      call(o.unit.bind(o), adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" }, { orgId: "3" })),
+      /不在你的数据范围/
+    );
+
+    // 2) 模拟现场采样员（仅本人）：没有单位范围 → units 空、total/myUnitId  null
+    const sampler = await call(
+      o.group.bind(o),
+      adminView({ asOrgId: "21", asRoleCode: "SAMPLER" })
+    );
+    assert.deepEqual(sampler.units, []);
+    assert.equal(sampler.unitTotal, 0);
+    assert.equal(sampler.myUnitId, null);
+    assert.equal(sampler.total, null);
+    assert.equal(sampler.viewAs.roleCode, "SAMPLER");
+    assert.equal(sampler.viewAs.orgName, "调度室");
+
+    // 3) 模拟检测站@总部检测站 + 值班员：见检测站 KPI（stationTotal 三数现状口径）
+    const duty = await call(o.group.bind(o), adminView({ asOrgId: "6", asRoleCode: "DUTY" }));
+    assert.ok(duty.stationTotal, "检测站合计 KPI 应存在");
+    assert.deepEqual(Object.keys(duty.stationTotal).sort(), ["arrived", "inspected", "moving"]);
+    const station = duty.units.find((u) => u.id === "6");
+    assert.ok(station && station.station, "总部检测站应在单位列表且带站 KPI");
+    assert.equal(duty.viewAs.orgName, "总部检测站");
+    assert.equal(duty.viewAs.roleLabel, "值班员");
+
+    // 4) 真实 access 不被污染：同一 ctx 对象、roles/scope/perms 原样；退出后回全量
+    const ctx = adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" });
+    const accessRef = ctx.access;
+    const permsBefore = [...ctx.access.perms];
+    await call(o.group.bind(o), ctx);
+    assert.equal(ctx.access, accessRef, "不得替换 ctx.access");
+    assert.equal(ctx.access.scope.all, true);
+    assert.deepEqual(ctx.access.roles, ["ADMIN"]);
+    assert.deepEqual([...ctx.access.perms], permsBefore);
+    const real = await call(o.group.bind(o), adminView());
+    assert.deepEqual(
+      real.units.map((u) => u.id),
+      ["1", "6", "2", "3", "5"]
+    );
+    assert.equal(real.myUnitId, null);
+    assert.equal(real.viewAs, null);
+
+    // 5) 轮询/刷新带参同口径：连续两次同参结果一致
+    const again = await call(
+      o.group.bind(o),
+      adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" })
+    );
+    assert.deepEqual(
+      again.units.map((u) => u.id),
+      ["2"]
+    );
+    assert.equal(again.units[0].stats.total, 2);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("模拟视角门禁与审计：非 ADMIN 403、无效/停用/半参 400、切换写审计且轮询去重", async () => {
+  const { dir, db, o } = await setup();
+  try {
+    await seedViewAsRoles(db);
+
+    // 非 ADMIN 带参 → 403 A0301（即使有 monitor:overview 权限）
+    const nonAdmin = {
+      user: { id: "9103", nickname: "分公司管理员", dept_id: "2" },
+      access: {
+        roles: ["BRANCH_ADMIN"],
+        perms: new Set(upgradeCodes([...PERMS, "monitor:overview"])),
+        scope: { all: false, orgIds: ["2", "21"], ownerIds: [] },
+      },
+      query: { asOrgId: "1", asRoleCode: "ADMIN" },
+    };
+    await assert.rejects(
+      call(o.group.bind(o), nonAdmin),
+      (err) =>
+        err.publicCode === "A0301" && err.httpStatus === 403 && /系统管理员/.test(err.message)
+    );
+    await assert.rejects(
+      call(o.unit.bind(o), { ...nonAdmin, params: { orgId: "2" } }),
+      (err) => err.publicCode === "A0301" && err.httpStatus === 403
+    );
+
+    const badRequest = (query) =>
+      assert.rejects(
+        call(o.group.bind(o), adminView(query)),
+        (err) => err.publicCode === "A0400" && err.httpStatus === 400
+      );
+    // 部门/角色不存在
+    await badRequest({ asOrgId: "999", asRoleCode: "BRANCH_ADMIN" });
+    await badRequest({ asOrgId: "2", asRoleCode: "NO_SUCH_ROLE" });
+    // 只传一半
+    await badRequest({ asOrgId: "2" });
+    await badRequest({ asRoleCode: "BRANCH_ADMIN" });
+    // 停用部门 / 停用角色
+    await db.run("UPDATE sys_dept SET status=0 WHERE id='3'");
+    await badRequest({ asOrgId: "3", asRoleCode: "BRANCH_ADMIN" });
+    await db.run("UPDATE sys_dept SET status=1 WHERE id='3'");
+    await db.run("UPDATE sys_role SET status=0 WHERE code='DUTY'");
+    await badRequest({ asOrgId: "6", asRoleCode: "DUTY" });
+    await db.run("UPDATE sys_role SET status=1 WHERE code='DUTY'");
+
+    // 审计落库：actor 是真实管理员，detail 记模拟单位与角色
+    const countAudit = async () =>
+      Number(
+        (await db.get("SELECT COUNT(*) AS n FROM sys_operation_log WHERE action='切换总览视角'")).n
+      );
+    assert.equal(await countAudit(), 0);
+    await call(o.group.bind(o), adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" }));
+    assert.equal(await countAudit(), 1);
+    const row = await db.get(
+      "SELECT actor_id, org_name, detail FROM sys_operation_log WHERE action='切换总览视角'"
+    );
+    assert.equal(row.actor_id, "2");
+    assert.equal(row.org_name, "总公司"); // 真实管理员本部门，而非模拟单位
+    assert.deepEqual(JSON.parse(row.detail), { asOrgId: "2", asRoleCode: "BRANCH_ADMIN" });
+    // 轮询同参去重：再取两次不新增
+    await call(o.group.bind(o), adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" }));
+    await call(
+      o.unit.bind(o),
+      adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" }, { orgId: "2" })
+    );
+    assert.equal(await countAudit(), 1);
+    // 切换到另一视角再记一条
+    await call(o.group.bind(o), adminView({ asOrgId: "6", asRoleCode: "DUTY" }));
+    assert.equal(await countAudit(), 2);
+    // 退出视角（无参）不记审计，且清去重键：再进入同视角会再记
+    await call(o.group.bind(o), adminView());
+    assert.equal(await countAudit(), 2);
+    await call(o.group.bind(o), adminView({ asOrgId: "2", asRoleCode: "BRANCH_ADMIN" }));
+    assert.equal(await countAudit(), 3);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -17,21 +17,17 @@
         </a>
       </nav>
       <div class="settings-main">
-        <el-card id="sec-access" v-loading="loading" shadow="never" header="接入信息">
-          <InfoList :items="accessItems" label-width="96px" />
-        </el-card>
+        <SettingsSection id="sec-access" v-loading="loading" title="接入信息">
+          <InfoList :items="accessItems" label-width="140px" />
+        </SettingsSection>
 
-        <el-card
+        <SettingsSection
           id="sec-map"
           v-loading="loading"
-          class="database-card"
-          shadow="never"
-          header="地图"
+          title="地图"
+          desc="天地图浏览器端密钥，所有看地图的页面都用它。安全密钥留空则不修改。"
         >
-          <p class="database-tip">
-            天地图浏览器端密钥，所有看地图的页面都用它。安全密钥留空则不修改。
-          </p>
-          <el-form label-width="88px">
+          <el-form label-width="140px">
             <el-form-item label="应用密钥">
               <el-input
                 v-model="mapForm.tk"
@@ -54,55 +50,68 @@
               <el-button type="primary" :loading="savingMap" @click="saveMap">保存</el-button>
             </el-form-item>
           </el-form>
-        </el-card>
+        </SettingsSection>
 
-        <el-card
+        <SettingsSection
           id="sec-box"
           v-loading="loading"
-          class="database-card"
-          shadow="never"
-          header="采样箱默认策略与任务"
+          title="采样箱默认策略与任务"
+          desc="只用于没有单箱、任务或批量设置的箱子；开关箱、上电、插拔充电器仍然马上上报。建议 60 秒，并只在充电时定时上报。"
         >
-          <p class="database-tip">
-            只用于没有单箱、任务或批量设置的箱子；开关箱、上电、插拔充电器仍然马上上报。建议 60
-            秒，并只在充电时定时上报。
-          </p>
           <el-form label-width="140px">
-            <el-form-item label="上报周期">
-              <el-input-number
-                v-model="boxForm.reportPeriodSec"
-                :min="5"
-                :max="3600"
-                :step="5"
-                :disabled="!can.box"
-              />
-              <span class="unit">秒</span>
-            </el-form-item>
-            <el-form-item label="定时上报">
-              <el-switch v-model="boxForm.reportOnlyWhenCharging" :disabled="!can.box" />
-              <span class="unit">只在充电时</span>
-            </el-form-item>
-            <el-form-item label="电量预留">
-              <el-input-number
-                v-model="boxForm.batteryReserve"
-                :min="0"
-                :max="80"
-                :disabled="!can.batteryReserve"
-              />
-              <span class="unit">%，从总电量底部扣掉，不计入可用电量</span>
-            </el-form-item>
-            <el-form-item label="任务到达半径">
-              <el-input-number
-                v-model="boxForm.arriveRadiusM"
-                :min="100"
-                :max="50000"
-                :step="500"
-                :disabled="!can.arriveRadius"
-              />
-              <span class="unit">
-                米，箱子离寄出、收货地址或计划地点在这个范围内算到达；基站定位误差常有一两公里
-              </span>
-            </el-form-item>
+            <div class="form-pair">
+              <el-form-item label="上报周期">
+                <el-input-number
+                  v-model="boxForm.reportPeriodSec"
+                  :min="5"
+                  :max="3600"
+                  :step="5"
+                  :disabled="!can.box"
+                />
+                <span class="unit">秒</span>
+              </el-form-item>
+              <el-form-item label="定时上报">
+                <el-switch v-model="boxForm.reportOnlyWhenCharging" :disabled="!can.box" />
+                <span class="unit">只在充电时</span>
+              </el-form-item>
+            </div>
+            <div class="form-pair">
+              <el-form-item>
+                <template #label>
+                  <span class="label-help">
+                    电量预留
+                    <el-tooltip :content="HELP.batteryReserve" placement="top">
+                      <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-input-number
+                  v-model="boxForm.batteryReserve"
+                  :min="0"
+                  :max="80"
+                  :disabled="!can.batteryReserve"
+                />
+                <span class="unit">%</span>
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  <span class="label-help">
+                    任务到达半径
+                    <el-tooltip :content="HELP.arriveRadius" placement="top">
+                      <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-input-number
+                  v-model="boxForm.arriveRadiusM"
+                  :min="100"
+                  :max="50000"
+                  :step="500"
+                  :disabled="!can.arriveRadius"
+                />
+                <span class="unit">米</span>
+              </el-form-item>
+            </div>
             <el-form-item label="建单后未上线宽限">
               <el-input-number
                 v-model="boxForm.taskOfflineGraceMin"
@@ -111,23 +120,24 @@
                 :step="5"
                 :disabled="!can.box"
               />
-              <span class="unit">
-                分钟（1–1440，默认
+              <span class="unit">分钟</span>
+              <div class="form-extra">
+                （1–1440，默认
                 60）。被任务占用、从未上报的箱子，建单后这段时间内算中性「待上线」，不计离线；超过才计离线。一旦上报过回落「超过
                 3 个上报周期」口径。
-              </span>
+              </div>
             </el-form-item>
             <el-form-item label="划拨/送检功能">
               <el-switch v-model="boxForm.enableTransferInspect" :disabled="!can.box" />
-              <span class="unit">
+              <div class="form-extra">
                 开启后启用「调拨单（批量划拨）」「送检单」两个独立页与建单入口；任务单页只放采样。关闭时新端点报未开通，旧流程不受影响。
-              </span>
+              </div>
             </el-form-item>
             <el-form-item v-if="canSetPolicy">
               <el-button type="primary" :loading="savingBox" @click="saveBox">保存</el-button>
             </el-form-item>
           </el-form>
-        </el-card>
+        </SettingsSection>
 
         <BrandingCard
           v-if="settings"
@@ -138,17 +148,12 @@
           @saved="onBrandingSaved"
         />
 
-        <el-card
+        <SettingsSection
           id="sec-labels"
           v-loading="loading"
-          class="database-card"
-          shadow="never"
-          header="显示名称"
+          title="显示名称"
+          :desc="`只改页面上显示的文字，数据库里的值、筛选和接口参数不变。留空恢复默认，每项最多 ${LABEL_MAX} 个字。保存后其他用户刷新页面生效。`"
         >
-          <p class="database-tip">
-            只改页面上显示的文字，数据库里的值、筛选和接口参数不变。留空恢复默认，每项最多
-            {{ LABEL_MAX }} 个字。保存后其他用户刷新页面生效。
-          </p>
           <div class="label-groups">
             <section v-for="group in LABEL_GROUPS" :key="group.key" class="label-group">
               <h4>
@@ -173,29 +178,36 @@
             <el-button type="primary" :loading="savingLabels" @click="saveLabels">保存</el-button>
             <el-button @click="resetLabels">全部恢复默认</el-button>
           </div>
-        </el-card>
+        </SettingsSection>
 
-        <el-card
+        <SettingsSection
           v-if="settings?.security"
           id="sec-security"
           v-loading="loading"
-          class="database-card"
-          shadow="never"
-          header="账号安全"
+          title="账号安全"
+          desc="新建、重置密码和自己改密都按这里的规则检查。改了规则不影响已有密码，到期或被要求改密时才按新规则。"
         >
-          <p class="database-tip">
-            新建、重置密码和自己改密都按这里的规则检查。改了规则不影响已有密码，到期或被要求改密时才按新规则。
-          </p>
           <el-form label-width="140px">
-            <el-form-item label="密码最短长度">
-              <el-input-number
-                v-model="secForm.minLength"
-                :min="6"
-                :max="64"
-                :disabled="!can.password"
-              />
-              <span class="unit">位</span>
-            </el-form-item>
+            <div class="form-pair">
+              <el-form-item label="密码最短长度">
+                <el-input-number
+                  v-model="secForm.minLength"
+                  :min="6"
+                  :max="64"
+                  :disabled="!can.password"
+                />
+                <span class="unit">位</span>
+              </el-form-item>
+              <el-form-item label="定期更换">
+                <el-input-number
+                  v-model="secForm.expireDays"
+                  :min="0"
+                  :max="3650"
+                  :disabled="!can.password"
+                />
+                <span class="unit">天，0 表示不要求</span>
+              </el-form-item>
+            </div>
             <el-form-item label="必须包含">
               <el-checkbox-group v-model="secForm.classes" :disabled="!can.password">
                 <el-checkbox value="letter">字母</el-checkbox>
@@ -203,116 +215,115 @@
                 <el-checkbox value="symbol">符号</el-checkbox>
               </el-checkbox-group>
             </el-form-item>
-            <el-form-item label="定期更换">
-              <el-input-number
-                v-model="secForm.expireDays"
-                :min="0"
-                :max="3650"
-                :disabled="!can.password"
-              />
-              <span class="unit">天，0 表示不要求</span>
-            </el-form-item>
-            <el-form-item label="登录失败锁定">
-              连续输错
-              <el-input-number
-                v-model="secForm.lockThreshold"
-                :min="3"
-                :max="20"
-                size="small"
-                :disabled="!can.lockout"
-              />
-              次，锁定
-              <el-input-number
-                v-model="secForm.lockMinutes"
-                :min="1"
-                :max="1440"
-                size="small"
-                :disabled="!can.lockout"
-              />
-              分钟
-            </el-form-item>
+            <div class="form-pair">
+              <el-form-item>
+                <template #label>
+                  <span class="label-help">
+                    连续输错
+                    <el-tooltip :content="HELP.lockout" placement="top">
+                      <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-input-number
+                  v-model="secForm.lockThreshold"
+                  :min="3"
+                  :max="20"
+                  :disabled="!can.lockout"
+                />
+                <span class="unit">次</span>
+              </el-form-item>
+              <el-form-item label="锁定时长">
+                <el-input-number
+                  v-model="secForm.lockMinutes"
+                  :min="1"
+                  :max="1440"
+                  :disabled="!can.lockout"
+                />
+                <span class="unit">分钟</span>
+              </el-form-item>
+            </div>
             <el-form-item v-if="can.password || can.lockout">
               <el-button type="primary" :loading="savingSec" @click="saveSecurity">保存</el-button>
             </el-form-item>
           </el-form>
-        </el-card>
+        </SettingsSection>
 
-        <el-card
+        <SettingsSection
           v-if="settings?.smtp || settings?.video"
           id="sec-integration"
           v-loading="loading"
-          class="database-card"
-          shadow="never"
-          header="外部集成"
+          title="外部集成"
         >
           <h4 class="sub">邮件服务（SMTP）</h4>
           <p class="database-tip">以后用于找回密码、告警通知。密码只写入，不会回显。</p>
-          <el-form label-width="110px">
+          <el-form label-width="140px">
             <el-form-item label="启用">
               <el-switch v-model="smtpForm.enabled" :disabled="!can.smtp" />
             </el-form-item>
-            <el-row :gutter="12">
-              <el-col :md="12" :span="24">
-                <el-form-item label="服务器">
-                  <el-input
-                    v-model="smtpForm.host"
-                    placeholder="smtp.example.com"
-                    :disabled="!can.smtp"
-                  />
-                </el-form-item>
-              </el-col>
-              <el-col :md="6" :span="12">
-                <el-form-item label="端口">
-                  <el-input-number
-                    v-model="smtpForm.port"
-                    :min="1"
-                    :max="65535"
-                    :disabled="!can.smtp"
-                    style="width: 100%"
-                  />
-                </el-form-item>
-              </el-col>
-              <el-col :md="6" :span="12">
-                <el-form-item label="加密">
-                  <el-select v-model="smtpForm.secure" :disabled="!can.smtp">
-                    <el-option label="SSL" value="ssl" />
-                    <el-option label="STARTTLS" value="starttls" />
-                    <el-option label="不加密" value="none" />
-                  </el-select>
-                </el-form-item>
-              </el-col>
-              <el-col :md="12" :span="24">
-                <el-form-item label="账号">
-                  <el-input v-model="smtpForm.user" autocomplete="off" :disabled="!can.smtp" />
-                </el-form-item>
-              </el-col>
-              <el-col :md="12" :span="24">
-                <el-form-item label="密码">
-                  <el-input
-                    v-model="smtpForm.password"
-                    type="password"
-                    show-password
-                    autocomplete="new-password"
-                    :placeholder="smtpForm.passwordSet ? '已设置，留空不改' : ''"
-                    :disabled="!can.smtp"
-                  />
-                </el-form-item>
-              </el-col>
-              <el-col :md="12" :span="24">
-                <el-form-item label="发件人名称">
-                  <el-input v-model="smtpForm.fromName" :disabled="!can.smtp" />
-                </el-form-item>
-              </el-col>
-              <el-col :md="12" :span="24">
-                <el-form-item label="发件地址">
-                  <el-input
-                    v-model="smtpForm.fromAddress"
-                    placeholder="noreply@example.com"
-                    :disabled="!can.smtp"
-                  />
-                </el-form-item>
-              </el-col>
-            </el-row>
+            <el-form-item label="服务器">
+              <el-input
+                v-model="smtpForm.host"
+                placeholder="smtp.example.com"
+                :disabled="!can.smtp"
+              />
+            </el-form-item>
+            <div class="form-pair">
+              <el-form-item>
+                <template #label>
+                  <span class="label-help">
+                    端口
+                    <el-tooltip :content="HELP.smtpPort" placement="top">
+                      <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-input-number
+                  v-model="smtpForm.port"
+                  :min="1"
+                  :max="65535"
+                  :disabled="!can.smtp"
+                />
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  <span class="label-help">
+                    加密
+                    <el-tooltip :content="HELP.smtpSecure" placement="top">
+                      <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-select v-model="smtpForm.secure" :disabled="!can.smtp">
+                  <el-option label="SSL" value="ssl" />
+                  <el-option label="STARTTLS" value="starttls" />
+                  <el-option label="不加密" value="none" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <el-form-item label="账号">
+              <el-input v-model="smtpForm.user" autocomplete="off" :disabled="!can.smtp" />
+            </el-form-item>
+            <el-form-item label="密码">
+              <el-input
+                v-model="smtpForm.password"
+                type="password"
+                show-password
+                autocomplete="new-password"
+                :placeholder="smtpForm.passwordSet ? '已设置，留空不改' : ''"
+                :disabled="!can.smtp"
+              />
+            </el-form-item>
+            <el-form-item label="发件人名称">
+              <el-input v-model="smtpForm.fromName" :disabled="!can.smtp" />
+            </el-form-item>
+            <el-form-item label="发件地址">
+              <el-input
+                v-model="smtpForm.fromAddress"
+                placeholder="noreply@example.com"
+                :disabled="!can.smtp"
+              />
+            </el-form-item>
             <el-form-item v-if="can.smtp">
               <el-button type="primary" :loading="savingSmtp" @click="saveSmtp">保存</el-button>
               <el-button :loading="testingSmtp" @click="testSmtp()">测试连接</el-button>
@@ -332,7 +343,7 @@
             采样任务要求录像时，采样机构每次在计划地点开箱，服务器向这个地址发一条 JSON（事件
             box.opened，带任务、箱子、开箱时间和位置）。平台确定前可以先不启用，录像记录会显示「平台未接入」。
           </p>
-          <el-form label-width="110px">
+          <el-form label-width="140px">
             <el-form-item label="启用">
               <el-switch v-model="videoForm.enabled" :disabled="!can.video" />
             </el-form-item>
@@ -343,7 +354,15 @@
                 :disabled="!can.video"
               />
             </el-form-item>
-            <el-form-item label="访问令牌">
+            <el-form-item>
+              <template #label>
+                <span class="label-help">
+                  访问令牌
+                  <el-tooltip :content="HELP.videoToken" placement="top">
+                    <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </span>
+              </template>
               <el-input
                 v-model="videoForm.token"
                 type="password"
@@ -353,7 +372,15 @@
                 :disabled="!can.video"
               />
             </el-form-item>
-            <el-form-item label="超时">
+            <el-form-item>
+              <template #label>
+                <span class="label-help">
+                  超时
+                  <el-tooltip :content="HELP.videoTimeout" placement="top">
+                    <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </span>
+              </template>
               <el-input-number
                 v-model="videoForm.timeoutMs"
                 :min="1000"
@@ -375,7 +402,7 @@
               小程序登录时用 AppID 和 AppSecret 向微信换取用户身份，在微信公众平台「开发管理 ›
               开发设置」里查看。AppSecret 只写入，不回显。
             </p>
-            <el-form label-width="110px">
+            <el-form label-width="140px">
               <el-form-item label="AppID">
                 <el-input
                   v-model="wechatForm.appId"
@@ -407,18 +434,16 @@
             <el-tag type="info">Webhook 推送</el-tag>
             <span class="text-muted">接口已预留，确定服务商后开放配置。</span>
           </div>
-        </el-card>
+        </SettingsSection>
 
-        <el-card
+        <SettingsSection
           v-if="settings?.database"
           id="sec-db"
           v-loading="loading"
-          class="database-card"
-          shadow="never"
-          header="数据库"
+          title="数据库"
+          desc="主机留空时继续使用 SQLite。密码只写入，不会回显。"
         >
-          <p class="database-tip">主机留空时继续使用 SQLite。密码只写入，不会回显。</p>
-          <el-form label-width="88px">
+          <el-form label-width="140px">
             <el-form-item label="主机">
               <el-input
                 v-model="form.host"
@@ -450,7 +475,7 @@
               <el-button type="primary" :loading="saving" @click="save">保存</el-button>
             </el-form-item>
           </el-form>
-        </el-card>
+        </SettingsSection>
       </div>
       <div v-if="dirtyCount" class="save-bar">
         <span class="save-bar-text">{{ dirtyCount }} 个分区未保存</span>
@@ -463,6 +488,7 @@
 
 <script setup lang="ts">
 import { onBeforeRouteLeave } from "vue-router";
+import { QuestionFilled } from "@element-plus/icons-vue";
 import SettingsAPI, {
   type SecuritySettings,
   type SmtpSettings,
@@ -471,6 +497,7 @@ import SettingsAPI, {
   type WechatSettings,
 } from "@/api/system/settings";
 import BrandingCard from "./BrandingCard.vue";
+import SettingsSection from "./SettingsSection.vue";
 import {
   dirtyIntegrationParts,
   integrationKey,
@@ -489,6 +516,17 @@ import {
   type LabelGroup,
   type Labels,
 } from "@/utils/labels";
+
+/** inline 帮助文案：全部取自现有 hint/选项 label/服务端校验口径，不新造口径。 */
+const HELP = {
+  batteryReserve: "从总电量底部扣掉，不计入可用电量",
+  arriveRadius: "箱子离寄出、收货地址或计划地点在这个范围内算到达；基站定位误差常有一两公里",
+  lockout: "连续输错几次锁定、锁定多少分钟",
+  smtpPort: "1–65535，默认 465",
+  smtpSecure: "SSL / STARTTLS / 不加密",
+  videoToken: "选填，作为 Bearer 令牌；已设置时留空不改",
+  videoTimeout: "超时要在 1000–60000 毫秒之间",
+} as const;
 
 const loading = ref(false);
 const saving = ref(false);
@@ -962,16 +1000,62 @@ const accessItems = computed<InfoItem[]>(() => [
   color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
 }
+/* 超宽屏内容约束：分区内容区封顶 1280 居中，不再无限拉伸；导航保持 sticky */
 .settings-main {
+  display: flex;
   flex: 1;
+  flex-direction: column;
+  gap: 16px;
   min-width: 0;
+  max-width: 1280px;
+  margin-inline: auto;
 }
-.settings-main > .el-card {
-  scroll-margin-top: 12px;
+/* 表单栅格统一：label 140 右对齐（el-form label-width），control 弹性封顶 480，行距 16，stepper 统一宽 */
+.settings-main :deep(.el-form-item) {
+  margin-bottom: 16px;
+}
+.settings-main :deep(.el-form > .el-form-item:last-child) {
+  margin-bottom: 0;
+}
+.settings-main :deep(.el-form-item__content > .el-input),
+.settings-main :deep(.el-form-item__content > .el-select) {
+  width: 100%;
+  max-width: 480px;
+}
+.settings-main :deep(.el-input-number) {
+  width: 180px;
+}
+/* 短字段成对双列，窄屏回落单列 */
+.form-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 24px;
+}
+.label-help {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.help-icon {
+  font-size: 14px;
+  color: var(--el-text-color-secondary);
+  cursor: help;
+}
+/* form-item 内容换行的一行灰字帮助 */
+.form-extra {
+  flex-basis: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 .sub {
-  margin: 8px 0 4px;
+  margin: 20px 0 4px;
   font-size: 14px;
+  font-weight: 600;
+}
+.sub:first-child {
+  margin-top: 0;
 }
 .planned {
   display: flex;
@@ -998,9 +1082,9 @@ const accessItems = computed<InfoItem[]>(() => [
     flex-shrink: 0;
     white-space: nowrap;
   }
-}
-.database-card {
-  margin-top: 16px;
+  .form-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 /* #settings-refactor：脏点 + sticky 保存条 */
 .dirty-dot {

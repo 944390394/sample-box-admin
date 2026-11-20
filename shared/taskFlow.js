@@ -6,32 +6,29 @@
  * 「已检测」「已退回」后来才加到服务端，前端没跟上：进度条渲染成空白、已结束的单子还在 15 秒轮询。
  * 新增结束状态只改这里，两边一起生效。
  *
- * 三类单据（kind 是权威来源，单号前缀只是显示）：
- * - 采样 TK-：寄送方式 trip 单向/双向/不填，10 状态，不改；
- * - 送检 IN-：9 状态，「已签收」不是持久状态（待签收上签收直接落待检测）；
+ * 组织简化（B1a/P6）后两类新建单据（kind 是权威来源，单号前缀只是显示）：
+ * - 采样 TK-：采样＋送检合并成一张单。分公司自采，封箱后直寄唯一检测站，签收后逐台扫码开始检测。
+ *   主路径 7 步：待采样→采样中→已封箱→在途→待签收→待检测→已检测(终态OK)。
+ *   分支：已取消（待签收之前可取消）；已拒收（签收动作可选拒收→终态）；
+ *   退回中→已退回（待检测/已检测可发起退回，退回目的地＝原寄出分公司 fromOrg）。
+ *   寄送方式 trip（单向/双向）整体作废：新建忽略，旧数据只读兼容。
  * - 划拨 AL-：提交即生效，只有 已划拨/已撤销 两个终态，无物流步骤，只能走撤销端点、不走通用 transition。
- * 旧存储值「调拨」只读保留（历史进度条仍要渲染），不在 DOC_KINDS 枚举内。
  *
- * 采样单的寄送方式 trip：
- * - 单向：寄出单位把箱子寄到采样单位，到达后采样、封箱，任务完成，不寄回；
- * - 双向：寄去、采样、封箱后寄回寄出单位，核验签收；
- * - 不填（旧单）：箱子已在采样单位，直接采样，封箱后寄回核验。
+ * 只读保留的旧 kind（历史进度条仍要渲染、在途旧单仍能收尾，但不再新建）：
+ * - 送检 IN-：9 状态，INSPECT_* 常量保留供迁移映射（LEGACY_*）引用；
+ * - 调拨：direct 直接调拨与旧发货调拨，拒收可退回寄出单位。
  *
- * 送到检测站的单（建单时签收方是「采样机构」类型的单位——采样机构就是检测站，task.inspect 为真）：
- * 签收后不直接结束，先到「待检测」，检测站每台箱子扫码「开始检测」，这台箱子的本次任务就结束、
- * 开箱次数从下一张单重新算；全部开始检测后整张单变「已检测」。
- *
- * 调拨单（legacy，只读）：
- * - direct 为真：不定位、不发货，建单后直接待签收，接收单位签收后箱子归过去；
- * - 没有 direct（旧单）：待寄出 → 运送中 → 待签收。
- * 拒收时可以选「退回寄出单位」：不结束，加一段返程——退回中 → 已退回。
+ * 送到检测站的单（task.inspect 为真）：签收后不直接结束，先到「待检测」，检测站每台箱子扫码
+ * 「开始检测」，这台箱子的本次任务就结束、开箱次数从下一张单重新算；全部开始检测后整张单变「已检测」。
  */
+
+/** 旧采样单的寄送方式（已作废）：只读兼容旧数据，新建忽略。 */
 export const TRIPS = ["单向", "双向"];
 
-/** 新建单据的 kind 枚举；旧存储值「调拨」只读保留，不在其中。 */
-export const DOC_KINDS = ["采样", "送检", "划拨"];
+/** 新建单据的 kind 枚举；旧存储值「送检」「调拨」只读保留，不在其中。 */
+export const DOC_KINDS = ["采样", "划拨"];
 
-/** 走完流程结束的：调拨/采样签收完、老任务完成、检测站全部开始检测、划拨提交即生效。 */
+/** 走完流程结束的：老任务完成、旧调拨签收完、检测站全部开始检测、划拨提交即生效。 */
 export const ENDED_OK = ["已完成", "已签收", "已检测", "已划拨"];
 /** 中途作废结束的（含划拨撤销）。 */
 export const ENDED_VOID = ["已取消", "已拒收", "已退回", "已撤销"];
@@ -47,17 +44,47 @@ export function isEnded(status) {
 
 /** 检测站的两步：签收后待检测，全部开始检测后已检测。 */
 export const INSPECT_STEPS = ["待检测", "已检测"];
-/** 拒收并退回后的返程两步。 */
+/** 退回后的返程两步。 */
 export const RETURN_STEPS = ["退回中", "已退回"];
 
 /** 划拨无物流步骤：进度条不渲染。 */
 export const TRANSFER_STEPS = [];
-/** 送检主路径 5 步（含首末态）。 */
+/** 旧送检主路径 5 步（只读保留，供历史进度条与迁移映射引用；不再用于新单）。 */
 export const INSPECT_FLOW = ["待寄出", "运送中", "待签收", "待检测", "已检测"];
-/** 送检拒收并退回的返程路径。 */
+/** 旧送检拒收并退回的返程路径（只读保留）。 */
 export const INSPECT_RETURN_FLOW = ["待寄出", "运送中", "待签收", "退回中", "已退回"];
 
-/** 单号前缀（显示用，kind 才是类型权威来源）。 */
+/** 合并采样单主路径 7 步（P6，含首末态）：分公司自采→封箱→寄检测站→签收→逐台检测。 */
+export const SAMPLE_FLOW = ["待采样", "采样中", "已封箱", "在途", "待签收", "待检测", "已检测"];
+/**
+ * 合并采样单退回路径：待检测/已检测可发起退回，回原寄出分公司。
+ * 进度条把检测段换成返程（已检测后退回的，检测事实在流转记录里）。
+ */
+export const SAMPLE_RETURN_FLOW = [
+  "待采样",
+  "采样中",
+  "已封箱",
+  "在途",
+  "待签收",
+  "待检测",
+  "退回中",
+  "已退回",
+];
+
+/** 旧采样单专属状态（合并流不再产生）：读旧数据时按旧流渲染，新建一律走合并流。 */
+const LEGACY_SAMPLE_STATUSES = ["待执行", "执行中", "待核验", "已签收", "已完成", "待寄出", "运送中"];
+
+/**
+ * 这张采样单是不是旧数据（带寄送 trip、或停在合并流没有的旧状态）。
+ * 只用于读兼容（进度条/推进）；新建单不带 trip、状态都在合并流里，恒为 false。
+ */
+export function isLegacySample(task) {
+  if (task.kind !== "采样") return false;
+  if (TRIPS.includes(task.trip)) return true;
+  return LEGACY_SAMPLE_STATUSES.includes(task.status);
+}
+
+/** 单号前缀（显示用，kind 才是类型权威来源）。送检 IN- 只读保留。 */
 export function prefixOf(kind) {
   if (kind === "划拨") return "AL-";
   if (kind === "送检") return "IN-";
@@ -66,27 +93,33 @@ export function prefixOf(kind) {
 
 export function stepsOf(task) {
   if (task.kind === "划拨") return TRANSFER_STEPS;
+  // 旧送检（只读）
   if (task.kind === "送检")
     return RETURN_STEPS.includes(task.status) ? INSPECT_RETURN_FLOW : INSPECT_FLOW;
-  const tail = task.inspect ? INSPECT_STEPS : ["已签收"];
+  // 旧调拨（只读）
   if (task.kind === "调拨") {
-    // 直接调拨没有寄出、运送；旧单和带地址的调用仍走发货
     const head = task.direct ? ["待签收"] : ["待寄出", "运送中", "待签收"];
-    // 拒收并退回：签收那一步之后换成返程
+    const tail = task.inspect ? INSPECT_STEPS : ["已签收"];
     if (RETURN_STEPS.includes(task.status)) return [...head, ...RETURN_STEPS];
     return [...head, ...tail];
   }
-  // 早期的通用任务只有这三步，按状态认出来
-  if (["待执行", "执行中"].includes(task.status)) return ["待执行", "执行中", "已完成"];
-  const sampling = ["待采样", "采样中", "已封箱"];
-  if (task.trip === "单向") return ["待寄出", "运送中", ...sampling, "已完成"];
-  const back = ["在途", "待核验", ...tail];
-  if (task.trip === "双向") return ["待寄出", "运送中", ...sampling, ...back];
-  return [...sampling, ...back];
+  // 旧采样单（带 trip 或停在旧状态）：按旧流渲染
+  if (isLegacySample(task)) {
+    if (["待执行", "执行中"].includes(task.status)) return ["待执行", "执行中", "已完成"];
+    const tail = task.inspect ? INSPECT_STEPS : ["已签收"];
+    const sampling = ["待采样", "采样中", "已封箱"];
+    if (task.trip === "单向") return ["待寄出", "运送中", ...sampling, "已完成"];
+    const back = ["在途", "待核验", ...tail];
+    if (task.trip === "双向") return ["待寄出", "运送中", ...sampling, ...back];
+    return [...sampling, ...back];
+  }
+  // 合并采样单（新建一律走这里）
+  return RETURN_STEPS.includes(task.status) ? SAMPLE_RETURN_FLOW : SAMPLE_FLOW;
 }
 
-/** 签收推进到哪一步：送检/送检测站的到「待检测」，其余到「已签收」。 */
+/** 签收推进到哪一步：合并采样单/送检/送检测站的到「待检测」，旧调拨/旧采样到「已签收」。 */
 export function signTargetOf(task) {
+  if (task.kind === "采样" && !isLegacySample(task)) return "待检测";
   return task.kind === "送检" || task.inspect ? "待检测" : "已签收";
 }
 
@@ -96,7 +129,7 @@ export function initialOf(task) {
   return stepsOf(task)[0];
 }
 
-/** 送检各状态的推进集合（检测站开始检测走 inspect 端点，不占 nextOf）。 */
+/** 旧送检各状态的推进集合（只读保留；检测站开始检测走 inspect 端点，不占 nextOf）。 */
 const INSPECT_NEXT = {
   待寄出: ["运送中", "已取消"],
   运送中: ["待签收", "已取消"],
@@ -106,14 +139,31 @@ const INSPECT_NEXT = {
 };
 
 /**
- * 从 status 能推进到哪些状态：流程里的下一步，加上签收那一步的拒收和任何时候的取消。
- * 拒收：调拨单在待签收时（可以选退回寄出单位）；采样单在待核验时（拒收即样品作废，比如开箱超限）。
- * 划拨恒为 []：只能走撤销端点，不能走通用 transition。
+ * 合并采样单各状态的推进集合（P6）。
+ * 已取消只在待签收之前（待采样/采样中/已封箱/在途）；待签收只能签收或拒收；
+ * 待检测/已检测可发起退回（已检测是终态OK，但仍允许退回，故单列）；退回途中不能取消。
+ */
+const SAMPLE_NEXT = {
+  待采样: ["采样中", "已取消"],
+  采样中: ["已封箱", "已取消"],
+  已封箱: ["在途", "已取消"],
+  在途: ["待签收", "已取消"],
+  待签收: ["待检测", "已拒收"],
+  待检测: ["已检测", "退回中"],
+  已检测: ["退回中"],
+  退回中: ["已退回"],
+};
+
+/**
+ * 从 status 能推进到哪些状态。划拨恒为 []（只能走撤销端点）。
+ * 合并采样单按 SAMPLE_NEXT；旧送检/调拨/采样按各自旧流（读兼容）。
  */
 export function nextOf(task, status) {
   if (task.kind === "划拨") return [];
+  if (task.kind === "送检") return ENDED.includes(status) ? [] : INSPECT_NEXT[status] || [];
+  if (task.kind === "采样" && !isLegacySample({ ...task, status }))
+    return SAMPLE_NEXT[status] || [];
   if (ENDED.includes(status)) return [];
-  if (task.kind === "送检") return INSPECT_NEXT[status] || [];
   const steps = stepsOf({ ...task, status });
   const index = steps.indexOf(status);
   if (index < 0 || index === steps.length - 1) return [];
@@ -128,4 +178,31 @@ export function nextOf(task, status) {
   if (status === "退回中") return next;
   next.push("已取消");
   return next;
+}
+
+/**
+ * 存量单据迁移映射（P7，供 B1b 迁移 056_org_simplify 引用）。
+ * kind：送检并入采样；采样/调拨/划拨 不变（调拨只读保留）。映射外按同名（identity）。
+ */
+export const LEGACY_KIND_MAP = { 送检: "采样" };
+
+/**
+ * 状态映射（按旧 kind 分组）：未列出的状态同名保留。
+ * - 送检：待寄出→已封箱、运送中→在途，其余同名（待签收/待检测/已检测/已拒收/已取消/退回中/已退回）。
+ * - 旧采样：待核验→待检测、已签收→已检测、已完成→已检测（终态语义对齐），其余同名。
+ * 终态语义保持：ENDED_OK→ENDED_OK、ENDED_VOID→ENDED_VOID（已签收/已完成 归并到 已检测）。
+ */
+export const LEGACY_STATUS_MAP = {
+  送检: { 待寄出: "已封箱", 运送中: "在途" },
+  采样: { 待核验: "待检测", 已签收: "已检测", 已完成: "已检测" },
+};
+
+/** 迁移用：把旧 kind 映射到新 kind（映射外同名）。 */
+export function migrateKind(kind) {
+  return LEGACY_KIND_MAP[kind] ?? kind;
+}
+
+/** 迁移用：把旧 kind 下的旧状态映射到新状态（映射外同名）。 */
+export function migrateStatus(kind, status) {
+  return LEGACY_STATUS_MAP[kind]?.[status] ?? status;
 }

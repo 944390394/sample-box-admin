@@ -845,6 +845,8 @@ export async function roleOptions(ctx) {
     out.push({
       value: Number(row.id),
       label: row.name,
+      // 总览「模拟视角」按角色 code 取模拟口径，选项里带上 code（其余调用方不受影响）
+      code: row.code,
       ...(reason ? { disabled: true, reason } : {}),
       ...(cut ? { cut } : {}),
     });

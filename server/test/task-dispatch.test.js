@@ -169,7 +169,7 @@ test("调拨：选单位带出地址，寄出方寄出，接收方看得到并�
       ["华东签收员"]
     );
 
-    // 寄出单位必须在自己范围内
+    // 寄出单位必须在自己范围内（合并单口径）；旧调拨不再新建
     const base = {
       name: "调拨测试",
       kind: "调拨",
@@ -180,30 +180,30 @@ test("调拨：选单位带出地址，寄出方寄出，接收方看得到并�
     await assert.rejects(
       call(c.createTask.bind(c), {
         ...ctxOf(["2", "21"]),
-        body: { ...base, fromOrgId: "3", toOrgId: "2" },
+        body: { ...base, fromOrgId: "2", toOrgId: "3" },
       }),
-      /寄出单位/
+      /调拨单已停用/
     );
-    const created = await call(c.createTask.bind(c), {
-      ...south,
-      body: {
-        ...base,
-        fromOrgId: "2",
-        toOrgId: "3",
-        fromPlace: { ...desk.location, orgId: "2" },
-        toPlace: {
-          address: "华东 3 号楼收发室",
-          lng: 114.0579,
-          lat: 22.5431,
-          orgId: "3",
-          custom: true,
-        },
+    // 旧调拨单（只读保留）：policy 层建单模拟迁移前存量，控制器仍可推进收尾
+    const id = await policies.createTask({
+      ...base,
+      signer: "华东签收员",
+      fromOrgId: "2",
+      fromOrg: "华南分公司",
+      toOrgId: "3",
+      toOrg: "华东分公司",
+      fromPlace: { address: "深圳平湖", lng: 114.1175, lat: 22.6795, orgId: "2" },
+      toPlace: {
+        address: "华东 3 号楼收发室",
+        lng: 114.0579,
+        lat: 22.5431,
+        orgId: "3",
+        custom: true,
       },
     });
-    const id = created.id;
 
     // 接收方在列表和详情里都看得到，但还不能寄出
-    const eastList = await call(c.tasks.bind(c), { ...east, query: {} });
+    const eastList = await call(c.tasks.bind(c), { ...east, query: { allKinds: "1" } });
     assert.deepEqual(
       eastList.list.map((t) => t.id),
       [id]
@@ -375,18 +375,19 @@ test("调拨：选单位带出地址，寄出方寄出，接收方看得到并�
       "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('20','s1','华南签收员','x','2',1)"
     );
     const admin2 = ctxOf(null);
-    const back = await call(c.createTask.bind(c), {
-      ...admin2,
-      body: {
+    const back = {
+      id: await policies.createTask({
         name: "寄回",
         kind: "调拨",
         boxIds: [box.id],
         sender: "华东寄件人",
         signerId: "20",
         fromOrgId: "3",
+        fromOrg: "华东分公司",
         toOrgId: "2",
-      },
-    });
+        toOrg: "华南分公司",
+      }),
+    };
     await call(c.transition.bind(c), {
       ...admin2,
       params: { id: back.id },
@@ -554,7 +555,8 @@ test("部门负责人：新建账号（随机或手填密码）、选已有用�
   }
 });
 
-test("采样任务：选采样单位和计划地点，旧接口不带新字段照常创建", async () => {
+test("合并采样任务：选寄出分公司和计划地点，接收方固定检测站；建单即占用、取消释放、开箱上限", async () => {
+  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" } });
   const dir = await mkdtemp(path.join(os.tmpdir(), "task-sample-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -564,9 +566,15 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     policies = new ReportPolicy(db);
   try {
     await migrate(db);
-    await db.run(
-      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES ('5','0','采样机构甲','A',1,1)"
-    );
+    for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
+      ["6", "1", "总部检测站", "检测站"],
+      ["2", "0", "华南分公司", "公司"],
+    ])
+      await db.run(
+        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
+        [id, parent, name, `C${id}`, type]
+      );
     const ingest = new IngestService({
       boxes,
       policies,
@@ -578,23 +586,28 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     const { box } = await ingest.accept(packet({ uart: "why=boot,opens=0,fw=1.0.10,seq=1" }));
     await boxes.updateBox(box.id, (b) => {
       b.life = "未使用";
+      b.orgId = "2";
+      b.org = "华南分公司";
       b.lbsLng = 114.1;
       b.lbsLat = 22.6;
     });
     const c = new ReportPolicyController(boxes, policies);
     const ctx = ctxOf(null);
+    const base = {
+      kind: "采样",
+      boxIds: [box.id],
+      fromOrgId: "2",
+      sender: "华南寄件人",
+      signer: "检测站",
+      placeAt: { address: "某河段 2 号点", lng: 114.1, lat: 22.6 },
+    };
     const { id } = await call(c.createTask.bind(c), {
       ...ctx,
-      body: {
-        name: "采样",
-        kind: "采样",
-        boxIds: [box.id],
-        orgId: "5",
-        placeAt: { address: "某河段 2 号点", lng: 114.1, lat: 22.6 },
-      },
+      body: { ...base, name: "采样" },
     });
     const detail = await call(c.taskDetail.bind(c), { ...ctx, params: { id } });
-    assert.equal(detail.task.org, "采样机构甲");
+    assert.equal(detail.task.org, "华南分公司", "采样单位＝寄出分公司");
+    assert.equal(detail.task.toOrgId, "6", "接收方固定检测站");
     assert.equal(detail.task.place, "某河段 2 号点");
     assert.equal(detail.target.role, "计划地点");
     assert.equal(detail.boxes[0].near, true);
@@ -604,7 +617,7 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     await assert.rejects(
       call(c.createTask.bind(c), {
         ...ctx,
-        body: { name: "又一单", kind: "采样", boxIds: [box.id] },
+        body: { ...base, name: "又一单" },
       }),
       /已在任务单「采样」里/
     );
@@ -614,7 +627,7 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     await assert.rejects(
       call(c.createTask.bind(c), {
         ...ctx,
-        body: { name: "x", kind: "采样", boxIds: [box.id], maxOpens: -1 },
+        body: { ...base, name: "x", maxOpens: -1 },
       }),
       /开箱次数/
     );
@@ -623,7 +636,7 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
     });
     const limited = await call(c.createTask.bind(c), {
       ...ctx,
-      body: { name: "限开", kind: "采样", boxIds: [box.id], maxOpens: 1 },
+      body: { ...base, name: "限开", maxOpens: 1 },
     });
     assert.equal(
       (await call(c.taskDetail.bind(c), { ...ctx, params: { id: limited.id } })).boxes[0]
@@ -670,21 +683,22 @@ test("采样任务：选采样单位和计划地点，旧接口不带新字段�
         .opensDuring,
       3
     );
-    const old = await call(c.createTask.bind(c), {
-      ...ctx,
-      body: {
-        name: "旧",
-        kind: "调拨",
-        boxIds: [box.id],
-        fromOrg: "甲",
-        toOrg: "乙",
-        sender: "a",
-        signer: "b",
-      },
-    });
-    const oldDetail = await call(c.taskDetail.bind(c), { ...ctx, params: { id: old.id } });
-    assert.equal(oldDetail.target, null);
-    assert.equal(oldDetail.can["运送中"], true);
+    // 旧调拨不再新建
+    await assert.rejects(
+      call(c.createTask.bind(c), {
+        ...ctx,
+        body: {
+          name: "旧",
+          kind: "调拨",
+          boxIds: [box.id],
+          fromOrg: "甲",
+          toOrg: "乙",
+          sender: "a",
+          signer: "b",
+        },
+      }),
+      /调拨单已停用/
+    );
   } finally {
     await boxes.flush();
     await db.close();

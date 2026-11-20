@@ -4,6 +4,7 @@
     :title="title"
     size="420px"
     :modal="false"
+    modal-penetrable
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
   >
     <template v-if="box">
@@ -85,7 +86,9 @@ import { isEnded } from "../tasks/status";
 import { BOX_PERM, EVENT_PERMS, TASK_CREATE, type SampleBox } from "../data";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
 
-/** 实时地图点一台箱子，右侧抽屉看它的状态、位置、当前和最近的任务、最近事件。 */
+/** 实时地图点一台箱子，右侧抽屉看它的状态、位置、当前和最近的任务、最近事件。
+ * modal=false 且 modal-penetrable：无遮罩、覆盖层 pointer-events 穿透，
+ * 抽屉开着时左侧列表和地图仍可点（原地切换箱子）；只关遮罩不关穿透会整屏吞点击。 */
 const props = defineProps<{ modelValue: boolean; box: SampleBox | null }>();
 const emit = defineEmits<{ "update:modelValue": [open: boolean] }>();
 const router = useRouter();

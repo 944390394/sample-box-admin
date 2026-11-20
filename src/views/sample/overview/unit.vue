@@ -23,6 +23,33 @@
       </template>
     </PageHeader>
 
+    <!-- 模拟视角横幅：集团页单单位自动跳转透传 as 参数而来，数据按该单位该角色计算，非真实权限 -->
+    <el-alert
+      v-if="viewAs"
+      type="info"
+      :closable="false"
+      show-icon
+      class="viewas-alert"
+      data-test="viewas-banner"
+    >
+      <template #title>
+        <span class="viewas-alert-text">
+          模拟视角：{{ viewAs.orgName }} ·
+          {{ viewAs.roleLabel }}——数据按该单位该角色的范围与权限计算，非真实权限
+        </span>
+        <el-button
+          link
+          type="primary"
+          size="small"
+          class="viewas-exit"
+          data-test="viewas-exit"
+          @click="exitViewAs"
+        >
+          退出视角
+        </el-button>
+      </template>
+    </el-alert>
+
     <!-- 范围外/不存在的单位：重试永远不会成功，给友好错态＋回自己总览的出口（R4） -->
     <EmptyState
       v-if="error && errorCode === 'A0404'"
@@ -142,7 +169,7 @@
 defineOptions({ name: "SampleOverviewUnit" });
 
 import { AlarmClock, ArrowLeft, Box, House, Refresh, Van } from "@element-plus/icons-vue";
-import OverviewAPI, { type UnitOverview } from "@/api/sample/overview";
+import OverviewAPI, { type UnitOverview, type ViewAs } from "@/api/sample/overview";
 import DistributionBar, { type DistSegment } from "@/components/biz/DistributionBar.vue";
 import FreshnessMeta from "@/components/biz/FreshnessMeta.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
@@ -167,6 +194,14 @@ import StationBoard, { type StationQuery } from "./components/StationBoard.vue";
 const route = useRoute();
 const router = useRouter();
 const orgId = computed(() => String(route.params.orgId || ""));
+/** 模拟视角参数：集团页单单位自动跳转透传而来（也支持深链），轮询/刷新同口径带着。 */
+const asOrgId = computed(() =>
+  typeof route.query.asOrgId === "string" ? route.query.asOrgId : ""
+);
+const asRoleCode = computed(() =>
+  typeof route.query.asRoleCode === "string" ? route.query.asRoleCode : ""
+);
+const simulating = computed(() => Boolean(asOrgId.value && asRoleCode.value));
 /**
  * 「返回」目标：集团总览对单单位范围会自动 replace 进来（带 from=auto），
  * 此时再回集团总览会被立刻 replace 回来形成回环，改回工作台；
@@ -176,6 +211,11 @@ const backTarget = computed(() =>
   route.query.from === "auto" ? "/monitor/home" : "/monitor/overview"
 );
 const data = ref<UnitOverview | null>(null);
+const viewAs = computed<ViewAs | null>(() => data.value?.viewAs ?? null);
+/** 退出视角：清掉 as 参数回真实集团总览（不再按模拟口径渲染）。 */
+function exitViewAs() {
+  void router.replace("/monitor/overview");
+}
 
 const today = todayStr();
 const day = ref(
@@ -215,6 +255,7 @@ async function load(): Promise<boolean> {
     waitingPage: stationQuery.value.waitingPage,
     donePage: stationQuery.value.donePage,
     inboundPage: stationQuery.value.inboundPage,
+    ...(simulating.value ? { asOrgId: asOrgId.value, asRoleCode: asRoleCode.value } : {}),
   });
   if (mine !== token || id !== orgId.value) return false;
   data.value = result;
@@ -362,6 +403,16 @@ watch(orgId, () => {
   margin-right: 10px;
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+.viewas-alert :deep(.el-alert__title) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  font-size: 13px;
+}
+.viewas-exit {
+  flex-shrink: 0;
 }
 .unit-error-guide {
   display: flex;

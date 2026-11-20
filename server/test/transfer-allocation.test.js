@@ -62,6 +62,7 @@ async function setup({ enabled = true } = {}) {
       batteryReserve: 20,
       arriveRadiusM: 2000,
       enableTransferInspect: enabled,
+      stationDeptId: "4",
     },
   });
   const dir = await mkdtemp(path.join(os.tmpdir(), "transfer-alloc-"));
@@ -259,7 +260,7 @@ test("划拨守卫拒绝全回滚：第二台被未结束任务占用，第一�
     const b1 = await s.makeBox("2");
     const b2 = await s.makeBox("2");
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.a, ["2"]), {
-      body: { name: "南山管网水样采集", kind: "采样", boxIds: [b2] },
+      body: { name: "南山管网水样采集", kind: "采样", boxIds: [b2], fromOrgId: "2", sender: "x", signer: "y" },
     });
     assert.ok(occ.ok, occ.message);
     const before1 = await s.boxRow(b1);
@@ -452,7 +453,7 @@ test("划拨撤销守卫 IN_ACTIVE_TASK：已进入未结束任务，整单禁�
     const b1 = await s.makeBox("2");
     const d = await submit(s, [b1]);
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.b, ["3"]), {
-      body: { name: "南山管网水样采集", kind: "采样", boxIds: [b1] },
+      body: { name: "南山管网水样采集", kind: "采样", boxIds: [b1], fromOrgId: "3", sender: "x", signer: "y" },
     });
     assert.ok(occ.ok, occ.message);
     const res = await s.run(
@@ -507,17 +508,16 @@ test("划拨撤销守卫 INSPECTED：划拨后送检并完成开箱检测，整�
   try {
     const b1 = await s.makeBox("2");
     const d = await submit(s, [b1]);
-    // 划拨后这台箱子被送检：广州 → 花都检测站（采样机构），签收后逐台开始检测
+    // 划拨后这台箱子被送检：广州 → 花都检测站（合并采样单），签收后逐台开始检测
     const created = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.b, ["3"]),
       {
         body: {
           name: "花都水样送检",
-          kind: "调拨",
+          kind: "采样",
           boxIds: [b1],
           fromOrgId: "3",
-          toOrgId: "4",
           senderId: "201",
           signerId: "401",
         },
@@ -525,7 +525,7 @@ test("划拨撤销守卫 INSPECTED：划拨后送检并完成开箱检测，整�
     );
     assert.ok(created.ok, created.message);
     const inspId = created.data.id;
-    for (const status of ["运送中", "待签收"]) {
+    for (const status of ["采样中", "已封箱", "在途", "待签收"]) {
       const step = await s.run(
         s.controller.transition.bind(s.controller),
         s.ctx(s.people.b, ["3"]),
@@ -599,7 +599,7 @@ test("candidate-boxes：服务端下发可选箱集，与提交守卫同一结�
     const disabled = await s.makeBox("2", { life: "停用" });
     const atTarget = await s.makeBox("3");
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.a, ["2"]), {
-      body: { name: "南山管网水样采集", kind: "采样", boxIds: [busy] },
+      body: { name: "南山管网水样采集", kind: "采样", boxIds: [busy], fromOrgId: "2", sender: "x", signer: "y" },
     });
     assert.ok(occ.ok, occ.message);
     const res = await s.run(

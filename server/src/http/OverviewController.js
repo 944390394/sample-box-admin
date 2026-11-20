@@ -1,5 +1,12 @@
-import { BOX, boxNameCell } from "../auth/boxAccess.js";
+import {
+  BOX,
+  boxNameCell,
+  resolveDeptLimit,
+  resolvePerms,
+  resolveScope,
+} from "../auth/boxAccess.js";
 import { buildDeptTree } from "../../../shared/org.js";
+import { audit } from "../log/audit.js";
 import { ENDED, ENDED_SQL } from "../settings/taskFlow.js";
 import { limits } from "./SampleController.js";
 import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
@@ -41,6 +48,9 @@ function pageNum(value) {
 }
 
 export class OverviewController {
+  /** 视角切换审计去重：每个 actor 上一次模拟的「单位|角色」，轮询同参不重复落库。 */
+  #lastViewAs = new Map();
+
   constructor(boxes, db) {
     this.boxes = boxes;
     this.db = db;
@@ -54,8 +64,97 @@ export class OverviewController {
       });
   }
 
+  /**
+   * 模拟视角（仅系统管理员）：asOrgId + asRoleCode 按「该单位＋该角色」的数据范围与权限
+   * 只读预览总览。与 resolveAccess 同口径——hypUser 把部门换成模拟单位、roles 只留该角色行，
+   * scope 按该单位「最大数据范围」封顶、perms 取角色权限∩部门上限（系统管理员角色不受部门上限约束）。
+   * 只产出本次计算用的 access，绝不改 ctx.access（真实权限、requireAccess 的 per-request 缓存不被污染）。
+   * 未模拟返回 null；非 ADMIN 带参 403 A0301；单位/角色不存在或停用、只传一半参数 → 友好 400 A0400。
+   */
+  async #viewAs(ctx) {
+    const asOrgId = String(ctx.query.asOrgId ?? "").trim();
+    const asRoleCode = String(ctx.query.asRoleCode ?? "").trim();
+    if (!asOrgId && !asRoleCode) return null;
+    if (!ctx.access?.roles?.includes("ADMIN"))
+      throw Object.assign(new Error("只有系统管理员可以切换总览视角"), {
+        httpStatus: 403,
+        publicCode: "A0301",
+      });
+    if (!asOrgId || !asRoleCode)
+      throw Object.assign(new Error("模拟视角需要同时选择单位和角色"), {
+        httpStatus: 400,
+        publicCode: "A0400",
+      });
+    const dept = await this.db.get("SELECT id, name, status FROM sys_dept WHERE id = ?", [asOrgId]);
+    if (!dept || Number(dept.status) === 0)
+      throw Object.assign(new Error("模拟的单位不存在或已停用"), {
+        httpStatus: 400,
+        publicCode: "A0400",
+      });
+    const role = await this.db.get(
+      "SELECT id, code, name, data_scope, status FROM sys_role WHERE code = ?",
+      [asRoleCode]
+    );
+    if (!role || Number(role.status) !== 1)
+      throw Object.assign(new Error("模拟的角色不存在或已停用"), {
+        httpStatus: 400,
+        publicCode: "A0400",
+      });
+    const roles = [
+      { id: String(role.id), code: role.code, data_scope: role.data_scope, status: 1 },
+    ];
+    const limit =
+      role.code === "ADMIN"
+        ? { perms: null, maxScope: null }
+        : await resolveDeptLimit(this.db, asOrgId);
+    const hypUser = { ...ctx.user, dept_id: asOrgId };
+    const rolePerms = await resolvePerms(this.db, roles);
+    const perms = limit.perms
+      ? new Set([...rolePerms].filter((code) => limit.perms.has(code)))
+      : rolePerms;
+    const scope = await resolveScope(this.db, hypUser, roles, limit.maxScope);
+    return {
+      access: { userId: String(ctx.user.id), roles: [role.code], perms, scope },
+      viewAs: {
+        orgId: String(dept.id),
+        orgName: dept.name,
+        roleCode: role.code,
+        roleLabel: role.name,
+      },
+    };
+  }
+
+  /**
+   * 切换视角写审计：actor 是真实管理员，detail 记模拟的单位与角色。
+   * 同一 actor 连续轮询同一「单位|角色」只记一次（退出视角后清空，再进入会再记）。
+   */
+  async #auditViewAs(ctx, viewAs) {
+    const key = String(ctx.user.id);
+    const combo = `${viewAs.orgId}|${viewAs.roleCode}`;
+    if (this.#lastViewAs.get(key) === combo) return;
+    this.#lastViewAs.set(key, combo);
+    await audit(this.db, {
+      actorId: key,
+      actorName: ctx.user.nickname || ctx.user.username,
+      action: "切换总览视角",
+      targetType: "overview",
+      targetId: viewAs.orgId,
+      result: "成功",
+      detail: { asOrgId: viewAs.orgId, asRoleCode: viewAs.roleCode },
+      ip: ctx.ip || "",
+    });
+  }
+
+  /** 模拟视角的 access 与审计入口：group/unit 共用，退出时清去重键。 */
+  async #resolveView(ctx) {
+    const sim = await this.#viewAs(ctx);
+    if (sim) await this.#auditViewAs(ctx, sim.viewAs);
+    else this.#lastViewAs.delete(String(ctx.user.id));
+    return sim;
+  }
+
   /** 部门树、能看到的单位（顶级单位 + 检测站），每个单位的部门编号（扣掉嵌在里面的检测站）。 */
-  async #units(ctx) {
+  async #units(access) {
     const rows = (
       await this.db.all("SELECT id, parent_id, name, type, sort, status FROM sys_dept")
     ).map((row) => ({
@@ -103,7 +202,7 @@ export class OverviewController {
       if (node.id === hq) ids.push("");
       return ids;
     };
-    const scope = ctx.access.scope;
+    const scope = access.scope;
     const scoped = Boolean(scope && !scope.all);
     const scopeIds = scoped ? new Set(scope.orgIds) : null;
     // 范围落在科室/机构下级时，沿 parent 链向上找最近的单位锚点（一级公司或采样机构）。
@@ -473,11 +572,13 @@ export class OverviewController {
     return list;
   }
 
-  /** GET /api/v1/sample/overview?q=&type=&sort=&page=&pageSize=：集团总览。 */
+  /** GET /api/v1/sample/overview?q=&type=&sort=&page=&pageSize=&asOrgId=&asRoleCode=：集团总览。 */
   async group(ctx) {
     this.require(ctx);
+    const sim = await this.#resolveView(ctx);
+    const access = sim ? sim.access : ctx.access;
     const today = localDay(new Date());
-    const units = await this.#units(ctx);
+    const units = await this.#units(access);
     const byOrg =
       typeof this.boxes.statsByOrg === "function" ? await this.boxes.statsByOrg(limits()) : null;
     const roll = (orgIds) => {
@@ -576,7 +677,7 @@ export class OverviewController {
     }
     // 「本单位」：非全量范围且恰好只有一个单位时给出它的编号，供前端空态/筛选空结果跳转；
     // 全量范围（管理员）或范围内有多个单位时给 null，页面留在集团板。仅本人等没有单位范围时也是 null。
-    const scope = ctx.access.scope;
+    const scope = access.scope;
     const myUnitId = scope && !scope.all && units.length === 1 ? units[0].id : null;
     ctx.ok({
       day: today,
@@ -586,6 +687,7 @@ export class OverviewController {
       stationCount: stationUnits.length,
       unitTotal: matched.length,
       myUnitId,
+      viewAs: sim ? sim.viewAs : null,
       page,
       pageSize,
       top,
@@ -593,10 +695,12 @@ export class OverviewController {
     });
   }
 
-  /** GET /api/v1/sample/overview/:orgId?day=&month=&company=&waitingPage=&donePage=&inboundPage=：单位总览。 */
+  /** GET /api/v1/sample/overview/:orgId?day=&month=&company=&waitingPage=&donePage=&inboundPage=&asOrgId=&asRoleCode=：单位总览。 */
   async unit(ctx) {
     this.require(ctx);
-    const units = await this.#units(ctx);
+    const sim = await this.#resolveView(ctx);
+    const access = sim ? sim.access : ctx.access;
+    const units = await this.#units(access);
     const unit = units.find((item) => item.id === String(ctx.params.orgId || ""));
     if (!unit)
       throw Object.assign(new Error("这个单位不存在或不在你的数据范围内"), {
@@ -615,6 +719,7 @@ export class OverviewController {
       unit: { id: unit.id, name: unit.name, type: unit.type, hq: unit.hq, path: unit.path },
       day,
       month,
+      viewAs: sim ? sim.viewAs : null,
       stats: await this.#stats(unit.orgIds),
       station:
         unit.type === "采样机构"
@@ -630,13 +735,13 @@ export class OverviewController {
                 donePage: ctx.query.donePage,
                 inboundPage: ctx.query.inboundPage,
               },
-              ctx.access?.perms
+              access.perms
             )
           : null,
       tasks: null,
       calendar: null,
     };
-    if (ctx.access.perms.has(BOX.task)) {
+    if (access.perms.has(BOX.task)) {
       // 选中那天和那个月都要：取两者的并集范围
       const { from: dayFrom, to: dayTo } = dayRange(day);
       const lo = dayFrom < monthStart ? dayFrom : monthStart;

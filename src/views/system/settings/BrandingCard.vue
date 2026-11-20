@@ -1,8 +1,9 @@
 <template>
-  <el-card id="sec-branding" class="database-card" shadow="never" header="名称与图标">
-    <p class="database-tip">
-      网页后台的登录页、侧栏、浏览器标签，以及小程序的登录页、首页标题都用这里的名称和图标。小程序在微信里显示的名称和头像（分享卡片、最近使用）要到微信公众平台修改。
-    </p>
+  <SettingsSection
+    id="sec-branding"
+    title="名称与图标"
+    desc="网页后台的登录页、侧栏、浏览器标签，以及小程序的登录页、首页标题都用这里的名称和图标。小程序在微信里显示的名称和头像（分享卡片、最近使用）要到微信公众平台修改。"
+  >
     <div class="branding">
       <div class="logo-box">
         <img :src="form.logo || defaultLogo" alt="系统图标" />
@@ -19,7 +20,7 @@
         </template>
         <span class="hint">PNG / JPG / WebP，建议正方形</span>
       </div>
-      <el-form label-width="80px" class="fields">
+      <el-form label-width="140px" class="fields">
         <el-form-item label="系统名称">
           <el-input
             v-model="form.title"
@@ -43,7 +44,7 @@
         </el-form-item>
       </el-form>
     </div>
-  </el-card>
+  </SettingsSection>
 </template>
 
 <script setup lang="ts">
@@ -51,6 +52,7 @@ import SettingsAPI, { type BrandingSettings } from "@/api/system/settings";
 import defaultLogo from "@/assets/images/logo.png";
 import { applyBranding } from "@/composables/useBranding";
 import type { UploadFile } from "element-plus";
+import SettingsSection from "./SettingsSection.vue";
 
 /** 系统设置 › 名称与图标。上传的图标在浏览器里缩到最长边 256 像素再存，保存后网页立即换上。 */
 const props = defineProps<{ value?: BrandingSettings; can: boolean }>();
@@ -153,6 +155,6 @@ async function save() {
 .fields {
   flex: 1;
   min-width: 280px;
-  max-width: 560px;
+  max-width: 620px;
 }
 </style>

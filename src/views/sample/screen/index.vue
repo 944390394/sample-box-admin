@@ -54,7 +54,7 @@
           data-test="screen-error"
           @retry="load()"
         />
-        <ul v-else class="list" data-test="screen-list">
+        <ul v-else ref="listRef" class="list" data-test="screen-list">
           <li
             v-for="box in shown"
             :key="box.id"
@@ -102,8 +102,10 @@
         <TiandituMap
           :points="points"
           compact
+          overview
           :active-id="activeId"
           :focus-token="focusToken"
+          :refit-token="refitToken"
           @select="onSelect"
         />
       </main>
@@ -136,6 +138,7 @@ import { boxTitle } from "@/utils/boxLabel";
  * 「大屏模式」全屏深色，加上指标和最近动态，适合挂在值班室。按页取，最多 500 台；30 秒刷新。
  */
 const rootRef = ref<HTMLElement>();
+const listRef = ref<HTMLUListElement>();
 const can = usePerm();
 const boxes = ref<SampleBox[]>([]);
 const feed = ref<FeedItem[]>([]);
@@ -150,6 +153,8 @@ const activeId = ref("");
 const drawerOpen = ref(false);
 const drawerBox = ref<SampleBox | null>(null);
 const focusToken = ref(0);
+// 首载成功/手动刷新时 +1，让地图重新适配视野；30s 静默轮询不给，避免拽走用户正在看的视野
+const refitToken = ref(0);
 const wall = ref(false);
 // 跟全站时钟走：在线点和「x 秒前」每秒刷新
 const now = clock;
@@ -237,6 +242,13 @@ function onSelect(id: string) {
   drawerBox.value = box;
   drawerOpen.value = true;
 }
+// 选中箱子的列表行滚进可视区（点地图 marker 时行可能在列表深处）；nearest 不拽动已在视野里的行
+watch(activeId, (id) => {
+  if (!id) return;
+  void nextTick(() => {
+    listRef.value?.querySelector("li.active")?.scrollIntoView({ block: "nearest" });
+  });
+});
 
 /**
  * 按页取箱子，最多 500 台。30 秒一轮：翻页、切筛子、手动刷新和轮询会叠在一起，
@@ -268,6 +280,8 @@ async function load(silent = false) {
     updatedAt.value = new Date();
     error.value = "";
     stale.value = false;
+    // 首载/手动刷新/切大屏成功：重新适配视野。静默轮询（silent）不给信号，不拽用户视野。
+    if (!silent) refitToken.value += 1;
   } catch (e) {
     if (mine !== seq) return;
     // 请求层已经弹过一次错误提示，这里只把页面状态摆出来（骨架不能一直转）

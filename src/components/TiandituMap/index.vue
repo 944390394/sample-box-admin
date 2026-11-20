@@ -56,6 +56,11 @@ const props = defineProps<{
   focusToken?: number;
   /** 用圆点代替大头针，文字放到点击后的气泡里。 */
   compact?: boolean;
+  /** 总览口径（实时地图/大屏）：首次有定位点时按边界适配视野（四周留白 40px，
+   * 单点 15 级、多点封顶 12 级），之后轮询换点不重适配；手动刷新走 refitToken。 */
+  overview?: boolean;
+  /** +1 重新适配一次视野（总览页手动刷新/首载成功时给），并清除用户焦点标记。 */
+  refitToken?: number;
   circles?: TiandituCircle[];
   /** 折线：寄收连线、GPS 轨迹。点按顺序相连。 */
   lines?: TiandituLine[];
@@ -74,6 +79,8 @@ let map: TiandituMap | null = null;
 let stopKeyWatch: (() => void) | null = null;
 const markers = new Map<string, { marker: TiandituOverlay; at: unknown; win: unknown }>();
 let fittedKey = "";
+// 总览口径：是否已完成首次视野适配。适配过之后轮询换点不再拽视野，手动刷新（refitToken）才重适配。
+let overviewFitted = false;
 let pendingOpen = "";
 let userFocused = false;
 let focusTimer = 0;
@@ -232,17 +239,20 @@ function clusterIcon(count: number, color: string) {
   return iconFromSvg(svg, size);
 }
 
+/** Web 墨卡托像素坐标：scale 是该缩放级别下整个世界的像素宽（256·2^zoom）。 */
+function worldPixel(lng: number, lat: number, scale: number) {
+  const sin = Math.sin((lat * Math.PI) / 180);
+  return {
+    x: ((lng + 180) / 360) * scale,
+    y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale,
+  };
+}
+
 /** 按当前缩放把屏幕上靠得很近的点收成一组。 */
 function clusterAtZoom(points: TiandituPoint[], zoom: number) {
   const radius = 48;
   const scale = 256 * 2 ** zoom;
-  const pixel = (lng: number, lat: number) => {
-    const sin = Math.sin((lat * Math.PI) / 180);
-    return {
-      x: ((lng + 180) / 360) * scale,
-      y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale,
-    };
-  };
+  const pixel = (lng: number, lat: number) => worldPixel(lng, lat, scale);
   const parent = points.map((_, index) => index);
   const find = (index: number): number => {
     let cursor = index;
@@ -283,6 +293,42 @@ function apartMeters(leftLng: number, leftLat: number, rightLng: number, rightLa
   return Math.hypot(x, y);
 }
 
+/** 总览适配：四周留白 40px；单点 15 级；多点按边界算缩放、封顶 12 级，
+ * 保证 marker/聚类落在视野里而不是贴边或被裁掉。 */
+function fitOverview(points: { lng: number; lat: number }[]) {
+  const api = window.T;
+  if (!map || !api) return;
+  if (points.length === 1) {
+    map.centerAndZoom(new api.LngLat(points[0].lng, points[0].lat), 15);
+    return;
+  }
+  let minLng = points[0].lng;
+  let maxLng = points[0].lng;
+  let minLat = points[0].lat;
+  let maxLat = points[0].lat;
+  for (const point of points) {
+    minLng = Math.min(minLng, point.lng);
+    maxLng = Math.max(maxLng, point.lng);
+    minLat = Math.min(minLat, point.lat);
+    maxLat = Math.max(maxLat, point.lat);
+  }
+  const pad = 40;
+  const width = canvasRef.value?.clientWidth || 800;
+  const height = canvasRef.value?.clientHeight || 600;
+  const availW = Math.max(width - pad * 2, 64);
+  const availH = Math.max(height - pad * 2, 64);
+  // zoom 0（世界 256px）下的边界像素跨度，反推能装下边界的最大缩放
+  const topLeft = worldPixel(minLng, maxLat, 256);
+  const bottomRight = worldPixel(maxLng, minLat, 256);
+  const dx = bottomRight.x - topLeft.x;
+  const dy = bottomRight.y - topLeft.y;
+  let zoom = 12;
+  if (dx > 0) zoom = Math.min(zoom, Math.log2(availW / dx));
+  if (dy > 0) zoom = Math.min(zoom, Math.log2(availH / dy));
+  zoom = Math.max(1, Math.floor(zoom));
+  map.centerAndZoom(new api.LngLat((minLng + maxLng) / 2, (minLat + maxLat) / 2), zoom);
+}
+
 function fit(markersToFit: TiandituPoint[]) {
   const api = window.T;
   if (!map || !api) return;
@@ -293,6 +339,10 @@ function fit(markersToFit: TiandituPoint[]) {
     ...(props.lines || []).flatMap((line) => line.points),
   ];
   if (!points.length) return;
+  if (props.overview) {
+    fitOverview(points);
+    return;
+  }
   if (points.length === 1) {
     map.centerAndZoom(new api.LngLat(points[0].lng, points[0].lat), props.compact ? 16 : 12);
     return;
@@ -409,10 +459,22 @@ function paint() {
 }
 
 function draw() {
+  // 地图没就绪不能记账：首载时列表数据常比天地图脚本先到，若这里把 fittedKey 占住，
+  // 地图就绪后的第一次 draw 会以为已适配过，视野永远停在全国默认缩放（marker 全缩成一团）。
+  if (!map || !window.T) return;
   paint();
   const lineCount = (props.lines || []).reduce((n, line) => n + line.points.length, 0);
   const key = `${props.points.map((point) => point.id).join("|")}#${lineCount}`;
   if (userFocused) {
+    fittedKey = key;
+    return;
+  }
+  if (props.overview) {
+    // 总览：只在首次有定位点时适配；30s 轮询带来的点变化不拽视野，手动刷新走 refitToken
+    if (!overviewFitted && props.points.length) {
+      fit(props.points);
+      overviewFitted = true;
+    }
     fittedKey = key;
     return;
   }
@@ -464,6 +526,19 @@ watch(
   () => props.focusToken,
   (token) => {
     if (token && props.activeId) show(props.activeId);
+  }
+);
+
+// 手动刷新/首载成功：重新适配一次视野。地图没就绪时 draw 会空跑，
+// 但 overviewFitted/fittedKey 已复位，就绪后的首次 draw 仍会适配。
+watch(
+  () => props.refitToken,
+  (token) => {
+    if (!token) return;
+    userFocused = false;
+    overviewFitted = false;
+    fittedKey = "";
+    draw();
   }
 );
 

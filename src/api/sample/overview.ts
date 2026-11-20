@@ -42,6 +42,17 @@ export interface GroupQuery {
   sort?: "" | "total" | "moving" | "alert" | "name";
   page?: number;
   pageSize?: number;
+  /** 模拟视角（仅系统管理员生效）：按该单位＋该角色的范围与权限只读预览。 */
+  asOrgId?: string;
+  asRoleCode?: string;
+}
+
+/** 模拟视角回执：未模拟时为 null。数据按该单位该角色计算，非真实权限。 */
+export interface ViewAs {
+  orgId: string;
+  orgName: string;
+  roleCode: string;
+  roleLabel: string;
 }
 
 export interface GroupOverview {
@@ -55,6 +66,8 @@ export interface GroupOverview {
   unitTotal: number;
   /** 非全量范围且恰好只有一个单位时＝该单位编号（前端空态/筛选空结果跳转用）；否则 null。 */
   myUnitId: string | null;
+  /** 模拟视角回执；未模拟为 null。 */
+  viewAs: ViewAs | null;
   page: number;
   pageSize: number;
   top: TopUnit[];
@@ -134,12 +147,17 @@ export interface UnitQuery {
   waitingPage?: number;
   donePage?: number;
   inboundPage?: number;
+  /** 模拟视角（仅系统管理员生效）：集团页单单位自动跳转时透传。 */
+  asOrgId?: string;
+  asRoleCode?: string;
 }
 
 export interface UnitOverview {
   unit: { id: string; name: string; type: string; path: string; hq?: boolean };
   day: string;
   month: string;
+  /** 模拟视角回执；未模拟为 null。 */
+  viewAs: ViewAs | null;
   stats: BoxStats | null;
   station:
     | (StationCounts & {

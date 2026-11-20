@@ -25,6 +25,7 @@ import { ReportPolicyController } from "../src/http/ReportPolicyController.js";
 import { UplinkParser } from "../src/domain/UplinkParser.js";
 import { IngestService } from "../src/service/IngestService.js";
 import { ReportPolicy } from "../src/settings/ReportPolicy.js";
+import { applyBoxSettings } from "../src/settings/boxConfig.js";
 import { SqlBoxStore } from "../src/store/SqlBoxStore.js";
 import { packet } from "./fixture.js";
 
@@ -34,7 +35,10 @@ const PERMS = upgradeCodes([
   "device:box:task",
   "device:box:location",
   "device:box:event",
-  "task:create:transfer",
+  "task:create:sample",
+  "task:sample-start",
+  "task:seal",
+  "task:send-back",
   "task:send",
   "task:arrive",
   "task:sign",
@@ -44,20 +48,21 @@ const PERMS = upgradeCodes([
 ]);
 
 async function setup() {
+  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "4" } });
   const dir = await mkdtemp(path.join(os.tmpdir(), "handover-atomic-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
     process.cwd()
   );
   await migrate(db);
-  for (const [id, parent, name] of [
-    ["2", "0", "A单位"],
-    ["3", "0", "B单位"],
-    ["4", "0", "C单位"],
+  for (const [id, parent, name, type] of [
+    ["2", "0", "A单位", "公司"],
+    ["3", "0", "B单位", "公司"],
+    ["4", "0", "C单位", "检测站"],
   ])
     await db.run(
-      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES (?,?,?, ?,1,1)",
-      [id, parent, name, `C${id}`]
+      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
+      [id, parent, name, `C${id}`, type]
     );
   const people = {
     a: { id: "101", nickname: "A单位员工", deptId: "2" },
@@ -121,10 +126,9 @@ async function setup() {
   const create = async (boxIds) => {
     const created = await run(controller.createTask.bind(controller), ctx(people.a, ["2"]), {
       body: {
-        name: "调拨到C",
-        kind: "调拨",
+        name: "采样送C检测站",
+        kind: "采样",
         fromOrgId: "2",
-        toOrgId: "4",
         boxIds,
         senderId: "101",
         signerId: "401",
@@ -187,7 +191,9 @@ test("交接中途失败：状态与归属整体回滚，不留「已签收但�
     const last = await s.makeBox("864317080900103", "2");
     const id = await s.create([first, middle, last]);
     await s.advance(id, [
-      [s.ctx(s.people.a, ["2"]), "运送中"],
+      [s.ctx(s.people.a, ["2"]), "采样中"],
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
       [s.ctx(s.people.a, ["2"]), "待签收"],
     ]);
     const before = {
@@ -204,7 +210,7 @@ test("交接中途失败：状态与归属整体回滚，不留「已签收但�
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     restore();
@@ -233,11 +239,11 @@ test("交接中途失败：状态与归属整体回滚，不留「已签收但�
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     assert.ok(retry.ok, retry.message);
-    assert.equal((await s.taskRow(id)).status, "已签收");
+    assert.equal((await s.taskRow(id)).status, "待检测");
     for (const boxId of [first, middle, last]) {
       const row = await s.boxRow(boxId);
       assert.equal(row.org_id, "4");
@@ -257,14 +263,18 @@ test("运送中直接扫码签收失败：确认到达保留，签收与归属�
     const a = await s.makeBox("864317080900111", "2");
     const b = await s.makeBox("864317080900112", "2");
     const id = await s.create([a, b]);
-    await s.advance(id, [[s.ctx(s.people.a, ["2"]), "运送中"]]);
+    await s.advance(id, [
+      [s.ctx(s.people.a, ["2"]), "采样中"],
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
+    ]);
     const restore = s.injectHandOverFailure(b);
     const failed = await s.run(
       s.controller.transition.bind(s.controller),
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     restore();
@@ -281,11 +291,11 @@ test("运送中直接扫码签收失败：确认到达保留，签收与归属�
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     assert.ok(retry.ok, retry.message);
-    assert.equal((await s.taskRow(id)).status, "已签收");
+    assert.equal((await s.taskRow(id)).status, "待检测");
     assert.equal((await s.boxRow(a)).org_id, "4");
     assert.equal((await s.boxRow(b)).org_id, "4");
   } finally {
@@ -302,7 +312,9 @@ test("跳过的箱子：响应 handOver.skipped 与任务详情都可见，不�
     const deleted = await s.makeBox("864317080900123", "2");
     const id = await s.create([staying, movedAway, deleted]);
     await s.advance(id, [
-      [s.ctx(s.people.a, ["2"]), "运送中"],
+      [s.ctx(s.people.a, ["2"]), "采样中"],
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
       [s.ctx(s.people.a, ["2"]), "待签收"],
     ]);
     // 建单后一台被 B 单位资产纠错改挂走；另一台档案被抹除删除
@@ -315,11 +327,11 @@ test("跳过的箱子：响应 handOver.skipped 与任务详情都可见，不�
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     assert.ok(signed.ok, signed.message);
-    assert.equal((await s.taskRow(id)).status, "已签收");
+    assert.equal((await s.taskRow(id)).status, "待检测");
     // 守卫语义不变：只带走还挂在寄出单位名下的
     assert.equal((await s.boxRow(staying)).org_id, "4");
     assert.equal((await s.boxRow(staying)).owner_id, "401");
@@ -338,7 +350,7 @@ test("跳过的箱子：响应 handOver.skipped 与任务详情都可见，不�
     );
     // 操作日志有跳过汇总；运行日志逐台（hand-over-skipped）
     const summary = await s.db.get(
-      "SELECT action FROM sys_operation_log WHERE target_id=? AND action LIKE '调拨签收跳过%'",
+      "SELECT action FROM sys_operation_log WHERE target_id=? AND action LIKE '签收交接跳过%'",
       [id]
     );
     assert.ok(summary, "跳过台数要进操作日志");
@@ -387,18 +399,22 @@ test("全部合格与未签收步骤：moved 全量、skipped 空；非签收步
     const id = await s.create([a, b]);
     const sent = await s.run(s.controller.transition.bind(s.controller), s.ctx(s.people.a, ["2"]), {
       params: { id },
-      body: { status: "运送中" },
+      body: { status: "采样中" },
     });
     assert.ok(sent.ok, sent.message);
     assert.equal(sent.data.handOver, null, "非签收步骤不做交接");
     assert.deepEqual(sent.data.handOverSkipped, []);
-    await s.advance(id, [[s.ctx(s.people.a, ["2"]), "待签收"]]);
+    await s.advance(id, [
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
+      [s.ctx(s.people.a, ["2"]), "待签收"],
+    ]);
     const signed = await s.run(
       s.controller.transition.bind(s.controller),
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     assert.ok(signed.ok, signed.message);

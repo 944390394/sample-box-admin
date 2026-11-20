@@ -116,39 +116,13 @@ test("直接调拨：不需要地址和寄出人，签收后归属变更；导�
     const wide = ctxOf(["2", "4"]);
     const east = ctxOf(["3"], { id: "30", nickname: "华东签收员" });
 
+    // 调拨不再新建（只读保留）：控制器一律拒绝
     await assert.rejects(
       call(c.createTask.bind(c), {
         ...south,
         body: { name: "缺单位", kind: "调拨", direct: true, boxIds: [southA] },
       }),
-      /调出单位|调入单位|寄出/
-    );
-    await assert.rejects(
-      call(c.createTask.bind(c), {
-        ...wide,
-        body: {
-          name: "混单位",
-          kind: "调拨",
-          direct: true,
-          boxIds: [southA, north],
-          fromOrgId: "2",
-          toOrgId: "3",
-        },
-      }),
-      /分开建单/
-    );
-    await assert.rejects(
-      call(c.createTask.bind(c), {
-        ...south,
-        body: {
-          name: "旧发货",
-          kind: "调拨",
-          boxIds: [southA],
-          fromOrgId: "2",
-          toOrgId: "3",
-        },
-      }),
-      /寄出人|签收人/
+      /调拨单已停用/
     );
 
     const sample = new SampleController(boxes, policies);
@@ -170,20 +144,23 @@ test("直接调拨：不需要地址和寄出人，签收后归属变更；导�
     const busy = await call(sample.lookup.bind(sample), { ...south, body: { ids: "x" } });
     assert.match(busy.error, /箱子编号/);
 
-    const created = await call(c.createTask.bind(c), {
-      ...south,
-      body: {
+    // 旧直接调拨单（只读保留）：policy 层建单模拟存量，控制器仍可签收收尾
+    const created = {
+      id: await policies.createTask({
         name: "华南调华东",
         kind: "调拨",
         direct: true,
         boxIds: [southA],
         fromOrgId: "2",
+        fromOrg: "华南分公司",
         toOrgId: "3",
-        fromPlace: { address: "不该保存", lng: 114.1, lat: 22.6 },
-        sender: "不该保存",
-        signer: "不该保存",
-      },
-    });
+        toOrg: "华东分公司",
+        fromPlace: null,
+        toPlace: null,
+        sender: "",
+        signer: "",
+      }),
+    };
     const detail = await call(c.taskDetail.bind(c), { ...east, params: { id: created.id } });
     assert.equal(detail.task.status, "待签收");
     assert.equal(detail.task.direct, true);

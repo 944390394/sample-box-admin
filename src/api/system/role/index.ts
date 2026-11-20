@@ -94,6 +94,8 @@ export interface RoleGrantAudit {
 export interface RoleOption {
   value: number;
   label: string;
+  /** 角色编码（总览「模拟视角」按 code 取模拟口径用）。 */
+  code?: string;
   disabled?: boolean;
   reason?: string;
   cut?: number;

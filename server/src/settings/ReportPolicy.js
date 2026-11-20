@@ -223,6 +223,77 @@ async function handOverBoxes(tx, task, ids, signerFit = "none") {
   return { moved, skipped };
 }
 
+/**
+ * 退回目的地子树（组织简化 D3）：合并采样单退回时，箱子归属回原寄出分公司 fromOrg。
+ * 与 senderOrgIds 对称——按 toOrgId（检测站）取子树，只拉回还挂在检测站名下的箱子。
+ * 旧数据没有 toOrgId 时按单位名唯一匹配；都对不上返回 null（不拦，沿用无条件交接）。
+ */
+export function receiverOrgIds(depts, task) {
+  const orgId = String(task.toOrgId ?? "");
+  if (orgId) return new Set(collectDeptIds(buildDeptTree(depts), orgId) || [orgId]);
+  const byName = depts
+    .filter((row) => String(row.name) === String(task.toOrg || ""))
+    .map((row) => String(row.id));
+  return task.toOrg && byName.length === 1 ? new Set(byName) : null;
+}
+
+/**
+ * 已退回时的归属回迁（组织简化 D3/P6）：合并采样单从 待检测/已检测 发起退回，
+ * 箱子在 已退回 这一刻归属回原寄出分公司 fromOrg（退回中仍挂检测站，不动归属）。
+ * 与 handOverBoxes 同一事务、同一加锁顺序（排序后逐台 FOR UPDATE）、同一跳过守卫：
+ * 建单后被改挂到检测站子树之外的箱子跳过并记录，不静默拉走；箱子已删除同样跳过。
+ * 保管人写回寄出人（senderId），前提是寄出人仍挂在 fromOrg 子树里（外来用户不写成保管人）。
+ * 返回 { moved, skipped }，结构与签收交接一致，控制器/详情读模型复用。
+ */
+async function returnHandOverBoxes(tx, task, ids) {
+  const moved = [];
+  const skipped = [];
+  if (!ids.length) return { moved, skipped };
+  const depts = await tx.all("SELECT id, parent_id AS parentId, name, sort FROM sys_dept");
+  const nameOf = new Map(depts.map((row) => [String(row.id), row.name]));
+  const fromId = String(task.fromOrgId ?? "");
+  const toIds = receiverOrgIds(depts, task);
+  const fromIds = senderOrgIds(depts, task);
+  // 寄出人还在原寄出分公司里才写回保管人；调走了就清空（与签收交接的外来守卫同口径）
+  let custodian = "";
+  if (task.senderId) {
+    const sender = await tx.get("SELECT dept_id FROM sys_user WHERE id=?", [String(task.senderId)]);
+    const deptId = String(sender?.dept_id ?? "");
+    if (sender && (!fromIds || fromIds.has(deptId))) custodian = String(task.senderId);
+  }
+  const owner = custodian ? String(task.sender ?? "") : "—";
+  for (const boxId of [...ids].sort()) {
+    const box = await tx.get(
+      "SELECT id, org_id FROM sample_box WHERE id=?" +
+        (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+      [boxId]
+    );
+    if (!box) {
+      skipped.push({ boxId, reason: "箱子已删除" });
+      continue;
+    }
+    const current = String(box.org_id ?? "");
+    if (toIds && !toIds.has(current)) {
+      const where = nameOf.get(current) || current || "总公司";
+      skipped.push({ boxId, reason: `已改挂到${where}`, where });
+      continue;
+    }
+    if (!fromId) {
+      skipped.push({ boxId, reason: "原寄出单位不明，未自动改归属" });
+      continue;
+    }
+    await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id=?, owner=? WHERE id=?", [
+      fromId,
+      task.fromOrg,
+      custodian,
+      owner,
+      boxId,
+    ]);
+    moved.push(boxId);
+  }
+  return { moved, skipped };
+}
+
 export class ReportPolicy {
   constructor(db) {
     this.db = db;
@@ -457,11 +528,11 @@ export class ReportPolicy {
   }
 
   async createTask(input, actor = {}) {
-    // 单号前缀按 kind：采样 TK-、送检 IN-（划拨走 createTransfer，AL-）。前缀只是显示，kind 才是权威。
+    // 单号前缀按 kind：采样 TK-（合并采样+送检）、划拨走 createTransfer（AL-）。前缀只是显示，kind 才是权威。
     const id = `${prefixOf(input.kind)}${Date.now()}-${randomUUID().slice(0, 6)}`;
     const initial = initialOf(input);
-    // 带寄送的采样单：接收方是采样单位，记进 to_org_id，采样单位不管箱子也能看到这张单
-    const toOrgId = input.kind === "采样" && input.trip ? input.orgId : input.toOrgId;
+    // 合并采样单接收方固定检测站（控制器已校验 toOrgId＝stationDeptId）；trip 作废，不再按 orgId 改写接收方。
+    const toOrgId = input.toOrgId;
     const body = {
       ...input,
       policy: stamped(input.policy),
@@ -469,7 +540,7 @@ export class ReportPolicy {
         Object.entries(input.overrides || {}).map(([k, v]) => [k, stamped(v)])
       ),
     };
-    // is_inspect 真列（050）：送检单恒 1；采样/旧调拨送检测站的按 body.inspect，与统计侧 LIKE 判定同源
+    // is_inspect 真列（050）：合并采样单恒送检测站（body.inspect=true）；旧送检/旧调拨送检测站的按 body.inspect，与统计侧 LIKE 判定同源
     const isInspect = input.kind === "送检" || body.inspect === true ? 1 : 0;
     await this.db.transaction(async (tx) => {
       const snapshots = new Map();
@@ -897,7 +968,7 @@ export class ReportPolicy {
   async transition(
     id,
     status,
-    { actor = {}, note = "", detail = null, action = "", handOver = null } = {}
+    { actor = {}, note = "", detail = null, action = "", handOver = null, returnHandOver = null } = {}
   ) {
     let from = "";
     let changed = [];
@@ -946,6 +1017,16 @@ export class ReportPolicy {
           "UPDATE sample_task_box SET opens_end=(SELECT opens FROM sample_box WHERE id=sample_task_box.box_id) WHERE task_id=? AND opens_start IS NOT NULL AND opens_end IS NULL",
           [id]
         );
+      } else if (status === "退回中") {
+        // 退回（组织简化 D3）：箱子重新占用、生命周期回「在途」。
+        // 从 待检测 退回时箱子本就占用（幂等）；从 已检测 退回时箱子已释放，这里重新登记，
+        // 避免返程途中被别的单抢走。归属此刻不动，到「已退回」才回迁原寄出分公司。
+        for (const { box_id } of ids) {
+          const busy = await tx.get("SELECT task_id FROM box_active_task WHERE box_id=?", [box_id]);
+          if (!busy)
+            await tx.run("INSERT INTO box_active_task (box_id,task_id) VALUES (?,?)", [box_id, id]);
+          await tx.run("UPDATE sample_box SET life='在途' WHERE id=? AND life='未使用'", [box_id]);
+        }
       } else if (ENDED.includes(status)) {
         if (status === "已检测") {
           // 整张单一起「开始检测」：还没扫的箱子都记上；开箱超限作废的不检测，不记
@@ -995,6 +1076,23 @@ export class ReportPolicy {
             movedCount: handOverResult.moved.length,
             skippedCount: handOverResult.skipped.length,
             // detail 列是 TEXT（MySQL 64KB）：超大单只持久化前 200 台明细，总数另记
+            skipped: handOverResult.skipped
+              .slice(0, 200)
+              .map(({ boxId, reason }) => ({ boxId, reason })),
+          },
+        };
+      } else if (returnHandOver && status === "已退回") {
+        // 退回交接（D3）：归属回迁原寄出分公司，与状态更新同事务，任一台失败整体回滚
+        handOverResult = await returnHandOverBoxes(
+          tx,
+          JSON.parse(task.body),
+          ids.map((b) => b.box_id)
+        );
+        detail = {
+          ...(detail || {}),
+          handOver: {
+            movedCount: handOverResult.moved.length,
+            skippedCount: handOverResult.skipped.length,
             skipped: handOverResult.skipped
               .slice(0, 200)
               .map(({ boxId, reason }) => ({ boxId, reason })),
@@ -1123,9 +1221,10 @@ export const TASK_ACTIONS = {
   已退回: "接收退回",
   采样中: "开始采样",
   已封箱: "封箱",
-  在途: "寄回",
+  // 合并采样单：封箱后寄往唯一检测站
+  在途: "寄出",
   待核验: "到达核验点",
-  // 带寄送的采样单：箱子寄到采样单位
+  // 带寄送的旧采样单：箱子寄到采样单位
   待采样: "确认到达",
 };
 

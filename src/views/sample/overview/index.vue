@@ -12,6 +12,71 @@
       </template>
     </PageHeader>
 
+    <!-- 模拟视角横幅：数据按该单位该角色的范围与权限计算，非真实权限（大屏模式下保留） -->
+    <el-alert
+      v-if="viewAs"
+      type="info"
+      :closable="false"
+      show-icon
+      class="viewas-alert"
+      data-test="viewas-banner"
+    >
+      <template #title>
+        <span class="viewas-alert-text">
+          模拟视角：{{ viewAs.orgName }} ·
+          {{ viewAs.roleLabel }}——数据按该单位该角色的范围与权限计算，非真实权限
+        </span>
+        <el-button
+          link
+          type="primary"
+          size="small"
+          class="viewas-exit"
+          data-test="viewas-exit"
+          @click="exitViewAs"
+        >
+          退出视角
+        </el-button>
+      </template>
+    </el-alert>
+
+    <!-- 模拟视角选择行：仅系统管理员；大屏（内容全屏）模式隐藏，横幅保留 -->
+    <div v-if="isAdmin && !appStore.contentFullscreen" class="viewas-bar" data-test="viewas-bar">
+      <span class="viewas-label">模拟视角</span>
+      <el-tree-select
+        v-model="asOrgId"
+        :data="deptOptions"
+        check-strictly
+        filterable
+        clearable
+        placeholder="选择公司"
+        class="viewas-org"
+        :render-after-expand="false"
+        data-test="viewas-org"
+        @change="onViewAsChange"
+      />
+      <el-select
+        v-model="asRoleCode"
+        filterable
+        clearable
+        placeholder="选择角色"
+        class="viewas-role"
+        data-test="viewas-role"
+        @change="onViewAsChange"
+      >
+        <el-option
+          v-for="r in roleChoices"
+          :key="r.value"
+          :label="r.label"
+          :value="r.code"
+          :disabled="r.disabled"
+        />
+      </el-select>
+      <el-button v-if="viewAs" size="small" data-test="viewas-exit-bar" @click="exitViewAs">
+        退出视角
+      </el-button>
+      <span class="viewas-hint text-muted">只读模拟，不改变真实权限</span>
+    </div>
+
     <ErrorState v-if="error" :message="`刷新失败：${error}`" :retrying="loading" @retry="refresh" />
 
     <!-- 首载骨架：按真实版式占位，避免加载完成后布局跳动 -->
@@ -358,7 +423,11 @@ import OverviewAPI, {
   type GroupOverview,
   type OverviewUnit,
   type StationCounts,
+  type ViewAs,
 } from "@/api/sample/overview";
+import type { OptionItem } from "@/api/common";
+import DeptAPI from "@/api/system/dept";
+import RoleAPI, { type RoleOption } from "@/api/system/role";
 import DistributionBar, { type DistSegment } from "@/components/biz/DistributionBar.vue";
 import FreshnessMeta from "@/components/biz/FreshnessMeta.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
@@ -371,8 +440,11 @@ import KpiCard from "@/components/ov/KpiCard.vue";
 import type { ChartSelect, KpiItem } from "@/components/ov/types";
 import { useChartPalette } from "@/composables/useChartPalette";
 import { useOverviewPolling } from "@/composables/useOverviewPolling";
+import { useAppStore } from "@/stores/app";
+import { useUserStore } from "@/stores/user";
 import { lifeLabel } from "@/utils/labels";
 import type { ComponentPublicInstance } from "vue";
+import type { LocationQueryRaw } from "vue-router";
 
 /**
  * 集团总览（补充协议 1.2.10）：全局指标、状态分布、Top 分公司，下面一张可搜索筛选排序的单位列表。
@@ -382,6 +454,10 @@ const router = useRouter();
 const route = useRoute();
 const data = ref<GroupOverview | null>(null);
 const palette = useChartPalette();
+const appStore = useAppStore();
+const userStore = useUserStore();
+/** 仅系统管理员能切换模拟视角（与后端 asOrgId/asRoleCode 门禁同口径）。 */
+const isAdmin = computed(() => (userStore.userInfo.roles || []).includes("ADMIN"));
 /** 单位列表卡片：点 Top 分公司柱状图后滚到这里，用模板引用而不是查 data-test（U-P2-4）。 */
 const unitsCard = ref<ComponentPublicInstance | null>(null);
 
@@ -392,6 +468,63 @@ const sort = ref<"total" | "moving" | "alert" | "name">("total");
 const page = ref(1);
 const pageSize = ref(20);
 
+/** 模拟视角：公司＋角色都选齐才带参重取；支持从 URL query 深链进入。 */
+const asOrgId = ref(typeof route.query.asOrgId === "string" ? route.query.asOrgId : "");
+const asRoleCode = ref(typeof route.query.asRoleCode === "string" ? route.query.asRoleCode : "");
+const deptOptions = ref<OptionItem[]>([]);
+const roleOptions = ref<RoleOption[]>([]);
+const roleChoices = computed(() =>
+  roleOptions.value.filter((r): r is RoleOption & { code: string } => Boolean(r.code))
+);
+const viewAs = computed<ViewAs | null>(() => data.value?.viewAs ?? null);
+const simulating = computed(() => Boolean(asOrgId.value && asRoleCode.value));
+
+onMounted(async () => {
+  if (!isAdmin.value) return;
+  try {
+    const [depts, roles] = await Promise.all([DeptAPI.getOptions(), RoleAPI.getOptions()]);
+    deptOptions.value = depts;
+    roleOptions.value = roles;
+  } catch {
+    /* 选项加载失败不影响真实总览，选择行留空即可 */
+  }
+});
+
+/** 把模拟参数写进 URL（replace 不增历史），深链/刷新/keep-alive 回到本页都能还原同一视角。 */
+function syncViewAsQuery() {
+  const query: LocationQueryRaw = { ...route.query };
+  if (asOrgId.value) query.asOrgId = asOrgId.value;
+  else delete query.asOrgId;
+  if (asRoleCode.value) query.asRoleCode = asRoleCode.value;
+  else delete query.asRoleCode;
+  void router.replace({ query });
+}
+function onViewAsChange() {
+  syncViewAsQuery();
+  if (page.value !== 1) page.value = 1;
+  else void refresh();
+}
+/** 退出视角：清参回真实集团视角（横幅与选择行两处退出按钮共用）。 */
+function exitViewAs() {
+  asOrgId.value = "";
+  asRoleCode.value = "";
+  syncViewAsQuery();
+  if (page.value !== 1) page.value = 1;
+  else void refresh();
+}
+// keep-alive 回到本页时按当前 URL 还原视角：从单位页「退出视角」回来（URL 无 as 参数）
+// 必须清掉缓存里的旧模拟参数，否则轮询会带着旧参数再次单单位 replace 形成回环。
+// 注册在 useOverviewPolling 之前，先同步参数再由其 onActivated 补一次 load。
+onActivated(() => {
+  const qOrg = typeof route.query.asOrgId === "string" ? route.query.asOrgId : "";
+  const qRole = typeof route.query.asRoleCode === "string" ? route.query.asRoleCode : "";
+  if (qOrg !== asOrgId.value || qRole !== asRoleCode.value) {
+    asOrgId.value = qOrg;
+    asRoleCode.value = qRole;
+    page.value = 1;
+  }
+});
+
 let token = 0;
 async function load(): Promise<boolean> {
   const mine = ++token;
@@ -401,6 +534,8 @@ async function load(): Promise<boolean> {
     sort: sort.value,
     page: page.value,
     pageSize: pageSize.value,
+    // 公司＋角色选齐才带模拟参数，避免只选一半时后端 400
+    ...(simulating.value ? { asOrgId: asOrgId.value, asRoleCode: asRoleCode.value } : {}),
   });
   if (mine !== token) return false;
   // 页面已被 keep-alive 缓存（用户切去了别的页签）时迟到的结果一律丢弃：
@@ -410,6 +545,7 @@ async function load(): Promise<boolean> {
   if (route.name !== "SampleOverview") return false;
   // 数据范围里只有一个单位时直接进它的总览。带 from=auto 标记：
   // 单位总览的「返回」据此回工作台，而不是回集团总览又被 replace 回来（回环陷阱）。
+  // 模拟视角的单单位跳转把 as 参数透传过去，单位页据此继续按模拟口径渲染。
   if (
     result.unitTotal === 1 &&
     result.units.length === 1 &&
@@ -418,7 +554,10 @@ async function load(): Promise<boolean> {
   ) {
     void router.replace({
       path: `/monitor/overview/${result.units[0].id}`,
-      query: { from: "auto" },
+      query: {
+        from: "auto",
+        ...(simulating.value ? { asOrgId: asOrgId.value, asRoleCode: asRoleCode.value } : {}),
+      },
     });
     return false;
   }
@@ -680,7 +819,10 @@ function onTopSelect(p: ChartSelect) {
   });
 }
 function openUnit(row: Record<string, unknown>) {
-  void router.push(`/monitor/overview/${String(row.id)}`);
+  void router.push({
+    path: `/monitor/overview/${String(row.id)}`,
+    query: simulating.value ? { asOrgId: asOrgId.value, asRoleCode: asRoleCode.value } : {},
+  });
 }
 function clearFilter() {
   keyword.value = "";
@@ -695,7 +837,11 @@ function goBoxes() {
 }
 function goMyUnit() {
   const id = data.value?.myUnitId;
-  if (id) void router.push(`/monitor/overview/${id}`);
+  if (id)
+    void router.push({
+      path: `/monitor/overview/${id}`,
+      query: simulating.value ? { asOrgId: asOrgId.value, asRoleCode: asRoleCode.value } : {},
+    });
 }
 
 watch([debouncedKeyword, typeFilter, sort], () => {
@@ -713,6 +859,40 @@ watch([page, pageSize], () => {
   flex-wrap: wrap;
   gap: 4px 12px;
   align-items: center;
+}
+.viewas-alert :deep(.el-alert__title) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  font-size: 13px;
+}
+.viewas-exit {
+  flex-shrink: 0;
+}
+.viewas-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--content-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+}
+.viewas-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-regular);
+}
+.viewas-org {
+  width: 240px;
+}
+.viewas-role {
+  width: 180px;
+}
+.viewas-hint {
+  font-size: 12px;
 }
 .boot {
   display: flex;
