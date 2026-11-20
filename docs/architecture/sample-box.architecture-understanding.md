@@ -1,27 +1,31 @@
 # 智采 · 采样箱监测管理系统 — 当前状态架构理解
 
-- 生成日期：2026-11-19；工作流：`system-modeler`（场景）+ `c4model`、`graphviz`（图源格式）
-- 范围：**当前状态**（master 工作区代码 + 已核实的运行时事实）。2026-11-19 拍板的「调拨=批量划拨提交即生效、送检单独立 9 状态」是**目标态，尚未实现**，本文只在 §6 末尾标注，不混入现状模型。
+- 生成日期：2026-11-19；口径更新：2026-11-20（组织简化 B1–B4a 落地后重写 §1/§6 等业务口径；工作流 `system-modeler` + `c4model`、`graphviz`）
+- 范围：**当前状态**（master 工作区代码 + 已核实的运行时事实）。2026-11-19 拍板的「调拨=批量划拨提交即生效」与 2026-11-20 组织简化（三界面/无机构层/唯一检测站/采样＋送检合并一张单）均**已实现**（服务端 B1a/b/c、网页 B2、小程序 B3、夹具/文档 B4a；单测 290 绿）。
 - 读者：开发者 / 论文与汇报场景 / 新加入的协作者。
 - 配套文件：
-  - C4 图源：[sample-box.structurizr.dsl](./sample-box.structurizr.dsl)（上下文 / 容器 / 上行链路组件三个视图，用 Qoder 的 Structurizr DSL 查看器打开）
-  - 单据生命周期图源：[task-lifecycle.dot](./task-lifecycle.dot)（Graphviz DOT 查看器打开）
-  - 证据索引：[sample-box.evidence.md](./sample-box.evidence.md)（每条结论 → 文件:行号 → 置信度）
+  - C4 图源：[sample-box.structurizr.dsl](./sample-box.structurizr.dsl)（上下文 / 容器 / 上行链路组件三个视图，用 Qoder 的 Structurizr DSL 查看器打开；**图源未随组织简化重绘，单据域以本文 §6 与 task-lifecycle.dot 为准**）
+  - 单据生命周期图源：[task-lifecycle.dot](./task-lifecycle.dot)（Graphviz DOT 查看器打开；合并流口径见 §6）
+  - 证据索引：[sample-box.evidence.md](./sample-box.evidence.md)（每条结论 → 文件:行号 → 置信度；行号随 B1–B4 漂移，引用前复核）
 
 ## 1. 这个系统在业务上做什么
 
-对「智能采样箱」这种物联网资产做全生命周期管理：箱子（硬件）周期上报电量、箱盖开合、位置（GPS/基站）、开箱事件；平台据此维护箱子台账与在线状态，并承载三类业务单据——**采样单**（寄箱→采样→封箱→回程核验）、**调拨单**（单位间转移箱子归属，现状走物流式签收）、**送检测站**（签收后逐台开始检测）。集团→分公司→检测站/采样机构三级组织各自看到自己范围内的箱子、单据与总览。
+对「智能采样箱」这种物联网资产做全生命周期管理：箱子（硬件）周期上报电量、箱盖开合、位置（GPS/基站）、开箱事件；平台据此维护箱子台账与在线状态，并承载两类新建业务单据——**合并采样单 TK-**（分公司自采：待采样→采样中→已封箱→在途→待签收→待检测→已检测，采样＋送检一张单，接收方固定唯一检测站；分支 已取消/已拒收/退回中→已退回）与**划拨单 AL-**（单位间转移箱子归属，提交即生效、整单禁撤守卫，只有 已划拨/已撤销 两态）。旧 kind 调拨/送检只读保留（历史进度条仍渲染、在途旧单仍能收尾，不再新建；056 已把存量送检映射进合并口径）。
 
-角色与数据范围（`shared/org.js:61-72`，安装时种子化进 `sys_role`）：
+组织是**三界面**（录音①）：总部只查看、分公司自采、总公司下**唯一检测站**独立接收。**无采样机构层**（录音②）：部门类型只有「公司」「检测站」；分公司（公司类型）就是采样单位。检测站全局唯一且属总公司子树（配置 `box.stationDeptId`＋服务端 `resolveStation` 回退认定）。摄像头在分公司采样现场，检测站不设（录音⑥）。集团→分公司→检测站各自看到自己范围内的箱子、单据与总览（检测站四数＋今日：在途/累计已到站/累计已开箱/当前未开箱＋今日已开箱）。
+
+角色与数据范围（`shared/org.js`，安装时种子化进 `sys_role`）：
 
 | 层级 | 角色（code） | 数据范围 |
 | --- | --- | --- |
 | 集团 | 系统管理员 ADMIN、资产管理员 ASSET、核验员 VERIFY、值班员 DUTY、领导查看 LEADER | 全集团（dataScope 1） |
-| 单位 | 分公司管理员 BRANCH_ADMIN、调度员 DISPATCH、机构负责人 AGENCY_LEAD | 本单位及下级（dataScope 2） |
+| 单位 | 分公司管理员 BRANCH_ADMIN、调度员 DISPATCH（分公司内部调度岗，P1） | 本单位及下级（dataScope 2） |
 | 个人 | 现场采样员 SAMPLER | 本人（dataScope 4） |
 | 辅助 | 视角切换 HOME_SWITCH | 首页视角切换能力 |
 
-权限是**权限码级 RBAC**：服务端 `menusFor(perms)` 按权限码出菜单（`server/menus.js:236`），前端按钮级用 `usePerm()` 查 `userInfo.perms`（`src/composables/usePerm.ts`）。单位还有权限上限（迁移 044 `sys_dept_perm`）。
+组织简化（P3）：**AGENCY_LEAD（机构负责人，种子 id14）废弃**——存量持有者由迁移 056 改绑 BRANCH_ADMIN，sys_role 14 停用不物理删；DEFAULT_ROLE_PERMS/ROLE_TEMPLATES 不再含该项。BRANCH_ADMIN/DISPATCH 默认码补 `task:create:sample`（分公司自采建单是主路径，B4a；存量库 056 幂等补码）。
+
+权限是**权限码级 RBAC**：服务端 `menusFor(perms)` 按权限码出菜单（`server/menus.js`），前端按钮级用 `usePerm()` 查 `userInfo.perms`（`src/composables/usePerm.ts`）。单位还有权限上限（迁移 044 `sys_dept_perm`）。角色页菜单预览 `menuPreviewFor` 镜像前端 local-menus（组织简化后只剩调拨单组；送检单退役，B4a）。
 
 ## 2. 系统边界与容器（C4 L1/L2）
 
@@ -36,7 +40,7 @@
 
 仓库内还有**设备固件**（`firmware/stm32l051-led` C 代码 + `firmware/dtu/sampling-task.lua` DTU 脚本），它是独立部署单元（烧录在硬件上），通过 TCP 与后端通信。
 
-外部依赖：天地图（网页地图 + 服务端逆地理编码）、微信开放接口（小程序登录/手机号）、SMTP（可配）、**视频平台（未选型，通用 POST 适配器占位**，`VideoPlatform.js:1-30`）、Redis（可选，`REDIS_URL` 为空用进程内存缓存，`createSampleApp.js:42`）。
+外部依赖：天地图（网页地图 + 服务端逆地理编码）、微信开放接口（小程序登录/手机号）、SMTP（可配）、**视频平台（未选型，通用 POST 适配器占位**，`VideoPlatform.js`；组织简化后摄像头/录像只在**分公司采样现场**，检测站不设）、Redis（可选，`REDIS_URL` 为空用进程内存缓存，`createSampleApp.js:42`）。
 
 **微信小程序**是第二个客户端，代码在仓库外（`C:/Users/94439/WeChatProjects/miniprogram-1`），走同一套 `/api/v1/*` 与 `/auth/wechat/login`（服务端路由与 `WechatAuth` 是直接证据；小程序侧行为属运行时/记忆证据，中置信度）。
 
@@ -50,13 +54,13 @@
 - **下行通道**：上报策略版本化（`box_report_policy`），变更时经在线 TCP 会话主动推送（`createSampleApp.js:64` → `TcpIngestServer.pushPolicies`）；抹除指令附带在下行、设备确认后才删档（`IngestService.js:53-74`）。
 - **单据状态机**：`shared/taskFlow.js` 是**前后端共用的唯一事实源**（步骤、终态、可推进状态 `nextOf`），服务端转发引用，页面进度条同源——这是本仓库最值得保持的架构约定。
 - **可观测性**：`SystemLog` 独立库 + 操作审计 + 访问统计；`runtimeGuards.js` 拒绝调试后门上生产。
-- **测试**：`server/test/` 45 个 `node --test` 文件，覆盖上行解析、TCP 接入、补传、任务流转、权限、迁移升级等（`pnpm test:server`）；另有 `tools/acceptance/` 分角色 UI 验收机器人。
+- **测试**：`server/test/` 60+ 个 `node --test` 文件（290 测试全绿，组织简化 B4a 基线），覆盖上行解析、TCP 接入、补传、合并任务流转、权限、迁移升级、总览四数等（`pnpm test:server`）；另有 `tools/acceptance/` 分角色 UI 验收机器人与 `tools/acceptance-setup.mjs` 隔离夹具（8010/9010）。
 
 ## 4. 数据与状态（证据支撑的核心表）
 
 业务：`sample_box`（箱子台账，life 状态跟随任务，迁移 031/037）、`sample_uplink`（原始报文流水）、`sample_task` / `sample_task_box` / `sample_task_log` / `sample_task_video`、`box_report_policy`、`box_ack` / `box_ack_gap` / `box_ack_lost`（补传确认）、`box_wipe_pending`（待抹除）、`box_dump_request/record`（板子日志）。
 组织：`sys_user / sys_role / sys_dept / sys_user_role / sys_role_perm / sys_dept_perm / sys_user_wechat / sys_operation_log`。
-迁移机制：`schema_migrations` 版本表 + 顺序执行 `server/migrations/001–049`（`db.js:72-89`），幂等可重跑。
+迁移机制：`schema_migrations` 版本表 + 顺序执行 `server/migrations/001–056`（`db.js`），幂等可重跑。056_org_simplify：类型归一（采样机构→公司/唯一检测站）＋角色合并（AGENCY_LEAD→BRANCH_ADMIN、14 停用）＋BRANCH_ADMIN/DISPATCH 补 task:create:sample＋P7 存量送检/旧采样映射落库＋备份表 `_bak_org_simplify_*`。
 
 ## 5. 部署形态（运行时观察，非仓库 IaC）
 
@@ -65,11 +69,23 @@
 - 根目录 `deploy.mjs`（rsync 到 www.youlai.tech）是 **vue3-element-admin 模板遗留**，不是本项目的实际部署通道。
 - `mock/` 仅在 `VITE_MOCK_DEV_SERVER=true` 时启用，当前 `.env.development:14` 为 false——前端连真实后端。
 
-## 6. 单据生命周期（见 task-lifecycle.dot）
+## 6. 单据生命周期（见 task-lifecycle.dot；图源待随合并流重绘，以下文字为准）
 
-现状（`shared/taskFlow.js` 直接证据）：采样单单向 6 步 / 双向 8 步；调拨单 direct 免物流「建单→待签收→已签收（签收时 `#handOver` 转移归属）」，拒收可走「退回中→已退回」；签收方为检测站时签收后进入「待检测→已检测」（逐台开始检测）。终态：已完成/已签收/已检测（正常），已取消/已拒收/已退回（作废）；采样单待核验拒收=样品作废（开箱超限场景）。
+现状（`shared/taskFlow.js` 直接证据，组织简化 B1a/P6 后）：
 
-**目标态提示（未实现，勿当现状）**：2026-11-19 用户已拍板调拨改为「批量划拨、提交即生效、整单禁撤」、送检独立成 9 状态送检单（IN-）、划拨单 AL- 仅两态。这是服务端流程级变更（归属转移要从签收挪到建单提交），详见项目记忆 `samplebox-task-domain-ia-decisions.md`。
+- **合并采样单 TK-**（新建一律走这里）：主路径 7 步 待采样→采样中→已封箱→在途→待签收→待检测→已检测（终态 OK）。
+  分公司自采（采样单位＝寄出分公司），封箱后直寄唯一检测站；签收后逐台扫码「开始检测」，全部开始检测后整单已检测。
+  分支：已取消（待签收前）、已拒收（签收时）、退回中→已退回（待检测/已检测可退，回原寄出分公司 fromOrg，D3）。
+  接收方服务端强制 `toOrgId=stationDeptId`（P10，总部/分公司不可作接收方）；trip 单向/双向作废（新建忽略）。
+- **划拨单 AL-**：提交即生效（归属在建单同一事务转移），只有 已划拨/已撤销 两态，无物流步骤，只能走撤销端点；
+  整单禁撤守卫（已进入任务/划拨后已开箱/已完成检测三类原因）；目标限 type=公司（P8，总部可作目标＝收回未分配）。
+- **只读保留的旧 kind**：送检 IN-（9 状态）、调拨（direct/物流式）、旧采样（带 trip）——历史进度条仍渲染、在途旧单仍能收尾，不再新建。
+  056 已把存量送检映射进合并口径（待寄出→已封箱、运送中→在途、其余同名；旧采样 待核验→待检测、已签收/已完成→已检测），
+  保留原 id/IN- 前缀作历史事实；映射前原 kind/status/body 整表备份进 `_bak_org_simplify_task`。
+- 终态：已检测/已划拨（正常 OK），已取消/已拒收/已退回/已撤销（作废 VOID）；旧单 已完成/已签收 只读保留。
+- 签收方为检测站的单（`is_inspect`/body.inspect）：签收后先到「待检测」，逐台开始检测；开箱超限样品作废（强制签收后也不能检测）。
+
+决策与契约出处：`reports/plan-org-simplify.md`（P1–P13）、`org-b1a-report.md`（合并状态机）、`org-b1b-report.md` §3（四数/resolveStation）、`org-b1c-report.md` §4（P7 映射表/幂等论证）。
 
 ## 7. 未知与待验证（模型中已用虚线/标注降级）
 

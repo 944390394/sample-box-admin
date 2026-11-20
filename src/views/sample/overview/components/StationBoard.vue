@@ -25,11 +25,11 @@
             </span>
             <span>
               待
-              <b :class="{ warn: station.arrived }">{{ station.arrived }}</b>
+              <b :class="{ warn: station.unopenedNow }">{{ station.unopenedNow }}</b>
             </span>
             <span>
-              检
-              <b :class="{ ok: station.inspected }">{{ station.inspected }}</b>
+              开
+              <b :class="{ ok: station.openedTotal }">{{ station.openedTotal }}</b>
             </span>
           </span>
         </button>
@@ -40,13 +40,17 @@
           class="rail-item"
           :class="{ active: company === item.key }"
           :aria-pressed="company === item.key"
-          :aria-label="`${item.name}，在途 ${item.moving}，待检测 ${item.arrived}，已检测 ${item.inspected}`"
+          :aria-label="`${item.name}，在途 ${item.moving}，当前未开箱 ${item.unopenedNow}，累计已开箱 ${item.openedTotal}`"
           @click="pickCompany(item.key)"
         >
           <span class="rail-name" :title="item.name">
             {{ item.name }}
-            <i v-if="item.arrived" class="rail-badge" :title="`待检测 ${item.arrived} 台`">
-              {{ item.arrived }}
+            <i
+              v-if="item.unopenedNow"
+              class="rail-badge"
+              :title="`当前未开箱 ${item.unopenedNow} 台`"
+            >
+              {{ item.unopenedNow }}
             </i>
           </span>
           <span class="rail-nums">
@@ -56,11 +60,11 @@
             </span>
             <span>
               待
-              <b :class="{ warn: item.arrived }">{{ item.arrived }}</b>
+              <b :class="{ warn: item.unopenedNow }">{{ item.unopenedNow }}</b>
             </span>
             <span>
-              检
-              <b :class="{ ok: item.inspected }">{{ item.inspected }}</b>
+              开
+              <b :class="{ ok: item.openedTotal }">{{ item.openedTotal }}</b>
             </span>
           </span>
         </button>
@@ -85,14 +89,14 @@
       <el-tabs v-model="tabModel">
         <el-tab-pane name="waiting">
           <template #label>
-            待检测
+            当前未开箱
             <!-- 徽章和上面流转管线用同一段的同一个数（台），不再一个数按单、一个数按台（L-P0-3） -->
             <i
               class="tab-count"
-              :class="{ warn: station.arrived }"
-              :title="`${station.arrived} 台等着开箱检测`"
+              :class="{ warn: station.unopenedNow }"
+              :title="`${station.unopenedNow} 台等着开箱检测`"
             >
-              {{ station.arrived }}
+              {{ station.unopenedNow }}
             </i>
           </template>
           <div data-test="station-waiting">
@@ -155,7 +159,7 @@
                 </span>
               </button>
             </div>
-            <EmptyState v-else description="没有待检测的箱子" />
+            <EmptyState v-else description="当前没有未开箱的箱子" />
             <div v-if="boxes.waiting > boxes.pageSize" class="foot">
               <el-pagination
                 background
@@ -172,9 +176,9 @@
 
         <el-tab-pane name="done">
           <template #label>
-            {{ dayText }}已检测
-            <i class="tab-count ok" :title="`${dayText}开箱检测完 ${station.inspected} 台`">
-              {{ station.inspected }}
+            {{ dayText }}已开箱
+            <i class="tab-count ok" :title="`${dayText}开箱检测完 ${station.todayOpened} 台`">
+              {{ station.todayOpened }}
             </i>
           </template>
           <div data-test="station-done">
@@ -246,7 +250,7 @@
 
         <el-tab-pane name="inbound">
           <template #label>
-            运往本站
+            在途来站
             <i
               class="tab-count"
               :title="`路上 ${boxes.inbound} 单任务，共 ${station.moving} 台箱子`"
@@ -341,8 +345,8 @@ export interface StationQuery {
 }
 
 /**
- * 检测站主从面板：左边来源公司轨道（搜索 debounce、50/页分页、待检徽章），
- * 右边待检测 / 已检测 / 在途三页签，全部服务端分页；页签受控于父级（流转管线点段切换）。
+ * 检测站主从面板：左边来源分公司轨道（搜索 debounce、50/页分页、未开箱徽章），
+ * 右边当前未开箱 / 今日已开箱 / 在途来站三页签，全部服务端分页；页签受控于父级（流转管线点段切换）。
  * 轮询只换数据，不重置公司选择与页码；窄屏表格转卡片。
  */
 const props = withDefaults(

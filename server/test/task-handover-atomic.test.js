@@ -48,7 +48,9 @@ const PERMS = upgradeCodes([
 ]);
 
 async function setup() {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "4" } });
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "4" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "handover-atomic-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -56,9 +58,10 @@ async function setup() {
   );
   await migrate(db);
   for (const [id, parent, name, type] of [
+    ["1", "0", "总公司", "公司"],
     ["2", "0", "A单位", "公司"],
     ["3", "0", "B单位", "公司"],
-    ["4", "0", "C单位", "检测站"],
+    ["4", "1", "C单位", "检测站"],
   ])
     await db.run(
       "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",

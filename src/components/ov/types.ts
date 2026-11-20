@@ -19,6 +19,8 @@ export interface FlowStep {
   label: string;
   value: number;
   tone?: Tone;
+  /** 累计类指标只展示不切页签时为 false（默认 true，点击切到 key 对应页签）。 */
+  clickable?: boolean;
 }
 
 export interface ChartSelect {

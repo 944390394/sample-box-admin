@@ -71,17 +71,19 @@ export const SAMPLE_RETURN_FLOW = [
   "已退回",
 ];
 
-/** 旧采样单专属状态（合并流不再产生）：读旧数据时按旧流渲染，新建一律走合并流。 */
-const LEGACY_SAMPLE_STATUSES = ["待执行", "执行中", "待核验", "已签收", "已完成", "待寄出", "运送中"];
-
 /**
- * 这张采样单是不是旧数据（带寄送 trip、或停在合并流没有的旧状态）。
- * 只用于读兼容（进度条/推进）；新建单不带 trip、状态都在合并流里，恒为 false。
+ * 这张采样单是不是旧数据（只读兼容）。判别按 inspect，不再按状态名单（review-org M2）：
+ * - 合并单建单恒写 inspect=true；056 映射后的旧送检 body.inspect 也恒 true——它们走合并流；
+ * - 旧采样单建单从不写 inspect（恒 falsy）——无论有没有 trip、停在哪个状态都是旧单，
+ *   包括无 trip 停共享态「在途」的单（旧流 待采样→采样中→已封箱→在途→待核验→已签收），
+ *   以及 056 把 待核验→待检测、已签收/已完成→已检测 映射后的单（收尾仍按旧核验语义）。
+ * - 带 trip 的旧单恒旧（含旧双向送采样机构 inspect=true 的单，不能误判成合并单）。
+ * 只用于读兼容（进度条/推进）；新建合并单恒为 false。
  */
 export function isLegacySample(task) {
   if (task.kind !== "采样") return false;
   if (TRIPS.includes(task.trip)) return true;
-  return LEGACY_SAMPLE_STATUSES.includes(task.status);
+  return !task.inspect;
 }
 
 /** 单号前缀（显示用，kind 才是类型权威来源）。送检 IN- 只读保留。 */
@@ -103,7 +105,7 @@ export function stepsOf(task) {
     if (RETURN_STEPS.includes(task.status)) return [...head, ...RETURN_STEPS];
     return [...head, ...tail];
   }
-  // 旧采样单（带 trip 或停在旧状态）：按旧流渲染
+  // 旧采样单（inspect 恒 falsy 或带 trip）：按旧流渲染
   if (isLegacySample(task)) {
     if (["待执行", "执行中"].includes(task.status)) return ["待执行", "执行中", "已完成"];
     const tail = task.inspect ? INSPECT_STEPS : ["已签收"];
@@ -111,6 +113,9 @@ export function stepsOf(task) {
     if (task.trip === "单向") return ["待寄出", "运送中", ...sampling, "已完成"];
     const back = ["在途", "待核验", ...tail];
     if (task.trip === "双向") return ["待寄出", "运送中", ...sampling, ...back];
+    // 056 映射后的旧无 trip 单（待核验→待检测、已签收/已完成→已检测）：
+    // 旧流步骤里没有这两个状态，按合并流渲染检测段（终态语义已对齐，M2）。
+    if (INSPECT_STEPS.includes(task.status)) return SAMPLE_FLOW;
     return [...sampling, ...back];
   }
   // 合并采样单（新建一律走这里）
@@ -164,6 +169,10 @@ export function nextOf(task, status) {
   if (task.kind === "采样" && !isLegacySample({ ...task, status }))
     return SAMPLE_NEXT[status] || [];
   if (ENDED.includes(status)) return [];
+  // 056 映射后的旧无 trip 采样单（待核验→待检测，M2）：收尾按旧核验语义——
+  // 推进到已检测（已签收的映射像）、可拒收/取消；不进合并单的新退回分支（无检测站交接事实）。
+  if (task.kind === "采样" && !task.trip && !task.inspect && status === "待检测")
+    return ["已检测", "已拒收", "已取消"];
   const steps = stepsOf({ ...task, status });
   const index = steps.indexOf(status);
   if (index < 0 || index === steps.length - 1) return [];

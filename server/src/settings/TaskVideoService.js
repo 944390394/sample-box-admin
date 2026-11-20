@@ -3,13 +3,13 @@ import { formatTimestamp } from "../domain/Clock.js";
 import { boxPosition, distanceM, hasCoords } from "../geo/place.js";
 import { radiusOf } from "./taskPlaces.js";
 
-/** 采样任务在这几个状态下，箱子到了采样单位开箱就要录像。 */
+/** 合并采样单在这几个状态下（分公司采样现场），箱子到了计划地点开箱就要录像。 */
 const RECORDING = ["待采样", "采样中", "已封箱"];
 
 /**
- * 开箱录像：采样任务勾了「需要录像」、采样单位是采样机构时，
- * 箱子在采样单位（计划地点到达半径内）每开一次箱，记一条录像请求，再异步请视频平台录像。
- * 计划地点没有坐标时，只在「采样中」算。
+ * 开箱录像（组织简化 P6/录音⑥）：采样单勾了「需要录像」、采样单位是分公司（公司类型）时，
+ * 箱子在采样现场（计划地点到达半径内）每开一次箱，记一条录像请求，再异步请视频平台录像。
+ * 计划地点没有坐标时，只在「采样中」算。检测站不设摄像头、不开录像（建单 gate 已拦）。
  */
 export class TaskVideoService {
   constructor(db, platform, { now = () => new Date() } = {}) {

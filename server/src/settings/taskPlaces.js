@@ -1,6 +1,6 @@
 import { boxPosition, distanceM } from "../geo/place.js";
 import { currentBoxSettings } from "./boxConfig.js";
-import { ENDED } from "./taskFlow.js";
+import { ENDED, isLegacySample } from "./taskFlow.js";
 
 /** 这些状态下箱子正朝某个地点去，列表要算「到达附近」。 */
 export const MOVING = [
@@ -27,8 +27,16 @@ export function targetOf(body, status) {
     return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
   }
   const plan = body.placeAt ? { ...body.placeAt, role: "计划地点" } : null;
+  // 合并采样单（组织简化 P6）：采样段看计划地点；在途/待签收/待检测看检测站收货地址；退回看寄出地址
+  if (body.kind === "采样" && !isLegacySample({ ...body, status })) {
+    if (["待采样", "采样中", "已封箱"].includes(status)) return plan;
+    if (["在途", "待签收", "待检测"].includes(status))
+      return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
+    if (status === "退回中") return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
+    return null;
+  }
   if (body.trip) {
-    // 带寄送的采样单：寄出前看寄出地址，寄去和采样看计划地点，寄回看寄出地址
+    // 带寄送的旧采样单：寄出前看寄出地址，寄去和采样看计划地点，寄回看寄出地址
     const home = (role) => (body.fromPlace ? { ...body.fromPlace, role } : null);
     // 结束了、或已在检测站等检测：不再朝哪里去
     if (ENDED.includes(status) || status === "待检测") return null;

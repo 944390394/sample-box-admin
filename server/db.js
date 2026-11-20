@@ -95,13 +95,15 @@ export async function seedOrg(db) {
   const insertAll = async (tx) => {
     for (const item of flattenDepts(depts)) {
       await tx.run(
-        `INSERT INTO sys_dept (id, parent_id, name, code, sort, status, create_time, update_time)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sys_dept (id, parent_id, name, code, type, sort, status, create_time, update_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.parentId,
           item.name,
           item.code,
+          // 组织简化（B1b）：显式写类型——13 总部检测站 type=检测站，其余默认公司
+          item.type || "公司",
           item.sort,
           item.status,
           item.createTime,

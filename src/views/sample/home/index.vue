@@ -379,7 +379,7 @@ const cards = computed<Card[]>(() => {
       {
         key: "sampling",
         title: "采样待推进",
-        hint: "开始采样、封箱、寄回",
+        hint: "开始采样、封箱、寄检测站",
         tone: "primary",
         more: mine,
       },

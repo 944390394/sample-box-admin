@@ -39,10 +39,11 @@ export async function verifySeed(api, tasks, { log = () => {} } = {}) {
         `单号 ${task.no || task.id || "—"} · ${task.kind || "—"} · 状态 ${task.status || "—"} · ${boxCount ?? "?"} 台箱 · 进度 ${(task.steps || []).join("→") || "—"}`
       );
       if (item.key === "transfer") {
+        // 组织简化（B4a）：调拨新建退役，transfer 键现在是划拨单（AL-，提交即生效、无签收人）
         record(
-          `调拨单签收人属于调入单位（华东 3/31）`,
-          String(task.signerId ?? "") === EAST_SIGNER.userId,
-          `signerId=${task.signerId ?? "—"}（夹具要求 ${EAST_SIGNER.userId}）、toOrgId=${task.toOrgId ?? "—"}（要求 3）`
+          `划拨单提交即生效（华东 3，kind=划拨/已划拨）`,
+          task.kind === "划拨" && task.status === "已划拨" && String(task.toOrgId ?? "") === "3",
+          `kind=${task.kind ?? "—"}、status=${task.status ?? "—"}、toOrgId=${task.toOrgId ?? "—"}（要求 3）`
         );
       }
       if (item.key === "inspect" || item.key === "back") {
@@ -68,9 +69,10 @@ export async function verifySeed(api, tasks, { log = () => {} } = {}) {
       : "四张单全部建出"
   );
 
-  /** 3. 任务列表和箱子列表能撑起页面（数量级核对，不写死具体值） */
+  /** 3. 任务列表和箱子列表能撑起页面（数量级核对，不写死具体值）
+   * 组织简化（B4a）：任务列表默认只列 kind=采样，划拨要 allKinds=1 才一起列。 */
   try {
-    const data = await api.get("/api/v1/sample/tasks?pageNum=1&pageSize=100");
+    const data = await api.get("/api/v1/sample/tasks?pageNum=1&pageSize=100&allKinds=1");
     const list = asList(data);
     const total = data?.total ?? list.length;
     record(
@@ -91,7 +93,7 @@ export async function verifySeed(api, tasks, { log = () => {} } = {}) {
     record("箱子列表非空", false, `${error.code || ""} ${error.message}`);
   }
 
-  /** 4. 夹具签收人确实在华东分公司名下（收紧后的校验就是冲这个来的） */
+  /** 4. 华东分公司名下确实有人员（批次 A 收紧签收人归属时的夹具样本；划拨无签收人后保留为人员样本） */
   try {
     const data = await api.get("/api/v1/users?pageNum=1&pageSize=100&deptId=31");
     const list = asList(data);

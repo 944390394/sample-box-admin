@@ -81,7 +81,7 @@ export const CARD_PERMS = [
     9705,
     "monitor:card:sampling",
     "「采样待推进」卡片",
-    "需要我开始采样、封箱或寄回的采样单",
+    "需要我开始采样、封箱或寄出（寄往唯一检测站）的合并采样单",
     "workbench",
     "see",
     TASK_ENTER
@@ -188,7 +188,7 @@ export const TASK_PERMS = [
     9403,
     "task:video",
     "查看开箱录像",
-    "任务详情里采样机构开箱时请求的录像",
+    "任务详情里分公司（公司类型）采样现场开箱时请求的录像；检测站不设录像",
     "task",
     "see",
     TASK_ENTER
@@ -197,7 +197,7 @@ export const TASK_PERMS = [
     9405,
     "task:camera",
     "查看监控画面",
-    "任务详情「监控」里采样单位、接收单位的 1–8 路监控",
+    "任务详情「监控」里分公司采样现场的 1–8 路监控（检测站不设摄像头）",
     "task",
     "see",
     TASK_ENTER
@@ -215,7 +215,7 @@ export const TASK_PERMS = [
     9411,
     "task:create:sample",
     "新建采样任务",
-    "让采样机构带箱子去计划地点采样",
+    "分公司带箱子去计划地点采样，封箱后直寄唯一检测站（采样＋送检合并一张单）",
     "task",
     "do",
     TASK_ENTER
@@ -224,7 +224,7 @@ export const TASK_PERMS = [
     9420,
     "task:create:inspect",
     "新建送检单",
-    "把采样箱送检测站，签收后逐台开始检测",
+    "送检已并入采样任务（历史权限码保留）：把采样箱送唯一检测站，签收后逐台开始检测",
     "task",
     "do",
     TASK_ENTER
@@ -290,15 +290,41 @@ export const TASK_PERMS = [
     9419,
     "task:inspect",
     "开始检测",
-    "检测站逐台扫码开始检测，结束这台箱子的本次任务",
+    "唯一检测站逐台扫码开始检测，结束这台箱子的本次任务",
     "task",
     "do",
     TASK_ENTER
   ),
-  item(9425, "task:sample-start", "开始采样", "采样单位开始采样", "task", "do", TASK_ENTER),
+  item(
+    9425,
+    "task:sample-start",
+    "开始采样",
+    "分公司（采样单位）开始采样",
+    "task",
+    "do",
+    TASK_ENTER
+  ),
   item(9426, "task:seal", "封箱", "样品装好后封箱", "task", "do", TASK_ENTER),
-  item(9422, "task:finish", "完成采样任务", "单向采样单在封箱后结束任务", "task", "do", TASK_ENTER),
-  item(9423, "task:send-back", "寄回", "双向采样单封箱后寄回寄出单位", "task", "do", TASK_ENTER),
+  item(
+    9422,
+    "task:finish",
+    "完成采样任务",
+    "旧单向采样单封箱后结束任务（合并单不再有此步，历史权限码保留）",
+    "task",
+    "do",
+    TASK_ENTER
+  ),
+  // 组织简化（B4a，B3 遗留③文案对齐）：合并单此码管「已封箱→在途」＝寄往唯一检测站，
+  // 不再叫「寄回」（旧双向采样单寄回段只读兼容，码本身保留）。
+  item(
+    9423,
+    "task:send-back",
+    "寄出（寄检测站）",
+    "合并采样单封箱后直寄唯一检测站；旧双向采样单此码管寄回段（历史语义只读保留）",
+    "task",
+    "do",
+    TASK_ENTER
+  ),
   item(
     9402,
     "task:cancel",
@@ -565,7 +591,7 @@ export const ORG_PERMS = [
     9525,
     "sys:dept:type",
     "设置部门类型",
-    "公司或采样机构（采样机构就是检测站，送到这里的任务签收后要开始检测）",
+    "公司或检测站：分公司＝公司类型（自采）；检测站全局唯一、属总公司子树，送到这里的任务签收后要开始检测",
     "dept",
     "do",
     ["sys:dept:view"]
@@ -579,9 +605,15 @@ export const ORG_PERMS = [
     "do",
     ["sys:dept:view"]
   ),
-  item(9527, "sys:dept:camera", "配置监控通道", "采样机构的 1–8 路监控通道", "dept", "do", [
-    "sys:dept:view",
-  ]),
+  item(
+    9527,
+    "sys:dept:camera",
+    "配置监控通道",
+    "分公司（公司类型）采样现场的 1–8 路监控通道；检测站禁配",
+    "dept",
+    "do",
+    ["sys:dept:view"]
+  ),
   item(
     9528,
     "sys:dept:leader",
@@ -1097,6 +1129,9 @@ const LEGACY_DEFAULTS = {
       "assign",
       "policyTask",
     ]),
+    // 组织简化（B4a，B3 遗留②）：分公司内部调度岗建合并采样单是主路径，显式钉死建单码
+    //（policyTask 经 045 拆分已含此码，这里显式列出防拆链变动；存量库由 056 幂等补码）。
+    "task:create:sample",
     "task:sign",
     "task:cancel",
     "task:video",
@@ -1110,6 +1145,9 @@ const LEGACY_DEFAULTS = {
   ],
   BRANCH_ADMIN: [
     ...OLD(["list", "detail", "status", "location", "track", "event", "task", "assign"]),
+    // 组织简化（B4a/P11，B3 遗留②）：分公司自采建单是主路径——BRANCH_ADMIN 默认补
+    // task:create:sample（存量库由 056 幂等补码步补齐，角色页保存过的以保存为准）。
+    "task:create:sample",
     "task:sign",
     "task:video",
     "sys:dept:view",
@@ -1121,20 +1159,8 @@ const LEGACY_DEFAULTS = {
     "sys:oplog:read",
     "sys:oplog:export",
   ],
-  AGENCY_LEAD: [
-    ...OLD(["list", "detail", "status", "location", "track", "event", "task"]),
-    "task:sign",
-    "task:video",
-    "sys:user:view",
-    // #26 D5：本机构操作日志 + 本机构人员管理（scoped 由数据范围强制）
-    "sys:oplog:read",
-    "sys:oplog:export",
-    "sys:dept:view",
-    "sys:user:create",
-    "sys:user:update",
-    "sys:user:disable",
-    "sys:user:enable",
-  ],
+  // 组织简化（B1b/P3）：AGENCY_LEAD 废弃——存量持有者由迁移 056 改绑 BRANCH_ADMIN，
+  // sys_role 14 停用不物理删；默认授权/模板不再含该项（权限码本身不删）。
   SAMPLER: [...OLD(["list", "detail", "status", "location", "track"])],
   HOME_SWITCH: [],
 };
@@ -1163,7 +1189,7 @@ export const ROLE_TEMPLATES = [
   {
     key: "DISPATCH",
     label: "调度员",
-    hint: "建调拨和采样任务、推进流转、分配箱子",
+    hint: "建采样任务（分公司内部调度）、推进流转、分配箱子",
     suggestedScope: 2,
   },
   {
@@ -1183,12 +1209,6 @@ export const ROLE_TEMPLATES = [
     label: "资产管理员",
     hint: "激活、改名、停用、分配、导出采样箱",
     suggestedScope: 1,
-  },
-  {
-    key: "AGENCY_LEAD",
-    label: "机构负责人",
-    hint: "本机构签收/采样推进/开箱录像＋本单位操作日志与人员管理",
-    suggestedScope: 2,
   },
   {
     key: "BRANCH_ADMIN",

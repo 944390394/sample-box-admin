@@ -23,14 +23,14 @@ export const BOXES = {
   offline: { imei: "860000000000004", name: "验收-离线" },
   lowLid: { imei: "860000000000005", name: "验收-低电开盖" },
   pending: { imei: "860000000000009", name: "" },
-  // 送到总部检测站、已签收、等着开箱检测的两台
+  // 寄总部检测站的两台（合并采样单）：A 途中开了 1 次箱，B 开了 3 次（任务上限 2 次，签收时标超限）
   inspectA: { imei: "860000000000006", name: "验收-送检A" },
   inspectB: { imei: "860000000000007", name: "验收-送检B" },
-  // 送到检测站时开箱超限、被拒收退回的一台
+  // 寄检测站途中开箱超限、待拒收退回的一台
   back: { imei: "860000000000008", name: "验收-退回箱" },
 };
 
-/** 总部检测站：默认组织里的「核验中心」改成采样机构类型（采样机构就是检测站）。 */
+/** 总部检测站（组织简化 B4a/P5）：新种子 13＝总部检测站 type=检测站、挂总公司 1 下；config 显式指定。 */
 export const STATION = { id: "13", name: "总部检测站" };
 
 /** 角色和账号。密码每次随机生成，只在机器人进程里用，不写进报告。 */
@@ -47,10 +47,11 @@ export const ACCOUNTS = {
 export const GRANTER_ROLE = { id: "93", name: "验收-授权员" };
 
 /**
- * 华东分公司的签收人（id 94，挂 31 华东调度室，角色 13 调度员）。
- * 为什么要有这个人：批次 A 把「寄出人 / 签收人必须是那一单位的人」收紧成硬校验后，
- * 调拨到华东分公司（org 3）的单子必须用华东的人签收——`shared/org.js` 的 3/31 下**一个用户都没有**，
- * 用 admin（11 系统管理）当签收人会直接 `A0400`。源码的单位表不在我的边界内，所以在这里补夹具账号。
+ * 华东分公司的人员样本（id 94，挂 31 华东调度室，角色 13 调度员）。
+ * 历史用途：批次 A 收紧「寄出人/签收人必须是那一单位的人」后，调拨到华东（org 3）的单子
+ * 必须用华东的人签收（shared/org.js 的 3/31 下 originally 一个用户都没有）。
+ * 组织简化（B4a）后调拨新建退役、划拨无签收人，此账号保留为华东人员样本
+ * （seed-verify §4 仍核对 31 下有人），不再参与建单。
  */
 export const EAST_SIGNER = { userId: "94", username: "accept.east", nickname: "验收华东签收", deptId: "31", label: "华东签收人" };
 
@@ -66,7 +67,8 @@ const DAY = 24 * HOUR;
 export async function prepareHome(home) {
   await mkdir(home, { recursive: true });
   const sqlitePath = path.join(home, "sample.db");
-  const config = { dialect: "sqlite", sqlitePath, host: "", port: 3306, user: "", password: "", database: "", secret: randomBytes(24).toString("hex"), box: { reportPeriodSec: 600 } };
+  // 组织简化（B4a）：唯一检测站显式写 config（13 总部检测站，新种子 type=检测站，不再改类型）
+  const config = { dialect: "sqlite", sqlitePath, host: "", port: 3306, user: "", password: "", database: "", secret: randomBytes(24).toString("hex"), box: { reportPeriodSec: 600, stationDeptId: STATION.id, enableTransferInspect: true } };
   await writeFile(path.join(home, "db.config.json"), JSON.stringify(config, null, 2), "utf8");
   await writeFile(path.join(home, "install.lock"), new Date().toISOString(), "utf8");
 
@@ -74,7 +76,6 @@ export async function prepareHome(home) {
   try {
     await migrate(db);
     await seedOrg(db);
-    await db.run("UPDATE sys_dept SET type = '采样机构', name = ? WHERE id = ?", [STATION.name, STATION.id]);
     await seedRolePerms(db);
     const passwords = await seedAccounts(db);
     await seedBoxes(db);
@@ -233,10 +234,12 @@ async function sendPackets(tcpPort, packets) {
 }
 
 /**
- * 用管理员账号调接口建任务单：一张调拨（GPS 新 + GPS 旧两台）、一张采样（低电开盖那台）、
- * 两张送检（一台停在待检测、一台拒收退回）。
+ * 用管理员账号调接口建任务单（组织简化 B4a 口径）：
+ * 一张划拨（AL-，GPS 新 + GPS 旧两台，提交即生效）、一张合并采样单（低电开盖那台，停待采样）、
+ * 两张寄检测站的合并采样单（一台推到在途待签收——run.mjs 再强制签收进待检测；一台开箱超限拒收退回）。
+ * 通用建单端点只收 kind=采样（接收方固定唯一检测站 13）；调拨/送检新建已退役。
  *
- * **逐张容错**：批次 A 之后建单接口会因「寄出人/签收人必须是那一单位的人」等规则返回 A0400，
+ * **逐张容错**：建单接口会因「寄出人/签收人必须是那一单位的人」等规则返回 A0400，
  * 一张建不出来不能把整个数据准备阶段打断（`run.mjs` 原来没有 try/catch，机器人直接中止）。
  * 现在每张单单独尝试，失败原因（业务码 + 服务端原文）如实记进返回值，由 `run.mjs` 落到证据里；
  * 后续依赖某张单的步骤拿不到 id 就跳过并记一条失败，不抛异常。
@@ -250,9 +253,9 @@ export async function createTasks(api) {
   const out = { transfer: null, sample: null, inspect: null, back: null, seeded, failures, skipped };
 
   /** 建一张单：成功记 id 和单号，失败记业务码与服务端原文 */
-  const create = async (key, label, body) => {
+  const create = async (key, label, body, endpoint = "/api/v1/sample/tasks") => {
     try {
-      const task = await api.post("/api/v1/sample/tasks", body);
+      const task = await api.post(endpoint, body);
       out[key] = task.id;
       // 建单接口只回 id（`ctx.ok({ id })`），单号/状态由 seed-verify 再拉一次详情取证
       seeded.push({ key, label, id: task.id });
@@ -276,54 +279,53 @@ export async function createTasks(api) {
     }
   };
 
-  await create("transfer", "验收-调拨深圳到杭州", {
-    name: "验收-调拨深圳到杭州",
-    kind: "调拨",
+  // 划拨（提交即生效，无物流步骤、无签收人）：两台箱子归属立即转到华东 3。
+  // 带 SAMPLE_ACCEPTANCE_BREAK_TRANSFER=1 时故意把目标改成检测站 13（P8 闸门拒绝），
+  // 验证「一张单失败不中止整个准备」这条容错路径。
+  await create("transfer", "验收-划拨深圳到杭州", {
+    name: "验收-划拨深圳到杭州",
+    toOrgId: process.env.SAMPLE_ACCEPTANCE_BREAK_TRANSFER === "1" ? STATION.id : "3",
     boxIds: [BOXES.fresh.imei, BOXES.staleGps.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: "3",
-    senderId: ACCOUNTS.dispatch.userId,
-    // 签收人必须是华东分公司（3/31）的人，用 admin 会被 A0400 拦掉 → 夹具账号 94。
-    // 带 SAMPLE_ACCEPTANCE_BREAK_TRANSFER=1 时故意用 admin，验证「一张单失败不中止整个准备」这条容错路径。
-    signerId: process.env.SAMPLE_ACCEPTANCE_BREAK_TRANSFER === "1" ? ACCOUNTS.admin.userId : EAST_SIGNER.userId,
-    fromPlace: { address: "深圳市福田区福华路", lng: SZ.lng, lat: SZ.lat },
-    toPlace: { address: "杭州市西湖区文三路", lng: 120.1551, lat: 30.2741 },
-  });
+  }, "/api/v1/sample/transfers");
 
+  // 合并采样单（分公司自采）：采样单位＝寄出分公司调度室 21，接收方服务端固定 13
   await create("sample", "验收-龙华采样", {
     name: "验收-龙华采样",
     kind: "采样",
     boxIds: [BOXES.lowLid.imei],
-    orgId: HOME_ORG.id,
+    fromOrgId: HOME_ORG.id,
+    sender: "陈可",
+    signer: "吴迪",
     placeAt: { address: "深圳市龙华区民治街道", lng: 114.0301, lat: 22.6204, radiusM: 500 },
   });
 
-  // 送检：调度室寄到总部检测站，上限开箱 2 次；寄出后两台在途中开箱，然后到达、签收，停在「待检测」
+  // 寄检测站（合并单）：调度室寄到总部检测站，上限开箱 2 次；推到在途后两台在途中开箱，
+  // run.mjs 再推进待签收、强制签收（B 开箱超限）进待检测
   const inspect = await create("inspect", "验收-送检总部", {
     name: "验收-送检总部",
-    kind: "调拨",
+    kind: "采样",
     boxIds: [BOXES.inspectA.imei, BOXES.inspectB.imei],
     fromOrgId: HOME_ORG.id,
-    toOrgId: STATION.id,
     senderId: ACCOUNTS.dispatch.userId,
     // 检测站（13）的签收人是吴迪（user 5），admin 不在这个单位
     signerId: "5",
     maxOpens: 2,
   });
-  await advance("inspect", "验收-送检总部", inspect?.id, "运送中", "");
+  for (const status of ["采样中", "已封箱", "在途"])
+    await advance("inspect", "验收-送检总部", inspect?.id, status, "");
 
   // 拒收退回：一路开箱上限 0 次，寄出后开过一次箱，检测站扫码时只能拒收或强制签收
   const back = await create("back", "验收-拒收退回", {
     name: "验收-拒收退回",
-    kind: "调拨",
+    kind: "采样",
     boxIds: [BOXES.back.imei],
     fromOrgId: HOME_ORG.id,
-    toOrgId: STATION.id,
     senderId: ACCOUNTS.dispatch.userId,
     signerId: "5",
     maxOpens: 0,
   });
-  await advance("back", "验收-拒收退回", back?.id, "运送中", "");
+  for (const status of ["采样中", "已封箱", "在途"])
+    await advance("back", "验收-拒收退回", back?.id, status, "");
 
   return out;
 }

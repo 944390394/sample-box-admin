@@ -7,29 +7,54 @@ import {
 } from "../auth/boxAccess.js";
 import { buildDeptTree } from "../../../shared/org.js";
 import { audit } from "../log/audit.js";
-import { ENDED, ENDED_SQL } from "../settings/taskFlow.js";
+import { ENDED, ENDED_SQL, isLegacySample } from "../settings/taskFlow.js";
 import { limits } from "./SampleController.js";
 import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 
 /**
  * 总览（补充协议 1.2.8–1.2.10）。
- * - 集团总览：所有项目分公司（顶级单位）和检测站（采样机构），各有多少箱子、什么状态；检测站另算在途来站、已到待检测、当天已检测。
+ * - 集团总览：所有项目分公司（顶级单位）和唯一检测站（type=检测站，组织简化 B1b），各有多少箱子、什么状态；
+ *   检测站另算四数＋今日（P13）：在途来站 moving、累计已到站 arrivedTotal、累计已开箱 openedTotal、
+ *   当前未开箱 unopenedNow、今日已开箱 todayOpened。
  *   单位列表在服务端搜索、筛选、排序、分页，几千家公司也只传一页；全局汇总和 Top 分布单独给，供指标卡和图表用。
  * - 单位总览：一个分公司或检测站自己的箱子统计，日历选一天看当天的任务；检测站列出待检测和当天已检测的箱子。
  *   检测站三类明细（在途单、待检测、已检测）永远分页并带总数，不再因为超出上限整表清空。
  *
  * 单位的箱子按部门子树算（总公司还包括没分配单位的箱子），子树里另有检测站的，那部分算在检测站名下，不重复算。
  * 只列在自己数据范围内的单位；统计也只算范围内的部门。范围落在科室/机构下级时，沿 parent 链
- * 把最近的单位锚点（一级公司或采样机构）纳入，保证有权角色至少落到一个匹配其范围的单位页；
+ * 把最近的单位锚点（一级公司或检测站）纳入，保证有权角色至少落到一个匹配其范围的单位页；
  * 仅本人等没有单位范围时 units 为空，group 返回 myUnitId=null，由前端渲染带引导的空态。
  */
 
-/** 运到检测站途中的状态：调拨寄出后、双向采样单寄回后。 */
-const INBOUND = { 调拨: ["运送中", "待签收"], 采样: ["在途", "待核验"] };
+/**
+ * 运到检测站途中的状态（P13 moving）：
+ * - 采样＝合并单主口径 [在途,待签收]；待核验 是旧双向采样单寄回段（只读兼容）；
+ * - 调拨/送检＝legacy 兼容分支：056 已把存量送检/旧采样映射成合并口径（B1c/P7），
+ *   这两支只服务尚未跑 056 的库；全量迁移完成后退场（R9 之后决策）。
+ */
+const INBOUND = {
+  采样: ["在途", "待签收", "待核验"],
+  调拨: ["运送中", "待签收"],
+  送检: ["运送中", "待签收"],
+};
+/** 累计已到站（P13 arrivedTotal）：单到这些状态就算箱子到过站（含已检测/退回，按箱快照计数）。 */
+const ARRIVED = ["待检测", "已检测", "退回中", "已退回"];
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH = /^\d{4}-\d{2}$/;
 const BOX_PAGE_SIZE = 20;
 const COMPANY_PAGE_SIZE = 50;
+
+/** 检测站四数＋今日的内部累加器（别名在出口统一附）。 */
+function countsZero() {
+  return { moving: 0, arrivedTotal: 0, openedTotal: 0, unopenedNow: 0, todayOpened: 0 };
+}
+/**
+ * 旧字段别名保留一版防前端瞬断（B2 切新字段后删）：
+ * arrived＝当前未开箱（旧「已到·未开箱检测」）、inspected＝今日已开箱（旧「今天已开箱检测」）。
+ */
+function withAliases(counts) {
+  return { ...counts, arrived: counts.unopenedNow, inspected: counts.todayOpened };
+}
 
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -183,8 +208,8 @@ export class OverviewController {
     };
     const chosen = [];
     const walk = (node, depth) => {
-      // 采样机构就是检测站：不管在哪一级都单列
-      if (node.status !== 0 && (depth === 0 || node.type === "采样机构")) chosen.push(node);
+      // 组织简化（B1b）：检测站（type=检测站，全局唯一）不管在哪一级都单列
+      if (node.status !== 0 && (depth === 0 || node.type === "检测站")) chosen.push(node);
       (node.children || []).forEach((child) => walk(child, depth + 1));
     };
     tree.forEach((node) => walk(node, 0));
@@ -205,7 +230,7 @@ export class OverviewController {
     const scope = access.scope;
     const scoped = Boolean(scope && !scope.all);
     const scopeIds = scoped ? new Set(scope.orgIds) : null;
-    // 范围落在科室/机构下级时，沿 parent 链向上找最近的单位锚点（一级公司或采样机构）。
+    // 范围落在科室/机构下级时，沿 parent 链向上找最近的单位锚点（一级公司或检测站）。
     // resolveScope 通常会把祖先补进 orgIds，但范围只给科室、或祖先单位被停用时这里兜底：
     // 锚点单位即使自身不在 scope.orgIds 里也纳入，统计仍只算范围覆盖的部门（R4）。
     const anchors = new Set();
@@ -214,7 +239,7 @@ export class OverviewController {
         const seen = new Set();
         for (let cur = byId.get(id); cur && !seen.has(cur.id); cur = byId.get(cur.parentId)) {
           seen.add(cur.id);
-          if (cur.status !== 0 && (cur.type === "采样机构" || !byId.has(cur.parentId))) {
+          if (cur.status !== 0 && (cur.type === "检测站" || !byId.has(cur.parentId))) {
             anchors.add(cur.id);
             break;
           }
@@ -251,16 +276,22 @@ export class OverviewController {
     return body.inspect ? body : null;
   }
 
-  /** 签收方：调拨看接收单位，双向采样单看寄出单位。 */
-  #receiver(row) {
-    return String((row.kind === "调拨" ? row.to_org_id : row.from_org_id) ?? "");
+  /**
+   * 签收方（B1b 修正）：调拨/送检/合并采样单看接收单位 to_org_id（检测站）；
+   * 旧采样单（带 trip 或停旧态）寄回段看寄出单位 from_org_id（只读兼容）。
+   */
+  #receiver(row, body) {
+    if (row.kind === "调拨" || row.kind === "送检") return String(row.to_org_id ?? "");
+    if (row.kind === "采样" && !isLegacySample({ ...body, kind: row.kind, status: row.status }))
+      return String(row.to_org_id ?? "");
+    return String(row.from_org_id ?? "");
   }
 
   /** 送检测站的单：签收方落在 orgIds 里。 */
   #toStation(row, orgIds) {
     const body = this.#inspectBody(row);
     if (!body) return null;
-    return orgIds.includes(this.#receiver(row)) ? body : null;
+    return orgIds.includes(this.#receiver(row, body)) ? body : null;
   }
 
   /** 箱子是哪家公司送来的。上千家公司靠这个键汇总，不把箱子混成一张表。 */
@@ -273,12 +304,28 @@ export class OverviewController {
   }
 
   /**
-   * 集团页用：所有检测站的三个数一次算完。
-   * 任务、待检测箱链接、当日检测各查一遍，按签收方归到检测站，不按站逐遍扫任务。
+   * 累计口径（P13）：所有送检单（含已结束）按箱快照聚合——
+   * arrivedTotal 数 [待检测,已检测,退回中,已退回] 单的箱子；openedTotal 数 inspected_at 非空的箱子（任何状态）。
+   * 集团侧 #stationCounts 与单位侧 #station 共用，保证同口径。
+   */
+  async #cumulative() {
+    return this.db.all(
+      `SELECT t.id, t.kind, t.status, t.body, t.from_org_id, t.to_org_id,
+              COUNT(*) AS total, SUM(CASE WHEN m.inspected_at IS NOT NULL THEN 1 ELSE 0 END) AS opened
+         FROM sample_task_box m JOIN sample_task t ON t.id = m.task_id
+        WHERE t.body LIKE ? ${ESCAPE_SQL}
+        GROUP BY t.id, t.kind, t.status, t.body, t.from_org_id, t.to_org_id`,
+      [likePattern('"inspect":true')]
+    );
+  }
+
+  /**
+   * 集团页用：所有检测站的四数＋今日一次算完（P13）。
+   * 在途/未开箱查进行中单，累计到站/累计开箱查全部送检单快照，今日开箱查选定日——按签收方归到检测站。
    */
   async #stationCounts(units, day) {
-    const stations = units.filter((unit) => unit.type === "采样机构");
-    const out = new Map(stations.map((unit) => [unit.id, { moving: 0, arrived: 0, inspected: 0 }]));
+    const stations = units.filter((unit) => unit.type === "检测站");
+    const out = new Map(stations.map((unit) => [unit.id, countsZero()]));
     if (!stations.length) return out;
     const orgToUnit = new Map();
     for (const unit of stations) for (const id of unit.orgIds) orgToUnit.set(id, unit.id);
@@ -292,7 +339,7 @@ export class OverviewController {
     for (const row of active) {
       const body = this.#inspectBody(row);
       if (!body) continue;
-      const unitId = orgToUnit.get(this.#receiver(row));
+      const unitId = orgToUnit.get(this.#receiver(row, body));
       if (!unitId) continue;
       const counts = out.get(unitId);
       if ((INBOUND[row.kind] || []).includes(row.status))
@@ -309,8 +356,18 @@ export class OverviewController {
       const unitOf = new Map(part.map((item) => [item.id, item.unitId]));
       for (const link of links) {
         const unitId = unitOf.get(link.task_id);
-        if (unitId) out.get(unitId).arrived += Number(link.n) || 0;
+        if (unitId) out.get(unitId).unopenedNow += Number(link.n) || 0;
       }
+    }
+    // 累计到站/累计开箱（含已结束单；legacy 送检/调拨映射期兼容）
+    for (const row of await this.#cumulative()) {
+      const body = this.#inspectBody(row);
+      if (!body) continue;
+      const unitId = orgToUnit.get(this.#receiver(row, body));
+      if (!unitId) continue;
+      const counts = out.get(unitId);
+      if (ARRIVED.includes(row.status)) counts.arrivedTotal += Number(row.total) || 0;
+      counts.openedTotal += Number(row.opened) || 0;
     }
     const { from, to } = dayRange(day);
     const doneRows = await this.db.all(
@@ -321,16 +378,19 @@ export class OverviewController {
       [from.toISOString(), to.toISOString()]
     );
     for (const row of doneRows) {
-      if (!this.#inspectBody(row)) continue;
-      const unitId = orgToUnit.get(this.#receiver(row));
-      if (unitId) out.get(unitId).inspected += Number(row.n) || 0;
+      const body = this.#inspectBody(row);
+      if (!body) continue;
+      const unitId = orgToUnit.get(this.#receiver(row, body));
+      if (unitId) out.get(unitId).todayOpened += Number(row.n) || 0;
     }
+    for (const [unitId, counts] of out) out.set(unitId, withAliases(counts));
     return out;
   }
 
   /**
-   * 单位页用：检测站的三个数，按来源公司汇总，三类明细各自分页。
+   * 单位页用：检测站的四数＋今日（P13），按来源公司汇总，三类明细各自分页。
    * 不选公司时给全部公司的第一页；选了公司只给那一家。总数随筛选口径，翻页不丢数据。
+   * 累计口径与集团侧 #stationCounts 共用 #cumulative，保证同数。
    */
   async #station(orgIds, day, withList, query = {}, perms = null) {
     const companyFilter = String(query.company || "");
@@ -351,7 +411,7 @@ export class OverviewController {
     const companyOf = (source) => {
       let row = companies.get(source.key);
       if (!row) {
-        row = { key: source.key, name: source.name, moving: 0, arrived: 0, inspected: 0 };
+        row = { key: source.key, name: source.name, ...countsZero() };
         companies.set(source.key, row);
       }
       return row;
@@ -403,7 +463,7 @@ export class OverviewController {
       for (const link of links) {
         const item = byTask.get(link.task_id);
         if (!item) continue;
-        companyOf(item.source).arrived += 1;
+        companyOf(item.source).unopenedNow += 1;
         const opens =
           link.opens_start == null
             ? null
@@ -425,6 +485,14 @@ export class OverviewController {
         });
       }
     }
+    // 累计到站/累计开箱（含已结束单；legacy 送检/调拨映射期兼容），按来源公司归
+    for (const row of await this.#cumulative()) {
+      const body = this.#toStation(row, orgIds);
+      if (!body) continue;
+      const counts = companyOf(this.#source(row, body));
+      if (ARRIVED.includes(row.status)) counts.arrivedTotal += Number(row.total) || 0;
+      counts.openedTotal += Number(row.opened) || 0;
+    }
     const { from, to } = dayRange(day);
     const doneRows = await this.db.all(
       `SELECT m.box_id, m.inspected_at, m.inspected_by, m.opens_start, m.opens_end, b.name, t.id AS task_id, t.kind, t.body, t.from_org_id, t.to_org_id
@@ -437,7 +505,7 @@ export class OverviewController {
       const body = this.#toStation(row, orgIds);
       if (!body) continue;
       const source = this.#source(row, body);
-      companyOf(source).inspected += 1;
+      companyOf(source).todayOpened += 1;
       const opens =
         row.opens_start == null
           ? null
@@ -456,25 +524,41 @@ export class OverviewController {
       });
     }
     const companyList = [...companies.values()]
-      .filter((item) => item.moving || item.arrived || item.inspected)
+      .filter(
+        (item) =>
+          item.moving ||
+          item.arrivedTotal ||
+          item.openedTotal ||
+          item.unopenedNow ||
+          item.todayOpened
+      )
       .sort(
         (a, b) =>
-          b.moving + b.arrived + b.inspected - (a.moving + a.arrived + a.inspected) ||
+          b.moving + b.arrivedTotal + b.openedTotal - (a.moving + a.arrivedTotal + a.openedTotal) ||
           a.name.localeCompare(b.name, "zh")
       );
-    // 管线的三个数以前不分来源公司：选中一家时下面的三个列表只给那一家，管线还是全站的，
-    // 同屏两个口径并排（L-P0-3）。现在 counts 跟着 company 筛选走：没选是全站，选了只算那一家，
-    // 和 StationBoard 页签徽章用的是同一份数（moving 按台、arrived/inspected 按台）。
-    const scoped = companyFilter
-      ? companies.get(companyFilter) || { moving: 0, arrived: 0, inspected: 0 }
-      : null;
-    const counts = scoped
-      ? { moving: scoped.moving, arrived: scoped.arrived, inspected: scoped.inspected }
-      : {
-          moving: companyList.reduce((n, item) => n + item.moving, 0),
-          arrived: companyList.reduce((n, item) => n + item.arrived, 0),
-          inspected: companyList.reduce((n, item) => n + item.inspected, 0),
-        };
+    // counts 跟着 company 筛选走：没选是全站，选了只算那一家，
+    // 和 StationBoard 页签徽章用的是同一份数（moving 按台、其余按台）。
+    const scoped = companyFilter ? companies.get(companyFilter) || countsZero() : null;
+    const totals = scoped
+      ? {
+          moving: scoped.moving,
+          arrivedTotal: scoped.arrivedTotal,
+          openedTotal: scoped.openedTotal,
+          unopenedNow: scoped.unopenedNow,
+          todayOpened: scoped.todayOpened,
+        }
+      : companyList.reduce(
+          (sum, item) => ({
+            moving: sum.moving + item.moving,
+            arrivedTotal: sum.arrivedTotal + item.arrivedTotal,
+            openedTotal: sum.openedTotal + item.openedTotal,
+            unopenedNow: sum.unopenedNow + item.unopenedNow,
+            todayOpened: sum.todayOpened + item.todayOpened,
+          }),
+          countsZero()
+        );
+    const counts = withAliases(totals);
     if (!withList) return counts;
     // 来源公司也可能上千：搜索 + 分页只传一页
     const companyQ = String(query.companyQ || "")
@@ -484,10 +568,9 @@ export class OverviewController {
       ? companyList.filter((item) => item.name.toLowerCase().includes(companyQ))
       : companyList;
     const companyPage = pageNum(query.companyPage);
-    const companiesOut = matchedCompanies.slice(
-      (companyPage - 1) * COMPANY_PAGE_SIZE,
-      companyPage * COMPANY_PAGE_SIZE
-    );
+    const companiesOut = matchedCompanies
+      .slice((companyPage - 1) * COMPANY_PAGE_SIZE, companyPage * COMPANY_PAGE_SIZE)
+      .map(withAliases);
     const boxes = {
       pageSize: BOX_PAGE_SIZE,
       waiting: seen.waiting,
@@ -513,6 +596,9 @@ export class OverviewController {
   /**
    * 和单位有关的任务（寄出、接收或采样单位在单位子树里），算出每张单从哪天到哪天：
    * 创建那天开始，结束的到最后一条结束流转为止，没结束的到今天。
+   * to 口径与工作台 brief 同源（ReportPolicyController）：调拨/合并采样单＝接收方 toOrg
+   * （合并单固定唯一检测站；B4a 修 B3 遗留①——旧写法取 body.org 致合并单 from→to 显示重复名），
+   * 旧采样/旧送检＝采样单位 org（只读兼容）。
    */
   async #tasks(orgIds, monthStart, monthEnd) {
     if (!orgIds.length) return [];
@@ -561,7 +647,13 @@ export class OverviewController {
           createdAt: row.created_at,
           endedAt: end ? end.toISOString() : "",
           from: body.fromOrg || "",
-          to: row.kind === "调拨" ? body.toOrg || "" : body.org || "",
+          // 合并采样单与调拨同口径：接收方（检测站/调入单位）；旧采样/送检仍取采样单位（只读兼容）
+          to:
+            row.kind === "调拨" ||
+            (row.kind === "采样" &&
+              !isLegacySample({ ...body, kind: row.kind, status: row.status }))
+              ? body.toOrg || ""
+              : body.org || "",
           boxes: (body.boxIds || []).length,
           inspect: Boolean(body.inspect),
         },
@@ -602,9 +694,7 @@ export class OverviewController {
     for (const unit of units) {
       const stats = await roll(unit.orgIds);
       const station =
-        unit.type === "采样机构"
-          ? stationCounts.get(unit.id) || { moving: 0, arrived: 0, inspected: 0 }
-          : null;
+        unit.type === "检测站" ? stationCounts.get(unit.id) || withAliases(countsZero()) : null;
       list.push({
         id: unit.id,
         name: unit.name,
@@ -619,13 +709,17 @@ export class OverviewController {
     const total = all.length ? await roll(all) : null;
     const stationUnits = list.filter((unit) => unit.station);
     const stationTotal = stationUnits.length
-      ? stationUnits.reduce(
-          (sum, unit) => ({
-            moving: sum.moving + unit.station.moving,
-            arrived: sum.arrived + unit.station.arrived,
-            inspected: sum.inspected + unit.station.inspected,
-          }),
-          { moving: 0, arrived: 0, inspected: 0 }
+      ? withAliases(
+          stationUnits.reduce(
+            (sum, unit) => ({
+              moving: sum.moving + unit.station.moving,
+              arrivedTotal: sum.arrivedTotal + unit.station.arrivedTotal,
+              openedTotal: sum.openedTotal + unit.station.openedTotal,
+              unopenedNow: sum.unopenedNow + unit.station.unopenedNow,
+              todayOpened: sum.todayOpened + unit.station.todayOpened,
+            }),
+            countsZero()
+          )
         )
       : null;
     const byBoxes = (a, b) =>
@@ -722,7 +816,7 @@ export class OverviewController {
       viewAs: sim ? sim.viewAs : null,
       stats: await this.#stats(unit.orgIds),
       station:
-        unit.type === "采样机构"
+        unit.type === "检测站"
           ? await this.#station(
               unit.orgIds,
               day,

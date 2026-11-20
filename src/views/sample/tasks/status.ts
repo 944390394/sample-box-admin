@@ -9,6 +9,7 @@ import {
   ENDED_OK,
   ENDED_VOID,
   isEnded,
+  isLegacySample,
   stepsOf as flowStepsOf,
 } from "../../../../shared/taskFlow.js";
 
@@ -34,16 +35,23 @@ export function stepsOf(task: object): string[] {
 /** 已经结束、不用再刷新的单子。 */
 export { isEnded };
 
+/** 旧采样单（带 trip 或停旧态）只读兼容；新建合并单恒为 false。详情页区分合并流/旧流用。 */
+export { isLegacySample };
+
 /** 结束的单子页头配色：按流程走完是 done，中途作废是 error。 */
 export function endedTone(status?: string) {
   return ENDED_OK.includes(String(status || "")) ? "done" : "error";
 }
 
-/** 采样单的寄送方式，建单页和详情页的说明共用。 */
+/** 旧采样单的寄送方式（组织简化后作废），仅历史单详情说明用；新建合并单不写 trip。 */
 export const TRIP_TEXT: Record<string, string> = {
   单向: "寄出单位把箱子寄到采样单位，采样封箱后任务完成，箱子留在采样单位。",
   双向: "寄出单位把箱子寄到采样单位，采样封箱后寄回寄出单位，核验签收后完成。",
 };
+
+/** 合并采样单（P6）主路径说明：分公司自采→封箱→直寄唯一检测站→签收→逐台检测。 */
+export const MERGED_FLOW_TEXT =
+  "分公司自采：待采样 → 采样中 → 已封箱 → 在途 → 待签收 → 待检测 → 已检测。封箱后直寄唯一检测站，签收后逐台扫码开始检测；待检测/已检测可退回原寄出分公司。";
 
 /** 推进按钮上的文字，和服务端流转记录的动作名一致。 */
 export const TASK_ACTIONS: Record<string, string> = {
@@ -56,7 +64,8 @@ export const TASK_ACTIONS: Record<string, string> = {
   已取消: "取消任务",
   采样中: "开始采样",
   已封箱: "封箱",
-  在途: "寄回",
+  // 合并单：封箱后寄往唯一检测站（旧采样单此处为寄回，文案统一为确认寄出）
+  在途: "确认寄出",
   待核验: "到达核验点",
   // 带寄送的采样单：箱子寄到采样单位
   待采样: "确认到达",
@@ -65,14 +74,16 @@ export const TASK_ACTIONS: Record<string, string> = {
   // 送检测站的单：签收后待检测，检测站逐台扫码开始检测，也可以整张单一起
   待检测: "签收",
   已检测: "全部开始检测",
-  // 调拨单拒收时选退回：返程，寄出方收到后接收
+  // 返程：待检测/已检测（合并单）或待签收（旧调拨/送检）发起「拒收并退回」；
+  // 退回中态由寄出方确认箱子已寄回，按钮叫「确认退回」（服务端流转记录仍记「接收退回」）
   退回中: "拒收并退回",
-  已退回: "接收退回",
+  已退回: "确认退回",
 };
 
 /** 推进后要写原因的动作。 */
 export const NEEDS_REASON: Record<string, string> = {
   已拒收: "拒收原因",
-  退回中: "拒收原因",
+  // 服务端对退回中同样强制要原因（「请填写退回原因」）；合并单从待检测/已检测直接发起退回
+  退回中: "退回原因，如样品不合格、开箱超限",
   强制签收: "强制签收的原因，如签收人不在、开箱次数不对但样品完好",
 };

@@ -53,6 +53,8 @@ test("策略持久化，任务终结恢复最新底层；重复启动和重叠�
     const id = await service.createTask({
       name: "test",
       kind: "采样",
+      // 合并单 body 恒 inspect=true（控制器建单写入；M2 后读兼容判别按 inspect）
+      inspect: true,
       boxIds: [box.id],
       policy: p(30),
       overrides: { [box.id]: p(5) },
@@ -82,8 +84,9 @@ test("策略持久化，任务终结恢复最新底层；重复启动和重叠�
     await service.save([box.id], "single", p(20));
     await service.transition(id, "已封箱");
     await service.transition(id, "在途");
-    await service.transition(id, "待核验");
-    await service.transition(id, "已签收");
+    await service.transition(id, "待签收");
+    await service.transition(id, "待检测");
+    await service.transition(id, "已检测");
     if (before === "未使用") assert.equal(await lifeOf(box.id), "未使用");
     service = new ReportPolicy(db);
     assert.equal((await service.get(box)).effective.reportPeriodSec, 20);

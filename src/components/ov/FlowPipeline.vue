@@ -2,6 +2,7 @@
   <div class="flow" role="tablist" aria-label="检测流转">
     <template v-for="(step, i) in steps" :key="step.key">
       <button
+        v-if="step.clickable !== false"
         type="button"
         role="tab"
         class="flow-step"
@@ -12,6 +13,10 @@
         <span class="flow-value">{{ step.value.toLocaleString() }}</span>
         <span class="flow-label">{{ step.label }}</span>
       </button>
+      <div v-else class="flow-step static" :class="`tone-${step.tone || 'default'}`">
+        <span class="flow-value">{{ step.value.toLocaleString() }}</span>
+        <span class="flow-label">{{ step.label }}</span>
+      </div>
       <span v-if="i < steps.length - 1" class="flow-arrow" aria-hidden="true">→</span>
     </template>
   </div>
@@ -53,6 +58,9 @@ const emit = defineEmits<{ stepClick: [key: string] }>();
 .flow-step.active {
   border-color: var(--el-color-primary);
   box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+}
+.flow-step.static {
+  cursor: default;
 }
 .flow-value {
   font-size: 22px;

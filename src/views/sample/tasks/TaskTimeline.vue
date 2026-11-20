@@ -155,7 +155,9 @@ const items = computed<Item[]>(() => {
     by: log.by,
     note: log.note,
     icon: log.action === "创建" ? Box : Promotion,
-    extra: log.detail
+    // review-org M3：签收交接的 detail 只有 handOver、没有 target（检测站无收货坐标时每张合并单必现），
+    // 不判空会让整个 items computed 抛 TypeError、动态 feed 空白。与 mp taskTimeline 同口径 guard。
+    extra: log.detail?.target
       ? `当时距${log.detail.target.role}：${log.detail.boxes.map((b) => `${nameOf(b.id)} ${formatDistance(b.distanceM)}${b.source ? `（${b.source}）` : ""}`).join("，")}`
       : "",
   }));

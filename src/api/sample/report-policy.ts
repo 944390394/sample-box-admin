@@ -64,7 +64,7 @@ export interface PolicyTask {
   orgId?: string;
   org?: string;
   placeAt?: Place | null;
-  /** 采样单的寄送方式：单向寄到采样单位、双向采样后寄回；旧单没有，箱子已在采样单位。 */
+  /** 旧采样单的寄送方式（组织简化后作废）：只读兼容历史单，新建不写。 */
   trip?: "单向" | "双向";
   /** 这张单的流程步骤，服务端按类型和寄送方式给出。 */
   steps?: string[];
@@ -78,7 +78,7 @@ export interface PolicyTask {
   openOver?: number;
   /** 正在前往某地的任务：几台已到附近。 */
   arrival?: { role: string; near: number; total: number };
-  /** 采样任务：采样机构开箱时请求视频平台录像。 */
+  /** 采样任务：分公司采样现场开箱时请求视频平台录像（检测站不设录像）。 */
   recordVideo?: boolean;
   /** 列表用：我现在能把它推进到哪些状态。 */
   actions?: string[];
@@ -87,15 +87,29 @@ export interface TaskOrg {
   id: string;
   parentId: string;
   name: string;
-  type?: "公司" | "采样机构";
+  /** 组织简化（B1b）：类型只有 公司 / 检测站；分公司（公司类型）自采，检测站全局唯一。 */
+  type?: "公司" | "检测站";
   path: string;
   inScope: boolean;
+  location: OrgLocation | null;
+  leader: { id: string; name: string } | null;
+}
+/** 唯一检测站（taskOptions.station）：合并采样单接收方固定为它，只读带出名称/地址/默认签收人。 */
+export interface TaskStation {
+  id: string;
+  name: string;
+  type: string;
+  path: string;
   location: OrgLocation | null;
   leader: { id: string; name: string } | null;
 }
 export interface TaskOptions {
   orgs: TaskOrg[];
   users: { id: string; name: string; dept: string }[];
+  /** 生效的唯一检测站（配置优先，未配置时 DB 恰一个自动认定）；解析不到为 null。 */
+  station: TaskStation | null;
+  /** 生效的检测站部门编号（自动认定时≠配置空串）；未配置且无候选为空串。 */
+  stationDeptId: string;
   myOrgId: string;
   arriveRadiusM: number;
   /** 系统默认上报周期（创建任务时「本任务统一」的初始值），来自服务端设置，不在前端写死。 */
@@ -192,7 +206,7 @@ export interface TaskEvent {
 }
 /** 开箱视频，预留：接入前服务端恒返回空数组。 */
 /**
- * 开箱录像：采样机构在采样单位开箱一次一条。
+ * 开箱录像：分公司采样现场每开一次箱一条（检测站不设录像）。
  * status：待请求 / 已请求 / 录制中 / 已完成 / 失败 / 平台未接入。有 url 时可以播放。
  */
 export interface TaskVideo {

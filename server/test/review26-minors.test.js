@@ -2,8 +2,8 @@
  * #26 review-26 minor 修复的行为断言（m-01/m-03/m-06/m-07）：
  * - m-01：isAdmin fail-closed——ctx 缺 access 不再恒真当管理员（直调 handler 也被拒）；
  * - m-03：deleteDepts 同步清 sys_role_dept，自定义范围不留悬空部门引用；
- * - m-06：menuPreviewFor 镜像前端 local-menus 注入——开关开 + device:box:task 时预览含调拨/送检，
- *   预览可见项 = 真实侧栏（menusFor + local 注入）；开关关时不列；
+ * - m-06：menuPreviewFor 镜像前端 local-menus 注入——开关开 + device:box:task 时预览含调拨单
+ *   （组织简化 B4a/P9：送检单退役不镜像），预览可见项 = 真实侧栏（menusFor + local 注入）；开关关时不列；
  * - m-07：saveDeptLimit 成功审计写 detail（limited/maxScope 前后 + perms diff），无变化不写空明细。
  * 一次性临时库（mkdtemp），不碰开发库/线上库，不占任何服务端口。
  */
@@ -215,7 +215,9 @@ const visibleTitles = (menus) => menus.filter((m) => m.on && !m.hidden).map((m) 
 /**
  * 真实侧栏 = menusFor 裁剪 + local-menus 注入。
  * 镜像 src/router/local-menus.ts：gate = enableTransferInspect && device:box:task，
- * 调拨单/送检单两组插在「任务单」组之后（mergeLocalMenus），隐藏详情不进侧栏。
+ * 调拨单组插在「任务单」组之后（mergeLocalMenus），隐藏详情不进侧栏。
+ * 组织简化（B4a/P9）：送检单独立页退役——local-menus 不再注入送检单组，
+ * 旧链接 /sample/inspections 只是隐藏重定向（不是侧栏项），预览也不列。
  */
 function expectedSidebar(perms, enabled) {
   const out = [];
@@ -225,7 +227,7 @@ function expectedSidebar(perms, enabled) {
         out.push(
           c.meta.title === g.meta.title ? c.meta.title : `${g.meta.title} · ${c.meta.title}`
         );
-    if (g.path === "/task" && enabled && perms.has("device:box:task")) out.push("调拨单", "送检单");
+    if (g.path === "/task" && enabled && perms.has("device:box:task")) out.push("调拨单");
   }
   return out;
 }
@@ -240,7 +242,7 @@ const setFlag = (enabled) =>
     },
   });
 
-test("m-06 菜单预览镜像 local-menus：开关开+task 权限含调拨/送检，预览=真实侧栏；关时不列", async () => {
+test("m-06 菜单预览镜像 local-menus：开关开+task 权限含调拨单（送检单退役不列），预览=真实侧栏；关时不列", async () => {
   const env = await fresh();
   const { db } = env;
   try {
@@ -258,7 +260,8 @@ test("m-06 菜单预览镜像 local-menus：开关开+task 权限含调拨/送�
     assert.ok(!off.data.menus.some((m) => m.title.includes("调拨") || m.title.includes("送检")));
     assert.deepEqual(visibleTitles(off.data.menus), expectedSidebar(perms, false));
 
-    // 开关开 + device:box:task：三项列入（详情隐藏但可达），位置在任务单组之后
+    // 开关开 + device:box:task：调拨单组两项列入（详情隐藏但可达），位置在任务单组之后；
+    // 送检单组已退役（P9）：预览任何开关状态下都不再出现「送检单」侧栏项
     setFlag(true);
     const on = await call(org.roleMenuPreview, { ...admin, params: { id: "80" } });
     assert.equal(on.ok, true, on.error);
@@ -269,10 +272,10 @@ test("m-06 菜单预览镜像 local-menus：开关开+task 权限含调拨/送�
       on: true,
       hidden: true,
     });
-    assert.deepEqual(byTitle.get("送检单"), { title: "送检单", on: true, hidden: false });
+    assert.ok(!on.data.menus.some((m) => m.title.includes("送检")), "送检单退役，预览不镜像");
     const titles = on.data.menus.map((m) => m.title);
     assert.ok(titles.indexOf("调拨单") > titles.indexOf("任务单"));
-    assert.ok(titles.indexOf("送检单") < titles.indexOf("采样箱"));
+    assert.ok(titles.indexOf("调拨单") < titles.indexOf("采样箱"));
     // 预览可见项 = 真实侧栏（menusFor + local 注入，同 gate 同顺序）
     assert.deepEqual(visibleTitles(on.data.menus), expectedSidebar(perms, true));
     // 草稿预览同一实现
@@ -287,7 +290,7 @@ test("m-06 菜单预览镜像 local-menus：开关开+task 权限含调拨/送�
     });
     assert.equal(noTask.ok, true, noTask.error);
     assert.equal(noTask.data.menus.find((m) => m.title === "调拨单").on, false);
-    assert.equal(noTask.data.menus.find((m) => m.title === "送检单").on, false);
+    assert.equal(noTask.data.menus.find((m) => m.title === "调拨单 · 划拨单详情").on, false);
     assert.deepEqual(
       visibleTitles(noTask.data.menus),
       expectedSidebar(new Set(["device:box:list"]), true)

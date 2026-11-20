@@ -35,7 +35,12 @@ import { readDeployedCommit, readServingCertExpiry } from "./src/runtimeInfo.js"
 import { mergeDatabaseSettings, publicDatabase, scrub } from "./src/settings/databaseConfig.js";
 import { tcpPassthroughSettings } from "./src/tcpSettings.js";
 import { mergeMapSettings, publicMap } from "./src/settings/mapConfig.js";
-import { applyBoxSettings, mergeBoxSettings, publicBox } from "./src/settings/boxConfig.js";
+import {
+  applyBoxSettings,
+  assertStationSavable,
+  mergeBoxSettings,
+  publicBox,
+} from "./src/settings/boxConfig.js";
 import { mergeLabels, publicLabels } from "./src/settings/labelConfig.js";
 import { searchPlaces } from "./src/geo/placeSearch.js";
 import {
@@ -1488,6 +1493,16 @@ async function saveBox(ctx) {
     !perms?.has("device:box:policyDefault")
   )
     return ctx.fail("没有修改划拨/送检功能开关的权限");
+  // 唯一检测站（组织简化 B1b/P5）：改配置同样沿用箱子设置写权限；
+  // 配置时校验存在/启用/类型检测站/属总公司子树/全局唯一（友好报错），清空不校验。
+  if (String(before.stationDeptId ?? "") !== String(after.stationDeptId ?? "")) {
+    if (!perms?.has("device:box:policyDefault")) return ctx.fail("没有修改唯一检测站配置的权限");
+    try {
+      await assertStationSavable(state.db, after.stationDeptId);
+    } catch (error) {
+      return ctx.fail(error instanceof Error ? error.message : "唯一检测站配置不正确");
+    }
+  }
   state.config = next;
   writeFileSync(configPath, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
   chmodSync(configPath, 0o600);

@@ -27,8 +27,9 @@ import {
   SECURITY_DEFAULTS,
 } from "./src/settings/securityConfig.js";
 
-/* 采样机构就是检测站：送到这里的任务签收后要逐台扫码「开始检测」，总览里单列。 */
-const DEPT_TYPES = ["公司", "采样机构"];
+/* 组织简化（B1b）：部门类型只有 公司/检测站。分公司＝公司类型（自采）；
+   检测站全局唯一且必须属总公司子树，送到这里的任务签收后要逐台扫码「开始检测」，总览里单列。 */
+const DEPT_TYPES = ["公司", "检测站"];
 const policyOf = (ctx) => ctx.security || SECURITY_DEFAULTS;
 // #26 m-01：fail-closed——access 缺失一律按非管理员处理（旧写法 !ctx.access 恒真兜底是 fail-open 残留）。
 // HTTP 路径全部 auth:true 且 dispatcher 先 requireAccess 再进 handler，正常请求必带 access；
@@ -210,7 +211,8 @@ async function guardUser(ctx, id) {
 }
 import { readCoords, readDeptLocation } from "./src/geo/place.js";
 import { randomBytes } from "node:crypto";
-import { readCameras, validateCameras } from "./src/settings/deptCameras.js";
+import { camerasAllowed, readCameras, validateCameras } from "./src/settings/deptCameras.js";
+import { isUnderHq, otherStation } from "./src/settings/boxConfig.js";
 import { badRequest, conflict } from "./src/domain/AppError.js";
 
 async function record(ctx, action, targetType, targetId, result, detail) {
@@ -379,6 +381,21 @@ async function checkDeptFields(ctx, body, current, { place, leader, cameras }) {
       }
     }
   }
+  return "";
+}
+
+/**
+ * 组织简化（B1b）：类型＝检测站时校验全局唯一＋属总公司子树。
+ * selfId 新建时为空；parentId 是（新）上级部门——新建看上级链、编辑看改挂后的链。
+ * 返回失败原因或空串。
+ */
+async function checkStationType(ctx, type, parentId, selfId = "") {
+  if (type !== "检测站") return "";
+  const rows = await ctx.db.all("SELECT id, parent_id, sort, status, type FROM sys_dept");
+  if (!isUnderHq(rows, selfId, parentId))
+    return "检测站必须属总公司子树：请挂在总公司（或其下级部门）下面";
+  const other = await otherStation(ctx.db, selfId);
+  if (other) return `检测站全局唯一：「${other.name}」已是检测站，请先把它改回公司再设置本部门`;
   return "";
 }
 
@@ -663,6 +680,17 @@ export async function createDept(ctx) {
     await record(ctx, "新增部门", "dept", "", "失败");
     return denyPerm(ctx, denied);
   }
+  // 组织简化（B1b）：检测站全局唯一＋属总公司子树；检测站禁配监控通道（摄像头在分公司采样现场）
+  const type = DEPT_TYPES.includes(body.type) ? body.type : "公司";
+  const stationWhy = await checkStationType(ctx, type, parentId);
+  if (stationWhy) {
+    await record(ctx, "新增部门", "dept", "", "失败");
+    return ctx.fail(stationWhy);
+  }
+  if (!camerasAllowed(type) && cameras.length) {
+    await record(ctx, "新增部门", "dept", "", "失败");
+    return ctx.fail("检测站不设监控通道：摄像头请配在分公司（公司类型）采样现场");
+  }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   // 部门、负责人账号、负责人关系一起成功或一起失败
   const { id, leaderId } = await inTransaction(ctx.db, async (db) => {
@@ -735,6 +763,21 @@ export async function updateDept(ctx) {
   if (denied) {
     await record(ctx, "修改部门", "dept", current.id, "失败");
     return denyPerm(ctx, denied);
+  }
+  // 组织简化（B1b）：改类型为检测站同样过唯一＋总公司子树校验；
+  // 摄像头 gate 反转——检测站禁配、公司可配：改成检测站时清理已有通道（显式带通道则拒绝）。
+  const type = DEPT_TYPES.includes(body.type) ? body.type : current.type || "公司";
+  const stationWhy = await checkStationType(ctx, type, parentId, current.id);
+  if (stationWhy) {
+    await record(ctx, "修改部门", "dept", current.id, "失败");
+    return ctx.fail(stationWhy);
+  }
+  if (!camerasAllowed(type)) {
+    if (cameras && cameras.length) {
+      await record(ctx, "修改部门", "dept", current.id, "失败");
+      return ctx.fail("检测站不设监控通道：摄像头请配在分公司（公司类型）采样现场");
+    }
+    cameras = [];
   }
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
   const leaderId = await inTransaction(ctx.db, async (db) => {

@@ -2,7 +2,7 @@
   <div class="page-container page-flow">
     <PageHeader
       title="任务单（采样）"
-      subtitle="采样机构带箱子去计划地点采样再寄回。送检测站/拒收退回见「送检单」，批量划拨见「调拨单」。"
+      subtitle="分公司自采，封箱后直寄唯一检测站，签收后逐台扫码开始检测；待检测/已检测可退回原寄出分公司。批量划拨见「调拨单」。"
     >
       <template #actions>
         <el-button
@@ -81,7 +81,7 @@
             <div class="name">
               <el-tag size="small" type="success" effect="plain">采样</el-tag>
               <b>{{ row.name }}</b>
-              <el-tooltip v-if="row.recordVideo" content="采样机构开箱时录像" placement="top">
+              <el-tooltip v-if="row.recordVideo" content="分公司采样现场开箱时录像" placement="top">
                 <el-icon class="video"><VideoCamera /></el-icon>
               </el-tooltip>
             </div>
@@ -202,11 +202,12 @@ const filtered = computed(() => Boolean(query.orgId || query.from || query.q || 
 const tabs = computed(() => [
   { key: "mine", label: "待我处理", count: counts.value.mine },
   { key: "进行中", label: "进行中", count: counts.value.进行中 },
-  { key: "待寄出", label: "待寄出", count: counts.value["待寄出"] ?? 0 },
-  { key: "运送中", label: "运送中", count: counts.value["运送中"] ?? 0 },
-  { key: "待签收", label: "待签收", count: counts.value["待签收"] ?? 0 },
   { key: "待采样", label: "待采样", count: counts.value["待采样"] ?? 0 },
   { key: "采样中", label: "采样中", count: counts.value["采样中"] ?? 0 },
+  { key: "已封箱", label: "已封箱", count: counts.value["已封箱"] ?? 0 },
+  { key: "在途", label: "在途", count: counts.value["在途"] ?? 0 },
+  { key: "待签收", label: "待签收", count: counts.value["待签收"] ?? 0 },
+  { key: "待检测", label: "待检测", count: counts.value["待检测"] ?? 0 },
   { key: "已结束", label: "已结束", count: counts.value.已结束 },
   { key: "全部", label: "全部", count: counts.value.全部 },
 ]);
@@ -221,7 +222,7 @@ async function load() {
       pageSize: query.pageSize,
       mine: query.mine === "1" ? "1" : undefined,
       status: query.mine === "1" || query.status === "全部" ? undefined : query.status || undefined,
-      // 任务单页只放采样（kind 固定）；送检/划拨各有独立页，不再混进来
+      // 任务单页只放合并采样单（kind 固定）；划拨有独立页，旧送检/调拨只读保留不混进来
       kind: "采样",
       orgId: query.orgId || undefined,
       from: query.from || undefined,

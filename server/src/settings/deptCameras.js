@@ -1,10 +1,15 @@
 import { badRequest } from "../domain/AppError.js";
 /**
- * 采样机构的监控通道（1–8 路）。现在还没有真正接视频平台，先把通道登记下来，
- * 任务详情按通道数排好宫格；以后接平台只需填直播地址或由 VideoPlatform.liveUrl 给出。
- * 存在 sys_dept.cameras（JSON 数组）。
+ * 分公司（公司类型）采样现场的监控通道（1–8 路，组织简化录音⑥）。检测站不设摄像头、禁配通道。
+ * 现在还没有真正接视频平台，先把通道登记下来，任务详情按通道数排好宫格；
+ * 以后接平台只需填直播地址或由 VideoPlatform.liveUrl 给出。存在 sys_dept.cameras（JSON 数组）。
  */
 export const CAMERA_MAX = 8;
+
+/** 通道 gate（组织简化 B1b）：公司可配（分公司采样现场），检测站禁配。 */
+export function camerasAllowed(type) {
+  return type !== "检测站";
+}
 
 const url = (value) => {
   const text = String(value || "").trim();

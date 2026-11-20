@@ -54,7 +54,8 @@ async function call(fn, ctx) {
 const SAMPLING = ["采样中", "已封箱", "在途"];
 
 test("流程：合并采样单签收后待检测、全部开始检测后已检测；旧调拨送检测站只读保留", () => {
-  assert.deepEqual(stepsOf({ kind: "采样" }), [
+  // 合并单 body 恒 inspect=true（M2 判别按 inspect）
+  assert.deepEqual(stepsOf({ kind: "采样", inspect: true }), [
     "待采样",
     "采样中",
     "已封箱",
@@ -63,10 +64,13 @@ test("流程：合并采样单签收后待检测、全部开始检测后已检�
     "待检测",
     "已检测",
   ]);
-  assert.deepEqual(nextOf({ kind: "采样" }, "待签收"), ["待检测", "已拒收"]);
-  assert.deepEqual(nextOf({ kind: "采样" }, "待检测"), ["已检测", "退回中"]);
-  assert.deepEqual(nextOf({ kind: "采样" }, "已检测"), ["退回中"]);
-  assert.deepEqual(stepsOf({ kind: "采样", status: "退回中" }).slice(-2), ["退回中", "已退回"]);
+  assert.deepEqual(nextOf({ kind: "采样", inspect: true }, "待签收"), ["待检测", "已拒收"]);
+  assert.deepEqual(nextOf({ kind: "采样", inspect: true }, "待检测"), ["已检测", "退回中"]);
+  assert.deepEqual(nextOf({ kind: "采样", inspect: true }, "已检测"), ["退回中"]);
+  assert.deepEqual(stepsOf({ kind: "采样", inspect: true, status: "退回中" }).slice(-2), [
+    "退回中",
+    "已退回",
+  ]);
   // 旧调拨送检测站（inspect）只读保留
   assert.deepEqual(stepsOf({ kind: "调拨", inspect: true }), [
     "待寄出",
@@ -85,11 +89,13 @@ test("流程：合并采样单签收后待检测、全部开始检测后已检�
   assert.deepEqual(nextOf({ kind: "调拨" }, "退回中"), ["已退回"]);
 });
 
-test("检测站：扫码签收后逐台开始检测，开箱次数定在签收那刻、箱子随即可用；总览按单位统计在途、待检测、已检测", async () => {
-  // 总览口径（OverviewController.#receiver/INBOUND）属 B1b 改动面，本批不动：
-  // 这里用只读保留的旧调拨单（policy 层直接建，模拟迁移前存量）验证检测站流程＋现有总览；
-  // 合并采样单的检测站全流程另见 task-merge-flow.test.js，合并单总览计入由 B1b 补。
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" } });
+test("检测站：扫码签收后逐台开始检测，开箱次数定在签收那刻、箱子随即可用；总览按单位统计四数＋今日", async () => {
+  // 组织简化 B1b：总览四数（P13）——moving 含 legacy 调拨/送检映射期兼容；
+  // 这里用只读保留的旧调拨单（policy 层直接建，模拟迁移前存量）验证检测站流程＋总览；
+  // 合并采样单的检测站全流程另见 task-merge-flow.test.js，四数口径专项另见 org-b1b.test.js。
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "station-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -101,7 +107,7 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
     await migrate(db);
     for (const [id, parent, name, type] of [
       ["1", "0", "总公司", "公司"],
-      ["6", "1", "总部检测站", "采样机构"],
+      ["6", "1", "总部检测站", "检测站"],
       ["2", "0", "华南分公司", "公司"],
       ["21", "2", "调度室", "公司"],
     ]) {
@@ -163,7 +169,15 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
     // 调拨不再新建（只读保留）
     const plain = await call(c.createTask.bind(c), {
       ...ctxOf(null),
-      body: { name: "旧调拨", kind: "调拨", boxIds: [a.id], fromOrgId: "1", toOrgId: "2", sender: "x", signer: "y" },
+      body: {
+        name: "旧调拨",
+        kind: "调拨",
+        boxIds: [a.id],
+        fromOrgId: "1",
+        toOrgId: "2",
+        sender: "x",
+        signer: "y",
+      },
     }).catch((e) => ({ error: e.message }));
     assert.match(String(plain.error || ""), /调拨单已停用/);
 
@@ -175,12 +189,17 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
       group.units.map((u) => [u.name, u.type]),
       [
         ["总公司", "公司"],
-        ["总部检测站", "采样机构"],
+        ["总部检测站", "检测站"],
         ["华南分公司", "公司"],
       ]
     );
+    // 旧调拨运送中：moving 计入（legacy 映射期兼容）；累计/今日都还是 0
     assert.deepEqual(group.units.find((u) => u.id === "6").station, {
       moving: 2,
+      arrivedTotal: 0,
+      openedTotal: 0,
+      unopenedNow: 0,
+      todayOpened: 0,
       arrived: 0,
       inspected: 0,
     });
@@ -208,8 +227,10 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
     await ingest.accept(packet({ uart: "why=pad,opens=2,seq=3" }));
 
     let unit = await call(o.unit.bind(o), { ...station, params: { orgId: "6" }, query: {} });
-    assert.equal(unit.unit.type, "采样机构");
-    assert.equal(unit.station.arrived, 2);
+    assert.equal(unit.unit.type, "检测站");
+    assert.equal(unit.station.unopenedNow, 2);
+    assert.equal(unit.station.arrived, 2, "旧字段别名＝当前未开箱");
+    assert.equal(unit.station.arrivedTotal, 2, "签收后累计已到站");
     assert.equal(unit.station.waiting.find((w) => w.boxId === a.id).opensDuring, 1);
     assert.equal(unit.tasks.length, 1);
     assert.ok(Object.values(unit.calendar).some((n) => n >= 1));
@@ -242,8 +263,12 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
     assert.equal(detail.boxes.find((x) => x.id === b.id).inspectedAt, "");
 
     unit = await call(o.unit.bind(o), { ...station, params: { orgId: "6" }, query: {} });
+    assert.equal(unit.station.unopenedNow, 1);
     assert.equal(unit.station.arrived, 1);
-    assert.equal(unit.station.inspected, 1);
+    assert.equal(unit.station.todayOpened, 1);
+    assert.equal(unit.station.inspected, 1, "旧字段别名＝今日已开箱");
+    assert.equal(unit.station.openedTotal, 1);
+    assert.equal(unit.station.arrivedTotal, 2);
     assert.equal(unit.station.done[0].inspectedBy, "检测员");
 
     // 最后一台开始检测：整张单变「已检测」，箱子都回到未使用
@@ -259,16 +284,31 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
     // 合并采样单可再建（箱子已释放）
     const again = await call(c.createTask.bind(c), {
       ...ctxOf(null),
-      body: { name: "下一单", kind: "采样", boxIds: [a.id, b.id], fromOrgId: "2", sender: "x", signer: "y" },
+      body: {
+        name: "下一单",
+        kind: "采样",
+        boxIds: [a.id, b.id],
+        fromOrgId: "2",
+        sender: "x",
+        signer: "y",
+      },
     });
     assert.ok(again.id);
     group = await call(o.group.bind(o), { ...ctxOf(null) });
+    // 全部已检测：累计到站/开箱 2，当前未开箱 0；再建的新单还在待采样（不计 moving）
     assert.deepEqual(group.units.find((u) => u.id === "6").station, {
       moving: 0,
+      arrivedTotal: 2,
+      openedTotal: 2,
+      unopenedNow: 0,
+      todayOpened: 2,
       arrived: 0,
       inspected: 2,
     });
-    const list = await call(c.tasks.bind(c), { ...station, query: { status: "已结束", allKinds: "1" } });
+    const list = await call(c.tasks.bind(c), {
+      ...station,
+      query: { status: "已结束", allKinds: "1" },
+    });
     assert.deepEqual(
       list.list.map((t) => t.status),
       ["已检测"]
@@ -281,7 +321,9 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
 });
 
 test("检测站整张单一起开始检测、拒收照旧结束", async () => {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" } });
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "station-all-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -292,8 +334,9 @@ test("检测站整张单一起开始检测、拒收照旧结束", async () => {
   try {
     await migrate(db);
     for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
       ["2", "0", "华南分公司", "公司"],
-      ["6", "0", "检测站", "采样机构"],
+      ["6", "1", "检测站", "检测站"],
     ]) {
       await db.run(
         "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
@@ -355,7 +398,9 @@ test("检测站整张单一起开始检测、拒收照旧结束", async () => {
 });
 
 test("开箱超限作废：强制签收后超限的箱子不能开始检测，其余检测完整张单结束、作废的箱子一起回到未使用", async () => {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" } });
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "station-void-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -366,8 +411,9 @@ test("开箱超限作废：强制签收后超限的箱子不能开始检测，�
   try {
     await migrate(db);
     for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
       ["2", "0", "华南分公司", "公司"],
-      ["6", "0", "检测站", "采样机构"],
+      ["6", "1", "检测站", "检测站"],
     ]) {
       await db.run(
         "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
@@ -482,7 +528,9 @@ test("开箱超限作废：强制签收后超限的箱子不能开始检测，�
 });
 
 test("签收核验：开箱超限、箱盖开着时不能直接签收，只能拒收或强制签收；待检测可退回原寄出分公司，寄出方只能接收", async () => {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" } });
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "receive-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -493,9 +541,10 @@ test("签收核验：开箱超限、箱盖开着时不能直接签收，只能�
   try {
     await migrate(db);
     for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
       ["2", "0", "华南分公司", "公司"],
       ["21", "2", "调度室", "公司"],
-      ["6", "0", "检测站", "采样机构"],
+      ["6", "1", "检测站", "检测站"],
     ]) {
       await db.run(
         "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
@@ -554,7 +603,11 @@ test("签收核验：开箱超限、箱盖开着时不能直接签收，只能�
       await call(c.transition.bind(c), { ...south, params: { id: ok.id }, body: { status } });
     let scan = await call(c.scan.bind(c), { ...station, params: { id: box.id } });
     assert.equal(scan.tasks[0].receive, "sign");
-    await call(c.transition.bind(c), { ...south, params: { id: ok.id }, body: { status: "待签收" } });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: ok.id },
+      body: { status: "待签收" },
+    });
     let view = await call(c.receive.bind(c), {
       ...station,
       params: { id: ok.id },
@@ -587,11 +640,27 @@ test("签收核验：开箱超限、箱盖开着时不能直接签收，只能�
       x.orgId = "2";
     });
     const bad = await call(c.createTask.bind(c), { ...south, body: { ...body, name: "异常" } });
-    await call(c.transition.bind(c), { ...south, params: { id: bad.id }, body: { status: "采样中" } });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: bad.id },
+      body: { status: "采样中" },
+    });
     await ingest.accept(packet({ uart: "why=pad,opens=3,lid=1,seq=2" }));
-    await call(c.transition.bind(c), { ...south, params: { id: bad.id }, body: { status: "已封箱" } });
-    await call(c.transition.bind(c), { ...south, params: { id: bad.id }, body: { status: "在途" } });
-    await call(c.transition.bind(c), { ...south, params: { id: bad.id }, body: { status: "待签收" } });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: bad.id },
+      body: { status: "已封箱" },
+    });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: bad.id },
+      body: { status: "在途" },
+    });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: bad.id },
+      body: { status: "待签收" },
+    });
     view = await call(c.receive.bind(c), {
       ...station,
       params: { id: bad.id },
@@ -687,11 +756,27 @@ test("签收核验：开箱超限、箱盖开着时不能直接签收，只能�
       ...south,
       body: { ...body, name: "强制", maxOpens: 0 },
     });
-    await call(c.transition.bind(c), { ...south, params: { id: forced.id }, body: { status: "采样中" } });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: forced.id },
+      body: { status: "采样中" },
+    });
     await ingest.accept(packet({ uart: "why=pad,opens=4,lid=1,seq=4" }));
-    await call(c.transition.bind(c), { ...south, params: { id: forced.id }, body: { status: "已封箱" } });
-    await call(c.transition.bind(c), { ...south, params: { id: forced.id }, body: { status: "在途" } });
-    await call(c.transition.bind(c), { ...south, params: { id: forced.id }, body: { status: "待签收" } });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: forced.id },
+      body: { status: "已封箱" },
+    });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: forced.id },
+      body: { status: "在途" },
+    });
+    await call(c.transition.bind(c), {
+      ...south,
+      params: { id: forced.id },
+      body: { status: "待签收" },
+    });
     await assert.rejects(
       call(c.transition.bind(c), {
         ...station,

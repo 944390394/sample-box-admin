@@ -7,17 +7,30 @@ export interface BoxStats {
   flags: Record<string, number>;
 }
 
-/** 检测站的三个数：在途来站的箱子、已到待检测、这一天已开始检测。 */
+/**
+ * 检测站四数＋今日（组织简化 P13，集团 stationTotal 与单位 station 同口径）：
+ * moving＝在途来站（合并单[在途,待签收]＋legacy 调拨/送检在途映射期兼容）；
+ * arrivedTotal＝累计已到站（单∈[待检测,已检测,退回中,已退回]的箱快照数，含已结束）；
+ * openedTotal＝累计已开箱（inspected_at 非空，跨日累计）；
+ * unopenedNow＝当前未开箱（待检测且 inspected_at 空）；
+ * todayOpened＝今日已开箱（选定日窗口；集团恒今天）。
+ */
 export interface StationCounts {
   moving: number;
-  arrived: number;
-  inspected: number;
+  arrivedTotal: number;
+  openedTotal: number;
+  unopenedNow: number;
+  todayOpened: number;
+  /** @deprecated 旧别名＝unopenedNow，服务端过渡期仍下发；前端已切新字段。 */
+  arrived?: number;
+  /** @deprecated 旧别名＝todayOpened，同上。 */
+  inspected?: number;
 }
 
 export interface OverviewUnit {
   id: string;
   name: string;
-  /** 公司 / 检测站 / 采样机构。顶级单位都列，检测站不管在哪一级都单独列。 */
+  /** 公司 / 检测站。顶级单位都列，检测站（全局唯一）不管在哪一级都单独列。 */
   type: string;
   path: string;
   /** 第一个顶级部门（总公司），没分配单位的箱子也算在它名下。 */
@@ -58,7 +71,7 @@ export interface ViewAs {
 export interface GroupOverview {
   day: string;
   total: BoxStats | null;
-  /** 范围内所有检测站的合计；没有检测站时为 null。 */
+  /** 唯一检测站的四数＋今日合计；没有检测站时为 null。 */
   stationTotal: StationCounts | null;
   branchTotal: number;
   stationCount: number;
@@ -85,12 +98,10 @@ export interface StationBoxes {
   inboundPage: number;
 }
 
-export interface StationCompany {
+/** 来源公司（分公司）的四数＋今日，口径与全站一致；company 筛选时只算那一家。 */
+export interface StationCompany extends StationCounts {
   key: string;
   name: string;
-  moving: number;
-  arrived: number;
-  inspected: number;
 }
 
 export interface InboundTask {

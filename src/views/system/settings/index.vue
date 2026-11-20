@@ -133,6 +133,27 @@
                 开启后启用「调拨单（批量划拨）」「送检单」两个独立页与建单入口；任务单页只放采样。关闭时新端点报未开通，旧流程不受影响。
               </div>
             </el-form-item>
+            <el-form-item label="唯一检测站">
+              <el-select
+                v-model="boxForm.stationDeptId"
+                :disabled="!can.box"
+                clearable
+                placeholder="未指定（总公司下恰一个启用检测站时自动认定）"
+              >
+                <el-option
+                  v-for="opt in stationOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <div class="form-extra">
+                合并采样单（任务单）的接收方固定为该检测站，建单页不再手选接收方。未指定时，总公司下恰有一个启用的检测站会自动认定；零个或多个时建单会提示先在这里指定。
+              </div>
+              <div v-if="!stationCandidates.length" class="form-extra">
+                还没有可选的检测站：先到部门管理把某部门类型改为检测站（须属总公司）。
+              </div>
+            </el-form-item>
             <el-form-item v-if="canSetPolicy">
               <el-button type="primary" :loading="savingBox" @click="saveBox">保存</el-button>
             </el-form-item>
@@ -340,8 +361,8 @@
 
           <h4 class="sub">视频平台（开箱录像）</h4>
           <p class="database-tip">
-            采样任务要求录像时，采样机构每次在计划地点开箱，服务器向这个地址发一条 JSON（事件
-            box.opened，带任务、箱子、开箱时间和位置）。平台确定前可以先不启用，录像记录会显示「平台未接入」。
+            采样任务要求录像时，分公司采样现场每次在计划地点开箱，服务器向这个地址发一条 JSON（事件
+            box.opened，带任务、箱子、开箱时间和位置）。检测站不设录像。平台确定前可以先不启用，录像记录会显示「平台未接入」。
           </p>
           <el-form label-width="140px">
             <el-form-item label="启用">
@@ -496,6 +517,7 @@ import SettingsAPI, {
   type VideoSettings,
   type WechatSettings,
 } from "@/api/system/settings";
+import DeptAPI, { type DeptItem } from "@/api/system/dept";
 import BrandingCard from "./BrandingCard.vue";
 import SettingsSection from "./SettingsSection.vue";
 import {
@@ -798,6 +820,32 @@ const boxForm = reactive({
   taskOfflineGraceMin: 60,
   /** 划拨/送检功能开关。 */
   enableTransferInspect: false,
+  /** 唯一检测站部门 id（组织简化 P5/review-org M1）：空串＝未配置，服务端自动认定。 */
+  stationDeptId: "",
+});
+/** 部门平铺（检测站候选用）：无部门读权限时静默降级为空，页面给灰字引导。 */
+const deptFlat = ref<DeptItem[]>([]);
+/** 候选＝type=检测站 且启用的部门（全局唯一，正常至多一个）。 */
+const stationCandidates = computed(() =>
+  deptFlat.value.filter((d) => d.type === "检测站" && Number(d.status) === 1)
+);
+/** 下拉选项：候选之外，已配置但失效的部门也列出来（标注原因），避免只显示裸 id。 */
+const stationOptions = computed(() => {
+  const opts = stationCandidates.value.map((d) => ({
+    value: String(d.id),
+    label: String(d.name || d.id),
+  }));
+  const configured = boxForm.stationDeptId;
+  if (configured && !opts.some((o) => o.value === configured)) {
+    const row = deptFlat.value.find((d) => String(d.id) === configured);
+    const suffix = !row
+      ? "（部门不存在，请重新指定）"
+      : Number(row.status) !== 1
+        ? "（已停用，请重新指定）"
+        : "（类型已不是检测站，请重新指定）";
+    opts.push({ value: configured, label: `${row?.name || configured}${suffix}` });
+  }
+  return opts;
 });
 const savingLabels = ref(false);
 const labelForm = reactive<Labels>(defaultLabelSet());
@@ -831,6 +879,22 @@ async function load() {
     boxForm.taskOfflineGraceMin =
       Number.isFinite(graceSec) && graceSec > 0 ? Math.round(graceSec / 60) : 60;
     boxForm.enableTransferInspect = Boolean(settings.value.box?.enableTransferInspect);
+    boxForm.stationDeptId = settings.value.box?.stationDeptId || "";
+    // 检测站候选（review-org M1）：读部门树平铺过滤；无部门读权限时静默降级，灰字引导去部门页改类型
+    try {
+      const tree = await DeptAPI.getList(undefined, { silent: true });
+      const flat: DeptItem[] = [];
+      const walk = (nodes: DeptItem[]) => {
+        for (const node of nodes || []) {
+          flat.push(node);
+          if (node.children?.length) walk(node.children);
+        }
+      };
+      walk(tree || []);
+      deptFlat.value = flat;
+    } catch {
+      deptFlat.value = [];
+    }
     if (settings.value.labels) {
       setLabels(settings.value.labels);
       fillLabels(settings.value.labels as Labels);
@@ -897,6 +961,8 @@ async function saveBox() {
       // 分钟 → 秒（服务端 taskOfflineGraceSec 校验 60–86400）
       taskOfflineGraceSec: Math.round(boxForm.taskOfflineGraceMin * 60),
       enableTransferInspect: boxForm.enableTransferInspect,
+      // 唯一检测站（P5/M1）：空串＝清空配置（服务端不校验清空，回退 DB 自动认定）
+      stationDeptId: boxForm.stationDeptId || "",
     });
     await load();
     // 让全站徽标/菜单立刻按新宽限与新开关走

@@ -20,6 +20,7 @@ import { UplinkParser } from "../src/domain/UplinkParser.js";
 import { MemoryStateCache } from "../src/cache/MemoryStateCache.js";
 import { ReportPolicy } from "../src/settings/ReportPolicy.js";
 import { ReportPolicyController } from "../src/http/ReportPolicyController.js";
+import { applyBoxSettings } from "../src/settings/boxConfig.js";
 import { unbindWechat } from "../org-api.js";
 import { resolveAccess } from "../src/auth/boxAccess.js";
 import { packet } from "./fixture.js";
@@ -439,17 +440,23 @@ test("扫箱码：本单位看状态、空闲时能建单；接收方只看到�
     policies = new ReportPolicy(db);
   try {
     await migrate(db);
-    for (const [id, name] of [
-      ["2", "华南分公司"],
-      ["3", "华东分公司"],
+    // 组织简化 B1a：合并采样单接收方固定唯一检测站（6，属总公司）；寄出方＝分公司（公司类型）。
+    applyBoxSettings({
+      box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+    });
+    for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
+      ["6", "1", "总部检测站", "检测站"],
+      ["2", "0", "华南分公司", "公司"],
+      ["3", "0", "华东分公司", "公司"],
     ]) {
       await db.run(
-        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES (?,?,?,?,1,1)",
-        [id, "0", name, `D${id}`]
+        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
+        [id, parent, name, `D${id}`, type]
       );
     }
     await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('30','e1','华东签收员','x','3',1)"
+      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES ('30','e1','检测站签收员','x','6',1)"
     );
     const ingest = new IngestService({
       boxes,
@@ -492,13 +499,13 @@ test("扫箱码：本单位看状态、空闲时能建单；接收方只看到�
       return out;
     };
     const south = ctxOf(["2"], ALL, { id: "9", nickname: "华南管理员" });
-    const signer = ctxOf(["3"], ["device:box:task", "task:sign"], {
+    const signer = ctxOf(["6"], ["device:box:task", "task:sign"], {
       id: "30",
-      nickname: "华东签收员",
+      nickname: "检测站签收员",
     });
-    const colleague = ctxOf(["3"], ["device:box:task", "task:sign"], {
+    const colleague = ctxOf(["6"], ["device:box:task", "task:sign"], {
       id: "31",
-      nickname: "华东值班员",
+      nickname: "检测站值班员",
     });
 
     // 本单位管理员：看得到状态，空闲箱子能建单；按名称也能扫到
@@ -515,13 +522,12 @@ test("扫箱码：本单位看状态、空闲时能建单；接收方只看到�
         .createTask({
           ...south,
           body: {
-            name: "寄华东",
-            kind: "调拨",
+            name: "华南自采送检",
+            kind: "采样",
             boxIds: [box.id],
             sender: "华南寄件人",
             signerId: "30",
             fromOrgId: "2",
-            toOrgId: "3",
           },
           ok: resolve,
         })
@@ -534,28 +540,37 @@ test("扫箱码：本单位看状态、空闲时能建单；接收方只看到�
         body: { status, note: status === "强制签收" ? "签收人不在" : "" },
         ok() {},
       });
-    await run(south, "运送中");
+    // 合并采样单采样段→寄出（在途）；箱子建单即占用
+    await run(south, "采样中");
+    await run(south, "已封箱");
+    await run(south, "在途");
     seen = await scan(south);
     assert.equal(seen.canCreate, false);
     assert.equal(seen.tasks[0].can["已取消"], true);
 
-    // 接收方扫到：只有名称，没有电量位置；能确认到达，到达后签收人签收、同事强制签收
+    // 检测站扫到：只有名称，没有电量位置；能确认到达，到达后签收人签收、同事强制签收
     seen = await scan(signer);
     assert.equal(seen.visible, false);
     assert.equal(seen.box.name, "BOX-009");
     assert.ok(!("battery" in seen.box));
     assert.equal(seen.tasks[0].can["待签收"], true);
     await run(signer, "待签收");
-    assert.equal((await scan(signer)).tasks[0].can["已签收"], true);
+    // 合并单签收落「待检测」（不是旧调拨的「已签收」终态）
+    assert.equal((await scan(signer)).tasks[0].can["待检测"], true);
     const peer = (await scan(colleague)).tasks[0].can;
-    assert.equal(peer["已签收"], false);
+    assert.equal(peer["待检测"], false);
     assert.equal(peer["强制签收"], true);
     await run(colleague, "强制签收");
+    // 强制签收后到「待检测」：签收人扫码能逐台开始检测，检测完整张单才结束
+    seen = await scan(signer);
+    assert.equal(seen.tasks[0].status, "待检测");
+    assert.equal(seen.tasks[0].can["开始检测"], true);
+    await c.inspect({ ...signer, params: { id: created.id, boxId: box.id }, ok() {} });
     seen = await scan(signer);
     assert.equal(seen.visible, false);
     assert.equal(seen.tasks[0].active, false);
     assert.deepEqual(seen.tasks[0].can, {});
-    // 签收后箱子归华东：签收人那边看得到箱子了（签收人没有箱子查看权限，所以仍只给名称），华南看不到了
+    // 签收后箱子归检测站：签收人没有箱子查看权限所以仍只给名称，华南（范围 2）看不到了
     await assert.rejects(
       scan(ctxOf(["2"], ["device:box:detail"], { id: "9" })),
       /不在你的管理范围/

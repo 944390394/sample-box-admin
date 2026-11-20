@@ -74,23 +74,28 @@ test("部门树/选项只含 manage 子树 + 祖先只读壳（D2），兄弟与
       ["21"]
     );
 
-    // 机构负责人（51，AGENCY_LEAD scope2）：5 是壳，51/511 可管，兄弟 52 不出现
+    // 组织简化（B1b）：机构层删除、AGENCY_LEAD 并入 BRANCH_ADMIN——
+    // 分公司管理员挂华东调度室 31（BRANCH_ADMIN scope2）：3 是只读壳，31 可管，兄弟分公司不出现
     await db.run(
-      "INSERT INTO sys_user (id, username, nickname, password_hash, dept_id, status) VALUES ('90', 'agency.lead', 'agency.lead', 'x', '51', 1)"
+      "INSERT INTO sys_user (id, username, nickname, password_hash, dept_id, status) VALUES ('90', 'branch.lead', 'branch.lead', 'x', '31', 1)"
     );
-    await db.run("INSERT INTO sys_user_role (user_id, role_id) VALUES ('90', '14')");
-    const lead = await ctxOf(db, "agency.lead");
+    await db.run("INSERT INTO sys_user_role (user_id, role_id) VALUES ('90', '12')");
+    const lead = await ctxOf(db, "branch.lead");
     const leadTree = (await call(org.listDepts, lead)).data;
-    assert.deepEqual(idsOf(leadTree), ["5"]);
+    assert.deepEqual(idsOf(leadTree), ["3"]);
     assert.equal(leadTree[0].readOnly, true);
-    assert.deepEqual(idsOf(leadTree[0].children), ["51"]);
-    assert.deepEqual(idsOf(leadTree[0].children[0].children), ["511"]);
+    assert.deepEqual(idsOf(leadTree[0].children), ["31"]);
 
     // 管理员全量；采样员（仅本人）没有部门范围
     const admin = await ctxOf(db, "admin");
     const full = (await call(org.listDepts, admin)).data;
-    assert.deepEqual(idsOf(full).sort(), ["1", "2", "3", "4", "5"]);
+    assert.deepEqual(idsOf(full).sort(), ["1", "2", "3", "4"]);
     assert.ok(!full.some((node) => node.readOnly));
+    // 默认种子：13 总部检测站 type=检测站（唯一），机构子树 5/51/52/511/521 不再种
+    const station = full.find((node) => node.id === "1").children.find((node) => node.id === "13");
+    assert.equal(station.name, "总部检测站");
+    assert.equal(station.type, "检测站");
+    assert.ok(!full.some((node) => node.id === "5"));
     const sampler = await ctxOf(db, "lin.xia");
     assert.deepEqual((await call(org.listDepts, sampler)).data, []);
     assert.deepEqual((await call(org.deptOptions, sampler)).data, []);
@@ -112,7 +117,7 @@ test("deptForm/deptLimit读：范围内与祖先壳可读，范围外 A0404/404�
     assert.equal(own.ok, true, own.error);
     assert.ok(!own.data.readOnly);
 
-    for (const id of ["3", "5", "51", "11"]) {
+    for (const id of ["3", "4", "11", "13"]) {
       const denied = await call(org.deptForm, { ...desk, params: { id } });
       assert.equal(denied.ok, false, `部门 ${id} 竟然可读`);
       assert.equal(denied.code, "A0404", `部门 ${id} 实际 ${denied.code}`);

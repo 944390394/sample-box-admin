@@ -194,6 +194,12 @@ async function handOverBoxes(tx, task, ids, signerFit = "none") {
   // 保管人会让自己数据范围里的账号看到这些箱子，等于给外来账号开了一条读取通道。
   const custodian = task.signerId && signerFit !== "foreign" ? String(task.signerId) : "";
   const owner = custodian ? String(task.signer ?? "") : "—";
+  // 归属绑参兜底（review-org M2）：异常旧单可能 inspect=true 却缺 toOrgId/toOrg（损坏 body/极旧数据），
+  // undefined 绑参会被 node:sqlite/mysql2 拒绝→整个事务回滚 500、单子卡死。
+  // 依次取 显式接收方→原寄出单位（旧双向寄回语义）→采样单位快照，名称再兜底部门表现名；绝不绑 undefined。
+  const toOrgId =
+    String(task.toOrgId ?? "") || String(task.fromOrgId ?? "") || String(task.orgId ?? "");
+  const toOrg = task.toOrg || task.fromOrg || task.org || nameOf.get(toOrgId) || "";
   // 与 createTransfer/revokeTransfer 同一加锁顺序（排序后逐台 FOR UPDATE），避免交叉死锁
   for (const boxId of [...ids].sort()) {
     const box = await tx.get(
@@ -212,8 +218,8 @@ async function handOverBoxes(tx, task, ids, signerFit = "none") {
       continue;
     }
     await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id=?, owner=? WHERE id=?", [
-      String(task.toOrgId),
-      task.toOrg,
+      toOrgId,
+      toOrg,
       custodian,
       owner,
       boxId,
@@ -284,7 +290,8 @@ async function returnHandOverBoxes(tx, task, ids) {
     }
     await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id=?, owner=? WHERE id=?", [
       fromId,
-      task.fromOrg,
+      // 名称兜底（M2 同口径）：旧单可能只有 fromOrgId 没有 fromOrg 名，绝不绑 undefined
+      task.fromOrg || nameOf.get(fromId) || "",
       custodian,
       owner,
       boxId,
@@ -612,6 +619,7 @@ export class ReportPolicy {
    * 不改 life、不下发任务策略——划拨两态 ∈ ENDED，不是任务、不占用箱子。
    * clientToken 幂等（051 transfer_request）：重复提交返回原 task_id，不重复转移。
    * actor 可带 scope（控制器传 ctx.access.scope）：目标公司必须在操作人范围内，口径同单箱 assign。
+   * P8（组织简化 B1c）：目标部门 type 必须=公司——检测站拒绝（友好报错），总部允许（收回未分配语义）。
    */
   async createTransfer(input, actor = {}) {
     const name = String(input?.name ?? "").trim();
@@ -639,10 +647,18 @@ export class ReportPolicy {
     const createdAt = new Date().toISOString();
     let result = null;
     await this.db.transaction(async (tx) => {
-      const target = await tx.get("SELECT id,name FROM sys_dept WHERE id=? AND status=1", [
+      const target = await tx.get("SELECT id,name,type FROM sys_dept WHERE id=? AND status=1", [
         toOrgId,
       ]);
       if (!target) throw badRequest("目标公司不存在或已停用");
+      // P8：划拨目标限 type=公司——检测站不参与归属划拨（友好报错）；
+      // 总部（公司类型）允许＝收回未分配语义。前端选项过滤由 B2 同步，这里是提交侧权威闸门。
+      if (target.type !== "公司")
+        throw badRequest(
+          target.type === "检测站"
+            ? "检测站不参与归属划拨，请改选分公司或总部"
+            : "划拨目标必须是公司类型（分公司或总部）"
+        );
       if (scope && !scope.all && !scope.orgIds.includes(String(target.id)))
         throw noPermission("只能划拨到自己范围内的单位");
       if (clientToken) {
@@ -968,7 +984,14 @@ export class ReportPolicy {
   async transition(
     id,
     status,
-    { actor = {}, note = "", detail = null, action = "", handOver = null, returnHandOver = null } = {}
+    {
+      actor = {},
+      note = "",
+      detail = null,
+      action = "",
+      handOver = null,
+      returnHandOver = null,
+    } = {}
   ) {
     let from = "";
     let changed = [];

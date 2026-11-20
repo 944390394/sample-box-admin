@@ -253,11 +253,13 @@ export function menusFor(perms) {
 }
 
 /**
- * #26 m-06：调拨单/送检单目前由前端 local-menus 注入（src/router/local-menus.ts，
+ * #26 m-06：调拨单目前由前端 local-menus 注入（src/router/local-menus.ts，
  * gate = box.enableTransferInspect 开关 + device:box:task 权限，插在「任务单」组之后），
- * server menuRoutes 不含这两组。预览在这里镜像同一口径，保证「预览 = 真实侧栏」：
- * 开关开时列出这两组（on 按 device:box:task 判），开关关时功能不存在、预览不列。
+ * server menuRoutes 不含这一组。预览在这里镜像同一口径，保证「预览 = 真实侧栏」：
+ * 开关开时列出这一组（on 按 device:box:task 判），开关关时功能不存在、预览不列。
  * 组名/子项标题/hidden 与 local-menus.ts 保持一致；那边改菜单时这里要同步。
+ * 组织简化（B4a/P9）：送检单独立页退役——local-menus 只剩调拨单组，送检旧链接
+ * /sample/inspections 是一条隐藏重定向（不是侧栏菜单项），预览不镜像它。
  */
 const LOCAL_TRANSFER_INSPECT = [
   {
@@ -267,14 +269,13 @@ const LOCAL_TRANSFER_INSPECT = [
       { title: "划拨单详情", hidden: true },
     ],
   },
-  { group: "送检单", items: [{ title: "送检单", hidden: false }] },
 ];
 
 /**
  * #26 B4：角色页「能看到的菜单」预览——与侧栏 menusFor 同一实现（直接拿它的裁剪结果标 on/off），
  * 前端不再自抄一份菜单+权限表。列出全部菜单项（含隐藏的详情/创建页），on=侧栏实际可见。
  * 分组被 menusFor 整组裁掉时，组内隐藏项也标 off（侧栏确实进不去）。
- * #26 m-06：另镜像前端 local-menus 的调拨/送检注入（见 LOCAL_TRANSFER_INSPECT）。
+ * #26 m-06：另镜像前端 local-menus 的调拨单注入（见 LOCAL_TRANSFER_INSPECT；送检单已退役，P9）。
  */
 export function menuPreviewFor(perms) {
   const visible = new Set(

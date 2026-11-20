@@ -82,7 +82,7 @@
     <!-- 首载骨架：按真实版式占位，避免加载完成后布局跳动 -->
     <div v-if="!data && loading" class="boot" aria-busy="true" aria-label="正在加载集团总览">
       <div class="kpi-grid">
-        <el-skeleton v-for="i in 6" :key="i" animated class="kpi-skeleton">
+        <el-skeleton v-for="i in 8" :key="i" animated class="kpi-skeleton">
           <template #template>
             <el-skeleton-item variant="text" style="width: 55%" />
             <el-skeleton-item variant="h3" style="width: 40%; margin-top: 10px" />
@@ -270,20 +270,20 @@
           <el-table-column label="检测流转" width="180">
             <template #default="{ row }">
               <div v-if="row.station" class="flow-cell">
-                <span>
+                <span title="在途来站">
                   来站
                   <b :class="{ zero: !row.station.moving }">{{ row.station.moving }}</b>
                 </span>
-                <span>
-                  待检
-                  <b :class="{ warn: row.station.arrived, zero: !row.station.arrived }">
-                    {{ row.station.arrived }}
+                <span title="当前未开箱">
+                  未开
+                  <b :class="{ warn: row.station.unopenedNow, zero: !row.station.unopenedNow }">
+                    {{ row.station.unopenedNow }}
                   </b>
                 </span>
-                <span>
-                  今检
-                  <b :class="{ ok: row.station.inspected, zero: !row.station.inspected }">
-                    {{ row.station.inspected }}
+                <span title="累计已开箱">
+                  累开
+                  <b :class="{ ok: row.station.openedTotal, zero: !row.station.openedTotal }">
+                    {{ row.station.openedTotal }}
                   </b>
                 </span>
               </div>
@@ -347,15 +347,25 @@
                     <b :class="{ zero: !u(row).station!.moving }">{{ u(row).station!.moving }}</b>
                   </span>
                   <span>
-                    待检
-                    <b :class="{ warn: u(row).station!.arrived, zero: !u(row).station!.arrived }">
-                      {{ u(row).station!.arrived }}
+                    未开
+                    <b
+                      :class="{
+                        warn: u(row).station!.unopenedNow,
+                        zero: !u(row).station!.unopenedNow,
+                      }"
+                    >
+                      {{ u(row).station!.unopenedNow }}
                     </b>
                   </span>
                   <span>
-                    今检
-                    <b :class="{ ok: u(row).station!.inspected, zero: !u(row).station!.inspected }">
-                      {{ u(row).station!.inspected }}
+                    累开
+                    <b
+                      :class="{
+                        ok: u(row).station!.openedTotal,
+                        zero: !u(row).station!.openedTotal,
+                      }"
+                    >
+                      {{ u(row).station!.openedTotal }}
                     </b>
                   </span>
                 </template>
@@ -655,33 +665,49 @@ const kpis = computed<KpiItem[]>(() => {
   ];
   const st = data.value?.stationTotal;
   if (st) {
+    // 检测站四数（P13）＋今日开箱小卡（D4 累计＋今日并列）
     list.push(
       {
         key: "moving",
         label: "运往检测站",
         value: st.moving,
-        // 「运往检测站」的台数是「在途」台数的子集，占比只按在途算。
-        // 以前在途为 0 时会换成按总数算，同一张卡在两种数据下写的不是同一个口径（L-P0-3）；
-        // 现在分母没了就不写占比，不换成另一个分母。
+        // 「运往检测站」的台数是「在途」台数的子集，占比只按在途算；分母没了就不写占比。
         hint: moving ? `占在途 ${pct(st.moving, moving)}` : "",
         tone: "primary",
         clickable: false,
         icon: Position,
       },
       {
-        key: "arrived",
-        label: "已到检测站 · 未开箱检测",
-        value: st.arrived,
-        hint: `占总数 ${pct(st.arrived, total)}`,
-        tone: st.arrived ? "warning" : "default",
+        key: "arrivedTotal",
+        label: "累计已到站",
+        value: st.arrivedTotal,
+        hint: `占总数 ${pct(st.arrivedTotal, total)}`,
         clickable: false,
         icon: Suitcase,
       },
       {
-        key: "inspected",
-        label: "今日已检测",
-        value: st.inspected,
-        hint: `占总数 ${pct(st.inspected, total)}`,
+        key: "openedTotal",
+        label: "累计已开箱",
+        value: st.openedTotal,
+        hint: `占总数 ${pct(st.openedTotal, total)}`,
+        tone: "success",
+        clickable: false,
+        icon: CircleCheck,
+      },
+      {
+        key: "unopenedNow",
+        label: "当前未开箱",
+        value: st.unopenedNow,
+        hint: `占总数 ${pct(st.unopenedNow, total)}`,
+        tone: st.unopenedNow ? "warning" : "default",
+        clickable: false,
+        icon: Suitcase,
+      },
+      {
+        key: "todayOpened",
+        label: "今日开箱",
+        value: st.todayOpened,
+        hint: "今天已开始检测",
         tone: "success",
         clickable: false,
         icon: CircleCheck,
@@ -926,7 +952,7 @@ watch([page, pageSize], () => {
 }
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--page-gap);
 }
 .kpi-grid.is-three {

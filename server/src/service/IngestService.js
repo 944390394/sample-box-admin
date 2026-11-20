@@ -126,7 +126,7 @@ export class IngestService {
     }
     await this.events.publish(committed);
     if (this.videos && (uplink.kind ?? uplink.why) === "pad") {
-      // 采样机构开箱录像：只登记并异步请求平台，失败不影响上报
+      // 分公司采样现场开箱录像：只登记并异步请求平台，失败不影响上报（检测站不开录像）
       try {
         await this.videos.onOpen(committed.box, uplink);
       } catch (error) {

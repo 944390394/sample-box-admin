@@ -1,9 +1,6 @@
 <template>
   <div class="page-container page-flow">
-    <PageHeader
-      :title="task?.name || '任务详情'"
-      :back="task?.kind === '送检' ? '/sample/inspections' : '/task/tasks'"
-    >
+    <PageHeader :title="task?.name || '任务详情'" :back="'/task/tasks'">
       <template v-if="task" #tags>
         <el-tag :type="kindTone(task.kind)" effect="plain">
           {{ task.kind }}
@@ -91,8 +88,8 @@
           </div>
         </div>
 
-        <!-- 调拨/送检、带寄送的采样单：寄出方 → 接收方（采样单位/检测站）；双向的箭头两头都有，表示采样后寄回 -->
-        <div v-if="logistics || task.trip" class="route">
+        <!-- 旧物流单/合并单/带寄送的旧采样单：寄出方 → 接收方（检测站/采样单位）；双向箭头两头都有表示采样后寄回 -->
+        <div v-if="showRoute" class="route">
           <div class="party">
             <span class="role from">寄出方</span>
             <b>{{ task.fromOrg || "—" }}</b>
@@ -106,8 +103,8 @@
             </el-icon>
             <small v-if="task.trip">{{ task.trip === "双向" ? "寄去 · 寄回" : "只寄去" }}</small>
           </div>
-          <div v-if="logistics" class="party">
-            <span class="role to">{{ task.kind === "送检" ? "检测站" : "接收方" }}</span>
+          <div v-if="toStation" class="party">
+            <span class="role to">检测站</span>
             <b>{{ task.toOrg || "—" }}</b>
             <span class="who">签收人 {{ task.signer || "—" }}</span>
             <span class="addr"><PlaceText :place="task.toPlace" /></span>
@@ -229,15 +226,15 @@
               height="440px"
             >
               <template #legend>
-                <span v-if="logistics || task.trip">
+                <span v-if="showRoute">
                   <i :style="{ background: COLORS.from }" />
                   寄出地址
                 </span>
-                <span v-if="logistics">
+                <span v-if="toStation">
                   <i :style="{ background: COLORS.to }" />
                   收货地址
                 </span>
-                <span v-else>
+                <span v-if="!logistics">
                   <i :style="{ background: COLORS.plan }" />
                   计划地点
                 </span>
@@ -450,6 +447,7 @@ import {
   TRIP_TEXT,
   endedTone,
   isEnded,
+  isLegacySample,
   stepsOf,
   taskStatusType,
 } from "./status";
@@ -473,8 +471,16 @@ const detail = ref<TaskDetail | null>(null),
   /** 后台刷新失败但单子还在屏幕上：标一下，不清空 */
   stale = ref(false);
 const task = computed(() => detail.value?.task || null);
-/** 送检与旧调拨共用物流形详情（寄出方→接收方/检测站、收货地址、签收交接）；采样是另一套。 */
+/** 旧调拨/送检（只读）共用物流形详情（寄出方→接收方/检测站、收货地址、签收交接）。 */
 const logistics = computed(() => task.value?.kind === "调拨" || task.value?.kind === "送检");
+/** 合并采样单（P6）：分公司自采＋直寄检测站，既有采样安排又有寄出方→检测站物流段。 */
+const merged = computed(
+  () => task.value?.kind === "采样" && !isLegacySample(task.value as Record<string, unknown>)
+);
+/** 寄出方→接收方路线：旧物流单、合并单、带寄送的旧采样单都画。 */
+const showRoute = computed(() => logistics.value || merged.value || Boolean(task.value?.trip));
+/** 接收方是检测站：旧送检与合并单固定寄检测站。 */
+const toStation = computed(() => logistics.value || merged.value);
 const steps = computed(() => (task.value ? stepsOf(task.value) : []));
 // 结束口径和流程校验同一份（shared/taskFlow.js）：以前这里只认「已取消/已拒收」，
 // 已签收、已完成、已检测、已退回的单子被当成没结束，15 秒轮询一直不停。
@@ -529,7 +535,7 @@ const summary = computed(() => {
     return last?.note ? `原因：${last.note}` : "任务已结束";
   }
   if (headTone.value === "done")
-    return `${d.boxes.length} 台采样箱${logistics.value ? `已归 ${t.toOrg}` : "已完成"}`;
+    return `${d.boxes.length} 台采样箱${toStation.value ? `已归 ${t.toOrg}` : "已完成"}`;
   if (!d.target) return `${d.boxes.length} 台采样箱`;
   const near = d.boxes.filter((b) => b.near === true).length;
   return `${d.boxes.length} 台采样箱，${near} 台已到${d.target.role}附近（${formatDistance(d.arriveRadiusM)}内）`;
@@ -598,18 +604,28 @@ function handOverBoxTitle(boxId: string) {
   const box = detail.value?.boxes.find((b) => b.id === boxId);
   return box ? boxTitle(box) : imeiText({ id: boxId });
 }
-const actions = computed(() =>
-  Object.entries(detail.value?.can || {})
-    .filter(([to, ok]) => ok && to !== "退回中")
-    .map(([to]) => to)
-);
+/** 概况卡上能推进的动作，和服务端 can 同一口径（列表/mp 都直接按 can 出按钮）。
+ * 唯一例外：旧调拨/送检的「拒收并退回」挂在「拒收」对话框的勾选里（can.已拒收 与 can.退回中
+ * 同时为真），不再单独出按钮免得两个入口；合并单从 待检测/已检测 发起退回没有拒收可勾，
+ * 退回中必须单独成按钮——以前一律过滤 to==="退回中"，网页整条退回分支不可达（org-b4b 观察①）。 */
+const actions = computed(() => {
+  const can = detail.value?.can || {};
+  const backViaReject = Boolean(can["已拒收"] && can["退回中"]);
+  return Object.entries(can)
+    .filter(([to, ok]) => ok && !(to === "退回中" && backViaReject))
+    .map(([to]) => to);
+});
 const waitingFor = computed(() => {
   const t = task.value;
   if (!t || !Object.keys(detail.value?.can || {}).length) return "";
-  if (logistics.value && t.status === "待签收") return `等待 ${t.toOrg} 签收`;
-  if (t.status === "退回中") return `已拒收，等待 ${t.fromOrg} 接收退回的箱子`;
+  if (toStation.value && t.status === "待签收") return `等待 ${t.toOrg} 签收`;
+  // 合并单退回不必经拒收（待检测/已检测可直接发起），等待文案不再写「已拒收」
+  if (t.status === "退回中")
+    return merged.value
+      ? `箱子退回途中，等待 ${t.fromOrg || "寄出方"} 确认退回`
+      : `已拒收，等待 ${t.fromOrg} 接收退回的箱子`;
   if (t.status === "待检测")
-    return `等待 ${logistics.value ? t.toOrg : t.fromOrg} 逐台扫码开始检测`;
+    return `等待 ${toStation.value ? t.toOrg : t.fromOrg} 逐台扫码开始检测`;
   if (logistics.value && t.status === "待寄出") return `等待 ${t.fromOrg} 寄出`;
   return "你没有推进这一步的权限";
 });
@@ -635,13 +651,14 @@ const points = computed<TiandituPoint[]>(() => {
         marker: { glyph, color, shape: "pin" },
       });
   };
-  if (logistics.value) {
+  if (toStation.value) {
     place("from", `寄出 · ${t.fromOrg || ""}`, "寄", COLORS.from, t.fromPlace);
     place("to", `收货 · ${t.toOrg || ""}`, "收", COLORS.to, t.toPlace);
-  } else {
-    if (t.trip) place("from", `寄出 · ${t.fromOrg || ""}`, "寄", COLORS.from, t.fromPlace);
-    place("plan", "计划地点", "采", COLORS.plan, t.placeAt);
+  } else if (t.trip) {
+    place("from", `寄出 · ${t.fromOrg || ""}`, "寄", COLORS.from, t.fromPlace);
   }
+  // 合并单与旧采样单都有计划地点（采样段）；旧物流单没有
+  if (!logistics.value) place("plan", "计划地点", "采", COLORS.plan, t.placeAt);
   for (const box of detail.value.boxes) {
     if (!box.position) continue;
     const color =
@@ -665,7 +682,7 @@ const circles = computed<TiandituCircle[]>(() => {
   if (target?.lng == null || target?.lat == null || ended.value) return [];
   const color = target.role.includes("寄出")
     ? COLORS.from
-    : logistics.value
+    : toStation.value
       ? COLORS.to
       : COLORS.plan;
   return [{ lng: target.lng, lat: target.lat, radiusM: detail.value!.arriveRadiusM, color }];
@@ -682,11 +699,11 @@ const tracks = computed(() => detail.value?.tracks || []);
 const hasMap = computed(
   () => points.value.length > 0 || tracks.value.some((t) => t.gpsCount || t.lbsCount)
 );
-/** 调拨单寄出地址到收货地址的灰色虚线。 */
+/** 寄出地址到收货地址（合并单/旧物流单）或计划地点（旧寄送采样单）的灰色虚线。 */
 const routeLines = computed<TiandituLine[]>(() => {
   const t = task.value;
-  if (!t || (!logistics.value && !t.trip)) return [];
-  const ends = [t.fromPlace, logistics.value ? t.toPlace : t.placeAt].filter(
+  if (!t || !showRoute.value) return [];
+  const ends = [t.fromPlace, toStation.value ? t.toPlace : t.placeAt].filter(
     (p): p is { lng: number; lat: number; address: string } => p?.lng != null && p?.lat != null
   );
   return ends.length === 2
@@ -806,10 +823,11 @@ async function inspectBox(boxId: string) {
     inspecting.value = "";
   }
 }
-/** 寄出、到达、签收、开始采样、封箱这几步要和当前目标地址比距离。 */
+/** 寄出、到达、签收、开始采样、封箱、发起退回这几步要和当前目标地址比距离。 */
 const showDistance = computed(() =>
   [
     "运送中",
+    "在途",
     "待签收",
     "已签收",
     "待检测",
@@ -818,12 +836,13 @@ const showDistance = computed(() =>
     "采样中",
     "已封箱",
     "待核验",
+    "退回中",
     "已退回",
   ].includes(action.to)
 );
-/** 取消、拒收标红，强制签收标黄，其余是主按钮。 */
+/** 取消、拒收、退回标红，强制签收标黄，其余是主按钮。 */
 function buttonType(to: string) {
-  if (to === "已取消" || to === "已拒收") return "danger";
+  if (to === "已取消" || to === "已拒收" || to === "退回中") return "danger";
   return to === "强制签收" ? "warning" : "primary";
 }
 const far = computed(() => (detail.value?.boxes || []).filter((b) => b.near === false));
@@ -836,7 +855,7 @@ const actionText = computed(() => {
     const over = overLimit.value.length
       ? `其中 ${overLimit.value.length} 台开箱次数超过上限，异常的可以拒收。`
       : "";
-    return `签收 ${n} 台采样箱${logistics.value ? `，箱子改归 ${t.toOrg}` : ""}。签收后开箱次数不再累计，开箱检测时每台扫码点「开始检测」。${over}`;
+    return `签收 ${n} 台采样箱${toStation.value ? `，箱子改归 ${t.toOrg}` : ""}。签收后开箱次数不再累计，开箱检测时每台扫码点「开始检测」。${over}`;
   }
   if (action.to === "已检测") {
     const left = (detail.value?.boxes || []).filter((b) => !b.inspectedAt && !b.voided).length;
@@ -850,6 +869,8 @@ const actionText = computed(() => {
     return detail.value?.can?.["退回中"]
       ? `拒收后箱子仍属 ${t.fromOrg}。勾选退回时任务加上返程，寄出方扫码接收后结束；不勾任务直接结束。`
       : `拒收后箱子仍属 ${t.fromOrg}，任务结束。`;
+  if (action.to === "退回中")
+    return `拒收并退回：${n} 台箱子退回 ${t.fromOrg || "寄出方"}，任务加上返程；寄出方确认退回后任务结束，箱子回到在仓库。`;
   if (action.to === "已退回")
     return `确认退回的 ${n} 台箱子已回到 ${t.fromOrg}，任务结束，箱子回到在仓库。`;
   if (action.to === "已取消")
@@ -865,7 +886,9 @@ const actionText = computed(() => {
   if (action.to === "已封箱")
     return `确认样品已装好、${n} 台箱子已封箱。封箱后再开箱会记入开箱次数。`;
   if (action.to === "在途")
-    return `确认 ${n} 台箱子已寄回${t.trip ? ` ${t.fromOrg || "寄出单位"}` : ""}。`;
+    return merged.value
+      ? `确认 ${n} 台箱子已封箱寄出，寄往 ${t.toOrg || "检测站"}，等待检测站签收。`
+      : `确认 ${n} 台箱子已寄回${t.trip ? ` ${t.fromOrg || "寄出单位"}` : ""}。`;
   if (action.to === "待核验")
     return `箱子进入${t.trip ? ` ${t.fromOrg || "寄出单位"}` : "核验点"}范围后会自动到达。也可以现在手动确认，然后等待核验签收。`;
   if (action.to === "已签收") return `核验无误，签收 ${n} 台采样箱，任务完成。`;
@@ -878,7 +901,8 @@ function openAction(to: string) {
 }
 async function confirmAction() {
   if (NEEDS_REASON[action.to] && !action.note.trim()) {
-    ElMessage.warning(`请填写${action.to === "已拒收" ? "拒收" : "强制签收的"}原因`);
+    const kind = action.to === "强制签收" ? "强制签收的" : action.to === "退回中" ? "退回" : "拒收";
+    ElMessage.warning(`请填写${kind}原因`);
     return;
   }
   action.busy = true;

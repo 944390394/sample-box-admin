@@ -38,11 +38,12 @@ const orgName = ref("华南分公司");
 const orgs = [
   {
     label: "总公司",
-    children: [{ label: "华南分公司" }, { label: "华东分公司" }, { label: "西南分公司" }],
-  },
-  {
-    label: "合作采样机构",
-    children: [{ label: "采样机构甲" }, { label: "采样机构乙" }],
+    children: [
+      { label: "华南分公司" },
+      { label: "华东分公司" },
+      { label: "西南分公司" },
+      { label: "总部检测站" },
+    ],
   },
 ];
 function onOrg(node: { label: string; children?: unknown }) {

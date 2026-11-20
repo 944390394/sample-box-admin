@@ -2,19 +2,20 @@ import type { RouteRecordRaw } from "vue-router";
 import { Layout } from "@/router";
 
 /**
- * 划拨/送检独立页的前端本地菜单。
+ * 划拨独立页的前端本地菜单＋送检旧链接重定向。
  *
  * 侧栏菜单 normally 由 server/menus.js 经 GET /menus/routes 下发；本批不改 server/**，
- * 所以这两个新页的菜单与路由在前端注入（permission store 生成动态路由时合并进去），
+ * 所以划拨页的菜单与路由在前端注入（permission store 生成动态路由时合并进去），
  * 按功能开关 enableTransferInspect + 权限 gating，插在「任务单」组之后，对齐批准基准的
- * NAV 顺序：工作台 → 任务单 → 调拨单 → 送检单 → 采样箱。
+ * NAV 顺序：工作台 → 任务单 → 调拨单 → 采样箱。
  *
- * 路由用绝对子路径（/sample/transfers、/sample/inspections），与页面内跳转/深链一致；
- * 送检详情复用任务详情页 /task/detail/:id（服务端菜单已有），这里不重复注册。
+ * 组织简化（P9）：采样＋送检合并成一张 TK 单，送检独立页退役。旧链接 /sample/inspections
+ * 保留一条隐藏重定向到 /task/tasks（防旧书签/深链 404），不再注入侧栏菜单。
+ * 路由用绝对子路径（/sample/transfers），与页面内跳转/深链一致；
+ * 划拨详情复用 /sample/transfers/:id，任务详情复用服务端菜单已有的 /task/detail/:id。
  */
 const TransferList = () => import("@/views/sample/transfer/index.vue");
 const TransferDetail = () => import("@/views/sample/transfer/detail.vue");
-const InspectList = () => import("@/views/sample/inspect/index.vue");
 
 export interface LocalMenuGate {
   /** 功能开关（服务端 box.enableTransferInspect）。 */
@@ -24,11 +25,18 @@ export interface LocalMenuGate {
 }
 
 export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
-  if (!gate.enabled) return [];
-  const canView = gate.perms.includes("device:box:task");
-  if (!canView) return [];
   const groups: RouteRecordRaw[] = [
+    // 送检单退役重定向：恒存在（不受开关/权限影响），隐藏不进侧栏，旧链接落到任务单页。
     {
+      path: "/sample/inspections",
+      redirect: "/task/tasks",
+      name: "SampleInspectionsRedirect",
+      meta: { title: "送检单", hidden: true },
+    } as RouteRecordRaw,
+  ];
+  const canView = gate.enabled && gate.perms.includes("device:box:task");
+  if (canView) {
+    groups.push({
       path: "/transfer",
       component: Layout,
       redirect: "/sample/transfers",
@@ -68,36 +76,8 @@ export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
           },
         },
       ],
-    },
-    {
-      path: "/inspect",
-      component: Layout,
-      redirect: "/sample/inspections",
-      name: "SampleInspectGroup",
-      meta: {
-        title: "送检单",
-        icon: "el-icon-Checked",
-        hidden: false,
-        alwaysShow: false,
-        params: undefined,
-      },
-      children: [
-        {
-          path: "/sample/inspections",
-          component: InspectList,
-          name: "SampleInspections",
-          meta: {
-            title: "送检单",
-            icon: "el-icon-Checked",
-            hidden: false,
-            keepAlive: true,
-            alwaysShow: false,
-            params: undefined,
-          },
-        },
-      ],
-    },
-  ];
+    });
+  }
   return groups;
 }
 

@@ -28,7 +28,7 @@
 <script setup lang="ts">
 import type { DeptCamera } from "@/api/system/dept/types";
 
-/** 采样机构的监控通道（1–8 路）编辑器，v-model 是通道数组。 */
+/** 分公司采样现场的监控通道（1–8 路）编辑器，v-model 是通道数组；检测站禁配。 */
 const list = defineModel<DeptCamera[]>({ default: () => [] });
 
 function add() {

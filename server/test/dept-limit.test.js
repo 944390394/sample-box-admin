@@ -331,7 +331,7 @@ test("管人范围不含上级部门；部门的类型、地址、监控、负�
 
     // 部门：只有「编辑部门基本信息」，改类型、地址不行；改名可以
     assert.match(
-      (await call(org.updateDept, { ...desk, params: { id: "21" }, body: { type: "采样机构" } }))
+      (await call(org.updateDept, { ...desk, params: { id: "21" }, body: { type: "检测站" } }))
         .error,
       /设置部门类型/
     );

@@ -24,6 +24,7 @@ import { ReportPolicyController } from "../src/http/ReportPolicyController.js";
 import { UplinkParser } from "../src/domain/UplinkParser.js";
 import { IngestService } from "../src/service/IngestService.js";
 import { ReportPolicy } from "../src/settings/ReportPolicy.js";
+import { applyBoxSettings } from "../src/settings/boxConfig.js";
 import { SqlBoxStore } from "../src/store/SqlBoxStore.js";
 import { packet } from "./fixture.js";
 
@@ -35,6 +36,9 @@ const PERMS = upgradeCodes([
   "device:box:event",
   "task:create:transfer",
   "task:create:sample",
+  "task:sample-start",
+  "task:seal",
+  "task:send-back",
   "task:send",
   "task:arrive",
   "task:sign",
@@ -45,21 +49,25 @@ const PERMS = upgradeCodes([
 ]);
 
 async function setup() {
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "4" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "task-scope-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
     process.cwd()
   );
   await migrate(db);
-  for (const [id, parent, name] of [
-    ["2", "0", "A单位"],
-    ["3", "0", "B单位"],
-    ["4", "0", "C单位"],
-    ["41", "4", "C单位收发室"],
+  for (const [id, parent, name, type] of [
+    ["1", "0", "总公司", "公司"],
+    ["2", "0", "A单位", "公司"],
+    ["3", "0", "B单位", "公司"],
+    ["4", "1", "C单位", "检测站"],
+    ["41", "4", "C单位收发室", "公司"],
   ])
     await db.run(
-      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES (?,?,?, ?,1,1)",
-      [id, parent, name, `C${id}`]
+      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
+      [id, parent, name, `C${id}`, type]
     );
   const people = {
     a: { id: "101", nickname: "A单位员工", deptId: "2" },
@@ -148,10 +156,9 @@ async function setup() {
 }
 
 const transfer = (boxIds, extra) => ({
-  name: "调拨到C",
-  kind: "调拨",
+  name: "采样送C检测站",
+  kind: "采样",
   fromOrgId: "2",
-  toOrgId: "4",
   boxIds,
   ...extra,
 });
@@ -208,12 +215,14 @@ test("范围外账号读写同一张单一律 404 A0404，箱子归属不动", a
     );
     const id = created.data.id;
     await s.advance(id, [
-      [s.ctx(s.people.a, ["2"]), "运送中"],
+      [s.ctx(s.people.a, ["2"]), "采样中"],
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
       [s.ctx(s.people.a, ["2"]), "待签收"],
     ]);
     const outsider = s.ctx(s.people.b, ["3"]);
     const before = await s.boxRow(box);
-    for (const status of ["已签收", "已拒收", "已检测", "已取消"]) {
+    for (const status of ["待检测", "已拒收", "已检测", "已取消"]) {
       const res = await s.run(s.controller.transition.bind(s.controller), outsider, {
         params: { id },
         body: { status },
@@ -248,7 +257,9 @@ test("外来 signerId 的旧数据：本人不能签收，他人强制签收也�
     );
     const id = created.data.id;
     await s.advance(id, [
-      [s.ctx(s.people.a, ["2"]), "运送中"],
+      [s.ctx(s.people.a, ["2"]), "采样中"],
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
       [s.ctx(s.people.a, ["2"]), "待签收"],
     ]);
     // 模拟改造前的遗留数据：单上的签收人被写成 B 单位用户
@@ -257,7 +268,7 @@ test("外来 signerId 的旧数据：本人不能签收，他人强制签收也�
     await s.db.run("UPDATE sample_task SET body=? WHERE id=?", [JSON.stringify(body), id]);
     const sign = await s.run(s.controller.transition.bind(s.controller), s.ctx(s.people.b, ["3"]), {
       params: { id },
-      body: { status: "已签收" },
+      body: { status: "待检测" },
     });
     assert.equal(sign.code, "A0404");
     const untouched = await s.boxRow(box);
@@ -298,7 +309,9 @@ test("签收人建单后被调走：正常签收拦住，交接只带走还挂�
     );
     const id = created.data.id;
     await s.advance(id, [
-      [s.ctx(s.people.a, ["2"]), "运送中"],
+      [s.ctx(s.people.a, ["2"]), "采样中"],
+      [s.ctx(s.people.a, ["2"]), "已封箱"],
+      [s.ctx(s.people.a, ["2"]), "在途"],
       [s.ctx(s.people.a, ["2"]), "待签收"],
     ]);
     // 建单后这台箱子被 B 单位资产纠错改挂走
@@ -312,7 +325,7 @@ test("签收人建单后被调走：正常签收拦住，交接只带走还挂�
       s.ctx(s.people.c, ["4"]),
       {
         params: { id },
-        body: { status: "已签收" },
+        body: { status: "待检测" },
       }
     );
     assert.equal(denied.ok, false);

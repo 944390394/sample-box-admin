@@ -26,12 +26,13 @@ export interface DeptLimit {
 }
 
 const DeptAPI = {
-  /** 获取部门树形列表 */
-  getList(queryParams?: DeptQueryParams) {
+  /** 获取部门树形列表。silent=true 时失败不弹全局提示（设置页取检测站候选，无部门读权限时静默降级）。 */
+  getList(queryParams?: DeptQueryParams, opts?: { silent?: boolean }) {
     return request<unknown, DeptItem[]>({
       url: `${DEPT_BASE_URL}`,
       method: "get",
       params: queryParams,
+      ...opts,
     });
   },
   /** 获取部门下拉数据源 */

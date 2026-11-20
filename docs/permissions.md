@@ -1,4 +1,4 @@
-# 权限模型：逐项权限点 + 可转授 + 部门权限上限（2026-11-06）
+# 权限模型：逐项权限点 + 可转授 + 部门权限上限（2026-11-06；组织简化口径 2026-11-20 B4a 更新）
 
 ## 三条规则
 - **实际权限** =（这个人所有角色的权限之和）∩（从顶级部门到他所在部门，每一级「权限上限」的交集）
@@ -29,8 +29,8 @@
 | 停用与恢复 | 停用采样箱、恢复采样箱 |
 | 分配所属单位与保管人 | 分配所属单位、分配保管人 |
 | 删除档案（含远程抹除） | 删除采样箱档案、远程抹除设备 |
-| 任务与任务上报策略 | 新建调拨任务、新建采样任务、设置任务期间上报策略、确认寄出 |
-| 确认到达、签收与拒收 | 确认到达、签收、拒收、拒收并退回、强制签收、接收退回、开始检测、开始采样、封箱、完成采样任务、寄回 |
+| 任务与任务上报策略 | 新建划拨单、新建采样任务（采样＋送检合并一张单）、设置任务期间上报策略、确认寄出 |
+| 确认到达、签收与拒收 | 确认到达、签收、拒收、拒收并退回、强制签收、接收退回、开始检测、开始采样、封箱、完成采样任务（旧单向，历史码保留）、寄出（寄检测站）（task:send-back，旧「寄回」文案退役） |
 | 查看和重试开箱录像 | 查看开箱录像、查看监控画面、重试录像请求 |
 | 系统默认上报策略 | 修改默认上报策略、修改电量预留比例、修改到达判定半径 |
 | 编辑部门 | 编辑部门基本信息、设置部门类型、设置部门地址和联系人、配置监控通道、指定部门负责人 |
@@ -45,6 +45,23 @@
 - 每项权限属于一个模块（和菜单对应），分三段：**能进这页 → 能看到什么 → 能做什么**。
 - 前置（`needs`）：列出的任意一项有了，这一项才用得上。「能进这页」是这页其他项的前置。
 - 字段级遮挡：没有「查看电量」就不给电量相关字段，`masked` 里列出被遮的字段组名（`power`、`lid`、`signal`…）。签收核验、轨迹事件、列表筛选和计数都按同样的字段权限。
+
+## 组织简化后的角色与码（2026-11-20，B1b/B4a）
+- **AGENCY_LEAD（机构负责人，种子 id14）废弃**（P3）：无采样机构层，分公司自采。存量持有者由迁移 056 改绑
+  BRANCH_ADMIN（已有绑定去重），sys_role 14 停用不物理删（保留审计）；DEFAULT_ROLE_PERMS/ROLE_TEMPLATES 不再含该项。
+  权限码本身不删（历史角色/部门上限仍可能引用）。
+- **BRANCH_ADMIN/DISPATCH 默认补 `task:create:sample`**（B4a，B3 遗留②）：分公司自采建单是主路径（P11）。
+  新库走 permCatalog LEGACY_DEFAULTS；存量库由 056 幂等补码步补齐（先查存在再补，可转授按 grantsAll，
+  与 seedRolePerms/055b 一致；角色页显式收回过的项会被恢复，一次性，发布说明列明）。DISPATCH 保留为分公司内部调度岗（P1，scope2）。
+- **旧新建码只读保留**：`task:create:inspect`（新建送检单）文案注「送检已并入采样任务」；`task:create:transfer` 现管划拨单。
+  通用建单端点只收 kind=采样（接收方固定唯一检测站），调拨/送检新建一律 400。
+- **task:send-back 文案改合并流**（B4a，B3 遗留③）：标签「寄出（寄检测站）」——合并单此码管「已封箱→在途」＝寄往唯一检测站；
+  旧双向采样单寄回段只读兼容。`task:finish`（完成采样任务）标注旧单向历史码。
+- **部门类型/摄像头文案**：类型只有「公司」「检测站」；检测站全局唯一＋属总公司子树（org-api 写侧校验）。
+  摄像头 gate 反转：分公司（公司类型）采样现场可配 1–8 路，**检测站禁配**（改类型为检测站时清理已有通道）；
+  `task:video/task:camera` 文案同口径（检测站不设录像/摄像头）。
+- **菜单预览镜像**：角色页 menu-preview 与真实侧栏单源（server/menus.js LOCAL_TRANSFER_INSPECT 镜像 local-menus）；
+  送检单独立页退役（P9）后镜像只剩调拨单组，旧链接 /sample/inspections 是隐藏重定向、不进预览。
 
 ## 工作台卡片
 每张卡片一项（`monitor:card:*`）：待寄出、待确认到达、待签收、待接收退回、采样待推进、待检测、开箱超限、待激活、告警、在途但离线、低电量、开着盖、最近动态、我保管的箱子、我经手的任务。
@@ -85,6 +102,7 @@
 - 权限目录：`server/src/auth/permCatalog.js`（`PERM_MODULES`、`ALL_PERMS`、`SPLIT_043`、`SPLIT_045`、`ROLE_TEMPLATES`、`cardsFor`）
 - 计算：`server/src/auth/boxAccess.js`（`resolveDeptLimit`、`resolveAccess`、`resolveScope`、`maskBox`）
 - 校验和接口：`server/org-api.js`（`canPass`、`lockReasons`、`cannotAssign`、`saveRolePerms`、`deptLimit`、`saveDeptLimit`、`effectivePerms`）
-- 迁移：`server/migrations/043_perm_points_grant_option.js`、`044_dept_perm_limit.js`、`045_perm_points_detail.js`
+- 迁移：`server/migrations/043_perm_points_grant_option.js`、`044_dept_perm_limit.js`、`045_perm_points_detail.js`、`055b_perm_grant_custom_scope.js`、`056_org_simplify.js`（角色合并＋建单码补齐）
+- 检测站配置：`server/src/settings/boxConfig.js`（`resolveStation`/`assertStationSavable`，stationDeptId 存取）
 - 网页：`src/components/biz/PermEditor.vue`、`src/utils/permDeps.ts`、`src/views/system/role/index.vue`、`src/views/system/dept/DeptLimitPanel.vue`、`src/views/system/user/EffectivePermDrawer.vue`
 - 测试：`server/test/dept-limit.test.js`、`server/test/perm-grant.test.js`；验收：`tools/acceptance/checks.mjs` 里「授权界面」「部门上限」「人员实际权限」「工作台卡片逐张开关」

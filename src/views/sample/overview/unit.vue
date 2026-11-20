@@ -129,10 +129,24 @@
 
       <SectionCard
         v-if="data.station"
-        title="送检明细"
-        :sub="`${data.station.companyTotal} 家来源公司`"
+        title="检测明细"
+        :sub="`${data.station.companyTotal} 家来源分公司`"
         flush
       >
+        <template #extra>
+          <button
+            type="button"
+            class="today-card"
+            :class="{ active: stationTab === 'done' }"
+            data-test="station-today"
+            :aria-label="`${dayText}已开箱 ${data.station.todayOpened} 台，查看明细`"
+            @click="stationTab = 'done'"
+          >
+            <span class="today-label">{{ dayText }}开箱</span>
+            <b class="today-value">{{ data.station.todayOpened.toLocaleString() }}</b>
+            <span class="today-unit">台</span>
+          </button>
+        </template>
         <StationBoard
           :key="orgId"
           v-model:tab="stationTab"
@@ -318,15 +332,29 @@ const kpis = computed<KpiItem[]>(() => {
 const flowSteps = computed<FlowStep[]>(() => {
   const st = data.value?.station;
   if (!st) return [];
+  // 四数（P13）：在途来站 / 累计已到站 / 当前未开箱 / 累计已开箱；累计两数只展示不切页签。
   return [
-    { key: "inbound", label: "运往本站途中", value: st.moving, tone: "primary" },
+    { key: "inbound", label: "在途来站", value: st.moving, tone: "primary" },
+    {
+      key: "arrived",
+      label: "累计已到站",
+      value: st.arrivedTotal,
+      tone: "default",
+      clickable: false,
+    },
     {
       key: "waiting",
-      label: "已到 · 未开箱检测",
-      value: st.arrived,
-      tone: st.arrived ? "warning" : "default",
+      label: "当前未开箱",
+      value: st.unopenedNow,
+      tone: st.unopenedNow ? "warning" : "default",
     },
-    { key: "done", label: `${dayText.value}已开箱检测`, value: st.inspected, tone: "success" },
+    {
+      key: "opened",
+      label: "累计已开箱",
+      value: st.openedTotal,
+      tone: "success",
+      clickable: false,
+    },
   ];
 });
 const flagChips = computed(() => {
@@ -518,6 +546,39 @@ watch(orgId, () => {
   grid-template-columns: 400px minmax(0, 1fr);
   gap: var(--page-gap);
   align-items: start;
+}
+/* 今日开箱小卡：D4 累计＋今日并列，点卡切到「今日已开箱」明细页签 */
+.today-card {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 6px 14px;
+  font: inherit;
+  cursor: pointer;
+  background: var(--status-ok-bg);
+  border: 1px solid color-mix(in srgb, var(--el-color-success) 30%, transparent);
+  border-radius: 999px;
+  transition: border-color var(--motion-fast, 150ms);
+}
+.today-card:hover {
+  border-color: var(--el-color-success);
+}
+.today-card.active {
+  box-shadow: 0 0 0 1px var(--el-color-success) inset;
+}
+.today-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.today-value {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--el-color-success);
+}
+.today-unit {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 @media (max-width: 1024px) {
   .kpi-grid {

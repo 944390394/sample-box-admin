@@ -205,15 +205,17 @@ test("激活、停用、恢复按生命周期校验，分配只能给范围内�
       body: { orgId: "3" },
     });
     assert.equal(away.ok, false);
-    const sampler = await userOf(env.db, "lin.xia");
+    // 组织简化（B1b）：lin.xia 改挂华南分公司（在 dispatch 范围内），范围外的人改用总部检测站的 wu.di
+    const outsider = await userOf(env.db, "wu.di");
     const foreign = await call((ctx) => controller.assign(ctx), {
       access: dispatch,
       user: dispatchUser,
       db: env.db,
       params: { id: "BOX-002" },
-      body: { ownerId: String(sampler.id) },
+      body: { ownerId: String(outsider.id) },
     });
     assert.equal(foreign.ok, false);
+    const sampler = await userOf(env.db, "lin.xia");
     const assetAssign = await call((ctx) => controller.assign(ctx), {
       access: asset,
       user: assetUser,

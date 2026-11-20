@@ -1,4 +1,5 @@
-/** 部门、角色、用户的初始名单。Mock 和安装脚本都读这一份。 */
+/** 部门、角色、用户的初始名单。Mock 和安装脚本都读这一份。
+ * 组织简化（B1b）：无「采样机构」层——分公司（公司类型）自采；总公司下挂唯一检测站（13 总部检测站）。 */
 
 export const DATA_SCOPE_LABEL = {
   1: "全部数据",
@@ -10,7 +11,7 @@ export const DATA_SCOPE_LABEL = {
 
 const updated = "2026-09-26 09:00:00";
 
-function dept(id, parentId, name, code, sort, children = []) {
+function dept(id, parentId, name, code, sort, children = [], type = "公司") {
   return {
     id,
     parentId,
@@ -18,6 +19,7 @@ function dept(id, parentId, name, code, sort, children = []) {
     code,
     sort,
     status: 1,
+    type,
     children,
     createTime: null,
     updateTime: updated,
@@ -28,20 +30,13 @@ export const depts = [
   dept("1", "0", "总公司", "HQ", 1, [
     dept("11", "1", "系统管理", "HQ_SYS", 1),
     dept("12", "1", "资产管理", "HQ_ASSET", 2),
-    dept("13", "1", "核验中心", "HQ_CHECK", 3),
+    // 唯一检测站（P5）：type=检测站，挂总公司下；合并采样单接收方固定为它
+    dept("13", "1", "总部检测站", "HQ_CHECK", 3, [], "检测站"),
     dept("14", "1", "监测值班", "HQ_DUTY", 4),
   ]),
   dept("2", "0", "华南分公司", "SOUTH", 2, [dept("21", "2", "调度室", "SOUTH_DISP", 1)]),
   dept("3", "0", "华东分公司", "EAST", 3, [dept("31", "3", "调度室", "EAST_DISP", 1)]),
   dept("4", "0", "西南分公司", "WEST", 4, [dept("41", "4", "调度室", "WEST_DISP", 1)]),
-  dept("5", "0", "合作采样机构", "PARTNER", 5, [
-    dept("51", "5", "采样机构甲", "AGENCY_A", 1, [
-      dept("511", "51", "甲现场组", "AGENCY_A_FIELD", 1),
-    ]),
-    dept("52", "5", "采样机构乙", "AGENCY_B", 2, [
-      dept("521", "52", "乙现场组", "AGENCY_B_FIELD", 1),
-    ]),
-  ]),
 ];
 
 function role(id, name, code, dataScope, sort) {
@@ -66,7 +61,7 @@ export const roles = [
   role(11, "领导查看", "LEADER", 1, 5),
   role(12, "分公司管理员", "BRANCH_ADMIN", 2, 6),
   role(13, "调度员", "DISPATCH", 2, 7),
-  role(14, "机构负责人", "AGENCY_LEAD", 2, 8),
+  // 组织简化（B1b/P3）：14 AGENCY_LEAD 不再种——存量库由迁移 056 改绑 BRANCH_ADMIN 并停用
   role(15, "现场采样员", "SAMPLER", 4, 9),
   role(16, "视角切换", "HOME_SWITCH", 4, 10),
 ];
@@ -89,8 +84,9 @@ export const users = [
   user(4, "zhou.ning", "周宁", "12", [8]),
   user(5, "wu.di", "吴迪", "13", [9]),
   user(6, "chen.ke", "陈可", "21", [13]),
-  user(7, "lin.xia", "林夏", "511", [15]),
-  user(8, "zhao.heng", "赵衡", "521", [15], 0),
+  // 组织简化：采样员挂分公司（原 511/521 机构现场组删除）
+  user(7, "lin.xia", "林夏", "2", [15]),
+  user(8, "zhao.heng", "赵衡", "3", [15], 0),
 ];
 
 export function flattenDepts(nodes, acc = []) {

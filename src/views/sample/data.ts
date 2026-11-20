@@ -802,6 +802,6 @@ export const staff = [
   { name: "周宁", account: "zhou.ning", role: "资产管理员", org: "资产管理", status: "启用" },
   { name: "吴迪", account: "wu.di", role: "核验员", org: "核验中心", status: "启用" },
   { name: "陈可", account: "chen.ke", role: "调度员", org: "华南分公司调度室", status: "启用" },
-  { name: "林夏", account: "lin.xia", role: "现场采样员", org: "采样机构甲", status: "启用" },
-  { name: "赵衡", account: "zhao.heng", role: "现场采样员", org: "采样机构乙", status: "停用" },
+  { name: "林夏", account: "lin.xia", role: "现场采样员", org: "华南分公司", status: "启用" },
+  { name: "赵衡", account: "zhao.heng", role: "现场采样员", org: "华东分公司", status: "停用" },
 ];

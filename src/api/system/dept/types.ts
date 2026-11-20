@@ -1,4 +1,5 @@
-export type DeptType = "公司" | "采样机构";
+/** 组织简化（B1b）：部门类型只有 公司 / 检测站。公司＝总公司/分公司等（分公司自采）；检测站全局唯一、挂总公司子树。 */
+export type DeptType = "公司" | "检测站";
 
 /**
  * Dept 部门类型定义
@@ -24,7 +25,7 @@ export interface DeptItem {
   name?: string;
   /** 部门编号 */
   code?: string;
-  /** 类型：公司、采样机构或检测站。采样机构做采样单位时可以要求开箱录像；送到检测站的任务签收后要逐台扫码开始检测。 */
+  /** 类型：公司或检测站。分公司（公司类型）自采，可配采样现场监控通道；检测站全局唯一，接收任务单后逐台扫码开始检测，禁配摄像头。 */
   type?: DeptType;
   /** 父部门ID */
   parentId?: string;
@@ -76,7 +77,7 @@ export interface DeptForm {
   name?: string;
   /** 部门编号 */
   code?: string;
-  /** 类型：公司、采样机构或检测站。采样机构做采样单位时可以要求开箱录像；送到检测站的任务签收后要逐台扫码开始检测。 */
+  /** 类型：公司或检测站。分公司（公司类型）自采，可配采样现场监控通道；检测站全局唯一，接收任务单后逐台扫码开始检测，禁配摄像头。 */
   type?: DeptType;
   /** 父部门ID */
   parentId?: string;
@@ -93,7 +94,7 @@ export interface DeptForm {
   leaderName?: string;
   leaderMobile?: string;
   leader?: DeptLeaderInput;
-  /** 采样机构的监控通道（1–8 路）。 */
+  /** 分公司采样现场的监控通道（1–8 路）；检测站禁配（开箱凭证靠扫码＋开箱次数差）。 */
   cameras?: DeptCamera[];
   /** #26 B3：表单接口对祖先壳返回 readOnly=true（明细清空）；范围外部门直接 A0404。 */
   readOnly?: boolean;

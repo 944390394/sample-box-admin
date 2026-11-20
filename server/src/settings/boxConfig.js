@@ -1,4 +1,5 @@
 import { badRequest } from "../domain/AppError.js";
+import { buildDeptTree } from "../../../shared/org.js";
 /**
  * 采样箱的默认运行参数。周期和「只在充电时定时上报」要等固件 1.0.2 在确认包里收下。
  * 电量预留只影响网页上的可用电量，保存后立刻生效。
@@ -14,6 +15,11 @@ const DEFAULTS = {
   enableTransferInspect: false,
   /** 建单后未上线的离线宽限，秒（B3/#18）。默认 1 小时；设置页以分钟展示（1–1440）。 */
   taskOfflineGraceSec: 3600,
+  /**
+   * 唯一检测站部门 id（组织简化 P5）。合并采样单的接收方固定为它；未配置（空串）时建单友好报错。
+   * 存在性/唯一性/属总公司子树的校验在 saveBox（B1b）做，这里只负责存取字符串。
+   */
+  stationDeptId: "",
 };
 
 // applied 只放运行参数（进策略版本哈希的那几项）；功能开关不在其中。
@@ -28,6 +34,13 @@ const applied = {
 let transferInspect = DEFAULTS.enableTransferInspect;
 // 宽限同样不进 applied：它只影响离线判定，不参与上报策略版本哈希。
 let offlineGrace = DEFAULTS.taskOfflineGraceSec;
+// 唯一检测站 id 也不进 applied：它是组织配置，不参与上报策略版本哈希。
+let station = DEFAULTS.stationDeptId;
+
+function stationOf(value) {
+  if (value == null) return "";
+  return String(value).trim().slice(0, 32);
+}
 
 function radiusOf(value, fallback) {
   const radius = Number(value);
@@ -62,6 +75,7 @@ export function publicBox(config) {
     arriveRadiusM: radiusOf(box.arriveRadiusM, DEFAULTS.arriveRadiusM),
     enableTransferInspect: Boolean(box.enableTransferInspect),
     taskOfflineGraceSec: graceOf(box.taskOfflineGraceSec, DEFAULTS.taskOfflineGraceSec),
+    stationDeptId: stationOf(box.stationDeptId),
   };
 }
 
@@ -73,6 +87,7 @@ export function applyBoxSettings(config) {
   applied.arriveRadiusM = next.arriveRadiusM;
   transferInspect = next.enableTransferInspect;
   offlineGrace = next.taskOfflineGraceSec;
+  station = next.stationDeptId;
   return { ...applied };
 }
 
@@ -88,6 +103,100 @@ export function transferInspectEnabled() {
 /** 建单后未上线的离线宽限（秒，B3/#18）。offlineSql / flagMatch 唯一读取点。 */
 export function offlineGraceSec() {
   return offlineGrace;
+}
+
+/** 唯一检测站部门 id（组织简化 P5）。空串＝未配置，合并采样单建单时友好报错。 */
+export function stationDeptId() {
+  return station;
+}
+
+/* ---------------- 唯一检测站解析与校验（组织简化 B1b/P5） ---------------- */
+
+/** 部门行统一形状（id/parent_id 字符串化），供树计算用。 */
+function deptRowsOf(rows) {
+  return rows.map((row) => ({
+    id: String(row.id),
+    parentId: String(row.parent_id ?? "0"),
+    sort: Number(row.sort) || 0,
+  }));
+}
+
+/**
+ * 总公司＝组织树第一个根（按 sort、id 排序，与 OverviewController.#units / deptUnder 同约定）。
+ * 没有部门时返回空串。
+ */
+export function hqIdOf(rows) {
+  const tree = buildDeptTree(deptRowsOf(rows));
+  return String(tree[0]?.id ?? "");
+}
+
+/**
+ * id 是否属总公司子树（不含总公司自身——总部只查看，不能作检测站）。
+ * parentIdOverride：部门还没写库（新建）或正要改挂（编辑）时，用「新上级」沿 parent 链判定。
+ */
+export function isUnderHq(rows, id, parentIdOverride) {
+  const hq = hqIdOf(rows);
+  if (!hq || String(id ?? "") === hq) return false;
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  let cur =
+    parentIdOverride !== undefined
+      ? String(parentIdOverride ?? "")
+      : String(byId.get(String(id ?? ""))?.parent_id ?? "");
+  const seen = new Set();
+  while (cur && cur !== "0" && !seen.has(cur)) {
+    if (cur === hq) return true;
+    seen.add(cur);
+    cur = String(byId.get(cur)?.parent_id ?? "");
+  }
+  return false;
+}
+
+/** 除 excludeId 外还有没有别的检测站（全局唯一校验用；停用行也算占位）。 */
+export async function otherStation(db, excludeId = "") {
+  const rows = await db.all("SELECT id, name FROM sys_dept WHERE type = '检测站'");
+  return rows.find((row) => String(row.id) !== String(excludeId ?? "")) || null;
+}
+
+/**
+ * 解析当前生效的唯一检测站（P5）：
+ * 1. 配置 box.stationDeptId 优先——配置了就必须合法（存在/启用/类型检测站/属总公司子树），否则 null；
+ * 2. 未配置时回退 DB：type=检测站 且启用且属总公司子树恰好一个 → 自动认定；
+ * 3. 零个或多个 → null（建单侧友好报错「请先在系统设置指定唯一检测站」）。
+ * 返回部门原始行（snake_case）或 null。
+ */
+export async function resolveStation(db) {
+  const rows = await db.all(
+    "SELECT id, parent_id, name, code, type, sort, status, leader_user_id FROM sys_dept"
+  );
+  const valid = (row) =>
+    row && Number(row.status) === 1 && row.type === "检测站" && isUnderHq(rows, row.id);
+  const configured = stationDeptId();
+  if (configured) {
+    const row = rows.find((item) => String(item.id) === configured);
+    return valid(row) ? row : null;
+  }
+  const candidates = rows.filter(valid);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+/**
+ * saveBox 配置唯一检测站时的合法性校验（B1b）：存在/启用/类型检测站/属总公司子树/全局唯一。
+ * 不合法抛 badRequest（友好报错，不是 500）。清空配置（空串）不走这里。
+ */
+export async function assertStationSavable(db, id) {
+  const stationId = String(id ?? "").trim();
+  if (!stationId) return;
+  const rows = await db.all("SELECT id, parent_id, name, type, sort, status FROM sys_dept");
+  const row = rows.find((item) => String(item.id) === stationId);
+  if (!row) throw badRequest(`检测站部门不存在：${stationId}`);
+  if (Number(row.status) !== 1)
+    throw badRequest(`检测站「${row.name}」已停用，请先启用或另选检测站`);
+  if (row.type !== "检测站")
+    throw badRequest(`「${row.name}」不是检测站类型，请先在部门页把类型改为检测站`);
+  if (!isUnderHq(rows, row.id))
+    throw badRequest(`检测站必须属总公司子树：「${row.name}」不在总公司下`);
+  const other = await otherStation(db, stationId);
+  if (other) throw badRequest(`检测站全局唯一：「${other.name}」已是检测站，请先把它改回公司`);
 }
 
 export function mergeBoxSettings(current, input) {
@@ -124,6 +233,14 @@ export function mergeBoxSettings(current, input) {
         : null;
   if (grace != null && (!Number.isInteger(grace) || grace < 60 || grace > 86400))
     throw badRequest("离线宽限要在 1 到 1440 分钟之间");
+  // 唯一检测站：旧页面不带时保留原值；两边都没设过不写键（读取按默认空串＝未配置）。
+  // 传空串＝清空配置。存在性/类型/唯一性校验在 saveBox（B1b）做。
+  const stationId =
+    input?.stationDeptId != null
+      ? stationOf(input.stationDeptId)
+      : base.box?.stationDeptId != null
+        ? stationOf(base.box.stationDeptId)
+        : null;
   return {
     ...base,
     box: {
@@ -133,6 +250,7 @@ export function mergeBoxSettings(current, input) {
       arriveRadiusM: radius,
       ...(flag == null ? {} : { enableTransferInspect: flag }),
       ...(grace == null ? {} : { taskOfflineGraceSec: grace }),
+      ...(stationId == null ? {} : { stationDeptId: stationId }),
     },
   };
 }

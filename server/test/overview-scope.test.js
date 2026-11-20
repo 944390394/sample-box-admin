@@ -56,7 +56,10 @@ async function call(fn, ctx) {
 }
 
 async function setup() {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000 } });
+  // 组织简化 B1a：合并采样单接收方固定唯一检测站（这里指定 6＝总部检测站）。
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "overview-scope-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
@@ -67,7 +70,7 @@ async function setup() {
   await migrate(db);
   for (const [id, parent, name, type] of [
     ["1", "0", "总公司", "公司"],
-    ["6", "1", "总部检测站", "采样机构"],
+    ["6", "1", "总部检测站", "检测站"],
     ["2", "0", "华南分公司", "公司"],
     ["21", "2", "调度室", "公司"],
     ["3", "0", "华东分公司", "公司"],
@@ -92,6 +95,9 @@ async function setup() {
   const { box: b } = await ingest.accept(
     packet({ imei: "864317080992518", uart: "why=boot,opens=0,fw=1.0.16,seq=1" })
   );
+  const { box: e } = await ingest.accept(
+    packet({ imei: "864317080992519", uart: "why=boot,opens=0,fw=1.0.16,seq=1" })
+  );
   // A 挂调度室（科室），B 挂分公司本部：验证单位统计只算范围覆盖的部门
   await boxes.updateBox(a.id, (x) => {
     x.life = "未使用";
@@ -103,6 +109,12 @@ async function setup() {
     x.org = "华南分公司";
     x.orgId = "2";
   });
+  // E 挂华东分公司：参与方可见性测试里作华东寄出单的箱子（快照属华东，华南看不到）
+  await boxes.updateBox(e.id, (x) => {
+    x.life = "未使用";
+    x.org = "华东分公司";
+    x.orgId = "3";
+  });
   return {
     dir,
     db,
@@ -110,6 +122,7 @@ async function setup() {
     policies,
     a,
     b,
+    e,
     c: new ReportPolicyController(boxes, policies),
     o: new OverviewController(boxes, db),
   };
@@ -152,13 +165,13 @@ test("范围只给科室：沿 parent 链纳入最近公司祖先，单位页可
       (await call(o.unit.bind(o), { ...agency, params: { orgId: "5" } })).unit.name,
       "合作采样机构"
     );
-    // 采样机构类型不管在哪一级都单列：范围只给检测站科室时锚到检测站本身
-    await db.run("UPDATE sys_dept SET type='采样机构' WHERE id='51'");
+    // 检测站类型不管在哪一级都单列：范围只给检测站科室时锚到检测站本身
+    await db.run("UPDATE sys_dept SET type='检测站' WHERE id='51'");
     const stationLead = ctxOf(scoped(["51", "511"]));
     const sg = await call(o.group.bind(o), stationLead);
     assert.deepEqual(
       sg.units.map((u) => [u.id, u.type]),
-      [["51", "采样机构"]]
+      [["51", "检测站"]]
     );
     assert.equal(sg.myUnitId, "51");
     await db.run("UPDATE sys_dept SET type='公司' WHERE id='51'");
@@ -196,60 +209,63 @@ test("范围只给科室：沿 parent 链纳入最近公司祖先，单位页可
   }
 });
 
-test("采样单位参与方：body.orgId 在范围内就能看到单（列表/详情/总览同口径），范围外照旧 404，采样单位能推进", async () => {
-  const { dir, db, c, o, a, b } = await setup();
+test("寄出分公司参与方：from_org_id/body.orgId 在范围内就能看到单（列表/详情/总览同口径），范围外照旧 404，分公司能推进采样段", async () => {
+  const { dir, db, c, o, b, e } = await setup();
   try {
-    // 单向采样单：采样单位只记在 body.orgId，from/to 列为空，箱子快照属寄出单位
+    // 组织简化 B1a：合并采样单 orgId＝寄出分公司 fromOrgId，接收方固定检测站（6）。
+    // 华南寄出一张（箱子 B 挂华南本部），华东寄出一张（箱子 E 挂华东，快照属华东华南看不到）。
     const { id } = await call(c.createTask.bind(c), {
       ...admin(),
       body: {
-        name: "机构甲采样",
+        name: "华南自采送检",
         kind: "采样",
         boxIds: [b.id],
-        orgId: "51",
+        fromOrgId: "2",
+        sender: "华南寄件人",
+        signer: "检测站长",
         place: "验收大道 5 号",
       },
     });
-    // 一张跨区调拨：机构甲不是参与方，不该因为新口径被放出去
-    const { id: transferId } = await call(c.createTask.bind(c), {
+    const { id: eastId } = await call(c.createTask.bind(c), {
       ...admin(),
       body: {
-        name: "跨区调拨",
-        kind: "调拨",
-        boxIds: [a.id],
-        fromOrgId: "2",
-        toOrgId: "3",
-        sender: "x",
-        signer: "y",
+        name: "华东自采送检",
+        kind: "采样",
+        boxIds: [e.id],
+        fromOrgId: "3",
+        sender: "华东寄件人",
+        signer: "检测站长",
       },
     });
-    const agency = ctxOf(scoped(["5", "51", "511"]), PERMS, { id: "9102", nickname: "机构负责人" });
-    const list = await call(c.tasks.bind(c), { ...agency, query: {} });
+    // 华南负责人（范围 2/21）：只看到自己寄出的那张，看不到华东的
+    const south = ctxOf(scoped(["2", "21"]), PERMS, { id: "9102", nickname: "华南负责人" });
+    const list = await call(c.tasks.bind(c), { ...south, query: {} });
     assert.deepEqual(
       list.list.map((t) => t.id),
       [id]
     );
     assert.equal(list.list[0].kind, "采样");
-    const detail = await call(c.taskDetail.bind(c), { ...agency, params: { id } });
-    assert.equal(detail.task.orgId, "51");
+    const detail = await call(c.taskDetail.bind(c), { ...south, params: { id } });
+    assert.equal(detail.task.orgId, "2", "采样单位＝寄出分公司");
+    assert.equal(detail.task.toOrgId, "6", "接收方固定检测站");
     // 总览单位页的当日任务与任务列表同口径（修复前：总览可见、详情 404）
-    const unit = await call(o.unit.bind(o), { ...agency, params: { orgId: "5" } });
+    const unit = await call(o.unit.bind(o), { ...south, params: { orgId: "2" } });
     assert.deepEqual(
       unit.tasks.map((t) => t.id),
       [id]
     );
-    // 采样单位能推进自己的单（#abilities 早就承认参与方，可见性跟上后链路才通）
+    // 寄出分公司能推进自己的采样段（#abilities 承认参与方，可见性跟上后链路才通）
     assert.equal(detail.can["采样中"], true);
-    await call(c.transition.bind(c), { ...agency, params: { id }, body: { status: "采样中" } });
+    await call(c.transition.bind(c), { ...south, params: { id }, body: { status: "采样中" } });
     assert.equal(
-      (await call(c.taskDetail.bind(c), { ...agency, params: { id } })).task.status,
+      (await call(c.taskDetail.bind(c), { ...south, params: { id } })).task.status,
       "采样中"
     );
-    // 范围外角色：看不到采样单（列表只有它作为接收方的调拨）、详情 404、推进 404（L-P0-1 口径不回退）
+    // 范围外角色（华东）：只看到自己寄出的那张，华南的详情 404、推进 404（L-P0-1 口径不回退）
     const east = ctxOf(scoped(["3"]), PERMS, { id: "6", nickname: "华东调度" });
     assert.deepEqual(
       (await call(c.tasks.bind(c), { ...east, query: {} })).list.map((t) => t.id),
-      [transferId]
+      [eastId]
     );
     await assert.rejects(
       call(c.taskDetail.bind(c), { ...east, params: { id } }),
@@ -262,10 +278,10 @@ test("采样单位参与方：body.orgId 在范围内就能看到单（列表/�
     // 仅本人范围（采样员）：箱子不在自己名下时这张单依旧不可见
     const selfOnly = ctxOf(scoped([], ["7"]));
     assert.deepEqual((await call(c.tasks.bind(c), { ...selfOnly, query: {} })).list, []);
-    // 调拨单对机构甲依旧不可见（新口径只认采样单位，不是放开口子）
-    assert.ok(transferId);
+    // 华东的单对华南依旧不可见（参与方口径只认寄出/接收/采样单位，不是放开口子）
+    assert.ok(eastId);
     await assert.rejects(
-      call(c.taskDetail.bind(c), { ...agency, params: { id: transferId } }),
+      call(c.taskDetail.bind(c), { ...south, params: { id: eastId } }),
       /不在你的管理范围/
     );
   } finally {
@@ -352,10 +368,18 @@ test("模拟视角：admin 按单位×角色只读预览——分公司子树 / 
     assert.equal(sampler.viewAs.roleCode, "SAMPLER");
     assert.equal(sampler.viewAs.orgName, "调度室");
 
-    // 3) 模拟检测站@总部检测站 + 值班员：见检测站 KPI（stationTotal 三数现状口径）
+    // 3) 模拟检测站@总部检测站 + 值班员：见检测站 KPI（stationTotal 四数＋今日＋旧字段别名，P13）
     const duty = await call(o.group.bind(o), adminView({ asOrgId: "6", asRoleCode: "DUTY" }));
     assert.ok(duty.stationTotal, "检测站合计 KPI 应存在");
-    assert.deepEqual(Object.keys(duty.stationTotal).sort(), ["arrived", "inspected", "moving"]);
+    assert.deepEqual(Object.keys(duty.stationTotal).sort(), [
+      "arrived",
+      "arrivedTotal",
+      "inspected",
+      "moving",
+      "openedTotal",
+      "todayOpened",
+      "unopenedNow",
+    ]);
     const station = duty.units.find((u) => u.id === "6");
     assert.ok(station && station.station, "总部检测站应在单位列表且带站 KPI");
     assert.equal(duty.viewAs.orgName, "总部检测站");

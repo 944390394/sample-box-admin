@@ -41,6 +41,7 @@ async function fresh() {
   await migrate(db);
   await seedOrg(db);
   await seedRolePerms(db);
+  await legacyAgency(db);
   return {
     db,
     close: async () => {
@@ -48,6 +49,31 @@ async function fresh() {
       await rm(dir, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * 组织简化（B1b）：新种子不再含机构子树 5/51/52/511/521 与 14 AGENCY_LEAD（056 合并进 BRANCH_ADMIN）。
+ * 本文件验证导出的范围收敛机制（D1 actor 口径，组织无关），补迁移前旧形态夹具守住原断言。
+ */
+async function legacyAgency(db) {
+  for (const [id, parent, name] of [
+    ["5", "0", "合作采样机构"],
+    ["51", "5", "采样机构甲"],
+    ["511", "51", "甲现场组"],
+    ["52", "5", "采样机构乙"],
+    ["521", "52", "乙现场组"],
+  ])
+    await db.run(
+      "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,'公司')",
+      [id, parent, name, `L${id}`]
+    );
+  await db.run(
+    "INSERT INTO sys_role (id,name,code,data_scope,sort,status) VALUES ('14','机构负责人','AGENCY_LEAD',2,8,1)"
+  );
+  for (const perm of ["sys:oplog:read", "sys:oplog:export", "sys:user:view", "sys:dept:view"])
+    await db.run("INSERT INTO sys_role_perm (role_id, perm, grantable) VALUES ('14', ?, 0)", [
+      perm,
+    ]);
 }
 
 async function person(db, id, username, deptId, roleIds) {

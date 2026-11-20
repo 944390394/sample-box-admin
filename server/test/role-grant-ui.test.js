@@ -149,11 +149,11 @@ test("授权审计：grant/scope 变更写明细；现状含可转授；按日�
     await role(db, "80", "TARGET", 4);
     await role(db, "81", "GRANT2", 2, grantPerms); // 华南分公司（dept 2）
     await role(db, "82", "GRANT3", 3, grantPerms); // 同部门但 scope3
-    await role(db, "83", "AGENCY", 2, ["sys:role:view"]); // 机构甲（dept 51）
+    await role(db, "83", "AGENCY", 2, ["sys:role:view"]); // 华东调度室（dept 31，组织简化后无机构层）
     await role(db, "84", "SELF4", 4, ["sys:role:view", "sys:role:grant", "device:box:list"]);
     await person(db, "96", "grant2", "2", ["81"]);
     await person(db, "97", "grant3", "2", ["82"]);
-    await person(db, "98", "agency", "51", ["83"]);
+    await person(db, "98", "agency", "31", ["83"]);
     await person(db, "99", "self4", "21", ["84"]);
     const admin = await ctxOf(db, "admin");
     const grant2 = await ctxOf(db, "grant2");
@@ -250,7 +250,7 @@ test("授权审计：grant/scope 变更写明细；现状含可转授；按日�
       branchAudit.data.entries.map((e) => e.actorName),
       ["self4", "grant3", "grant2"]
     );
-    // agency（manage=[51,511]）：这个角色的授权都不在自己范围 → 空
+    // agency（manage=[31]）：这个角色的授权都不在自己范围 → 空
     const agencyAudit = await call(org.roleGrantAudit, { ...agency, params: { id: "80" } });
     assert.equal(agencyAudit.ok, true, agencyAudit.error);
     assert.deepEqual(agencyAudit.data.entries, []);

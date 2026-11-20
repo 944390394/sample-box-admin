@@ -7,7 +7,12 @@ import {
   transferBlock,
 } from "../settings/ReportPolicy.js";
 import { audit } from "../log/audit.js";
-import { currentBoxSettings, transferInspectEnabled } from "../settings/boxConfig.js";
+import {
+  currentBoxSettings,
+  resolveStation,
+  stationDeptId,
+  transferInspectEnabled,
+} from "../settings/boxConfig.js";
 import { effectiveDeptLocation, hasCoords, readPlace } from "../geo/place.js";
 import { taskTrack, taskWindow } from "../settings/taskTrack.js";
 import { maskBox, maskImei, maskUplink, identityGranted, boxNameCell } from "../auth/boxAccess.js";
@@ -60,7 +65,14 @@ import {
   targetOf,
 } from "../settings/taskPlaces.js";
 
-import { ENDED, ENDED_SQL, TRIPS, nextOf, signTargetOf, stepsOf } from "../settings/taskFlow.js";
+import {
+  ENDED,
+  ENDED_SQL,
+  isLegacySample,
+  nextOf,
+  signTargetOf,
+  stepsOf,
+} from "../settings/taskFlow.js";
 
 /** 签收人以外的人代签：流转里记成「已签收」，动作名记「强制签收」。 */
 const FORCE_SIGN = "强制签收";
@@ -238,30 +250,24 @@ export class ReportPolicyController {
   }
   async createTask(ctx) {
     const input = ctx.body;
-    const inspectEnabled = transferInspectEnabled();
     // 划拨提交即生效，必须走 /sample/transfers；通用建单端点不收（§6.1）
-    if (inspectEnabled && input?.kind === "划拨")
-      throw conflict("划拨单没有物流步骤，请使用划拨接口提交");
-    this.require(
-      ctx,
-      input?.kind === "调拨"
-        ? T.createTransfer
-        : inspectEnabled && input?.kind === "送检"
-          ? T.createInspect
-          : T.createSample
-    );
+    if (input?.kind === "划拨") throw conflict("划拨单没有物流步骤，请使用划拨接口提交");
+    // 组织简化（P6/P9）：送检并入采样单、调拨只读保留，都不再接受新建
+    if (input?.kind === "送检")
+      throw badRequest("送检已并入采样单：请用 kind=采样 建单，接收方固定为唯一检测站");
+    if (input?.kind === "调拨") throw badRequest("调拨单已停用：请用采样单（寄检测站）或划拨单");
+    this.require(ctx, T.createSample);
     // 任务期间的上报策略、单箱例外单独授权
     if (input?.policy != null || Object.keys(input?.overrides || {}).length)
       this.require(ctx, T.policy);
     const boxes = await this.targets(ctx, input.boxIds);
     if (boxes.length > 100) throw badRequest("一张任务单最多绑定 100 台箱子");
     if (boxes.some((b) => b.life === "停用")) throw badRequest("停用的箱子不能绑定任务");
-    // 开关关时白名单与旧版完全一致（采样/调拨）；开时才收送检（B1），划拨恒拒
     if (
       typeof input.name !== "string" ||
       !input.name.trim() ||
       input.name.length > 120 ||
-      !(inspectEnabled ? ["采样", "调拨", "送检"] : ["采样", "调拨"]).includes(input.kind)
+      input.kind !== "采样"
     )
       throw badRequest("请填写任务名称和类型");
     if (
@@ -295,150 +301,88 @@ export class ReportPolicyController {
     );
     const deptOf = (id) =>
       id == null || id === "" ? null : depts.find((row) => String(row.id) === String(id)) || null;
-    // 送检单与旧调拨共用物流表单校验（寄出/接收单位、寄出人、签收人、地址）；送检没有 direct 旁路
-    if (input.kind === "调拨" || input.kind === "送检") {
-      // 新页面选单位，名称以库里为准；旧调用只给文字时照旧保存
-      if (input.fromOrgId != null || input.toOrgId != null) {
-        const from = deptOf(input.fromOrgId),
-          to = deptOf(input.toOrgId);
-        if (!from || !to) throw badRequest("请选择寄出和接收单位");
-        if (String(from.id) === String(to.id)) throw badRequest("寄出和接收单位不能相同");
-        if (!inScope(ctx, from.id) && !isSystemAdmin(ctx))
-          throw badRequest("寄出单位不在你的管理范围内");
-        Object.assign(metadata, {
-          fromOrgId: String(from.id),
-          fromOrg: from.name,
-          toOrgId: String(to.id),
-          toOrg: to.name,
-        });
-      }
-      metadata.fromPlace = readPlace(input.fromPlace);
-      metadata.toPlace = readPlace(input.toPlace);
-      // 直接调拨（仅旧调拨）：不定位、不发货，建单后待签收。地址和寄出人、签收人不写入
-      if (input.kind === "调拨" && input.direct === true) {
-        metadata.direct = true;
-        metadata.fromPlace = null;
-        metadata.toPlace = null;
-        metadata.sender = "";
-        metadata.signer = "";
-      }
-      for (const [idKey, nameKey, label, idOrgKey, nameOrgKey] of [
-        ["senderId", "sender", "寄出人", "fromOrgId", "fromOrg"],
-        ["signerId", "signer", "签收人", "toOrgId", "toOrg"],
-      ]) {
-        if (input[idKey] == null || input[idKey] === "") continue;
-        const user = await this.db.get(
-          "SELECT id,nickname,dept_id AS deptId FROM sys_user WHERE id=? AND status=1",
-          [String(input[idKey])]
+    // P5/P10：接收方固定为唯一检测站（B1b：resolveStation——配置优先，未配置时 DB 恰一个自动认定）；
+    // 解析不到时友好报错（不是 500）
+    const station = await resolveStation(this.db);
+    if (!station)
+      throw notConfigured(
+        stationDeptId()
+          ? "配置的唯一检测站不存在、已停用或不是总公司下的检测站，请在系统设置重新指定"
+          : "请先在系统设置指定唯一检测站"
+      );
+    // 显式传了接收方时必须等于检测站：总部/分公司不可作接收方（总部只查看强制）
+    if (
+      input.toOrgId != null &&
+      String(input.toOrgId) !== "" &&
+      String(input.toOrgId) !== String(station.id)
+    )
+      throw badRequest("任务单接收方固定为唯一检测站，不能寄给总部或其他分公司");
+    // 采样单位＝寄出分公司：必须 type=公司 且不是检测站（分公司自采，录音②③）
+    const from = deptOf(input.fromOrgId);
+    if (!from) throw badRequest("请选择寄出分公司（采样单位）");
+    if (String(from.id) === String(station.id)) throw badRequest("采样单位不能是检测站");
+    if (from.type !== "公司") throw badRequest("采样单位必须是分公司（公司类型）");
+    if (!inScope(ctx, from.id) && !isSystemAdmin(ctx))
+      throw badRequest("寄出单位不在你的管理范围内");
+    Object.assign(metadata, {
+      fromOrgId: String(from.id),
+      fromOrg: from.name,
+      toOrgId: String(station.id),
+      toOrg: station.name,
+      // 采样单位就是寄出分公司本身；#cameras/录像取这个单位的通道
+      orgId: String(from.id),
+      org: from.name,
+      // 合并单恒送检测站：签收→待检测→已检测
+      inspect: true,
+    });
+    metadata.fromPlace = readPlace(input.fromPlace);
+    metadata.toPlace = readPlace(input.toPlace);
+    metadata.placeAt = readPlace(input.placeAt);
+    if (metadata.placeAt?.address && !metadata.place) metadata.place = metadata.placeAt.address;
+    // 寄出人/签收人归属校验沿用：必须是那一方单位（含下级部门）里的人，
+    // 否则建单方能把签收人写成任意单位用户，那人再凭 signerId 签收、把箱子改挂到自己名下。
+    for (const [idKey, nameKey, label, idOrgKey, nameOrgKey] of [
+      ["senderId", "sender", "寄出人", "fromOrgId", "fromOrg"],
+      ["signerId", "signer", "签收人", "toOrgId", "toOrg"],
+    ]) {
+      if (input[idKey] == null || input[idKey] === "") continue;
+      const user = await this.db.get(
+        "SELECT id,nickname,dept_id AS deptId FROM sys_user WHERE id=? AND status=1",
+        [String(input[idKey])]
+      );
+      if (!user) throw badRequest("寄出人或签收人不存在或已停用");
+      const orgId = resolveOrgId(depts, metadata[idOrgKey], metadata[nameOrgKey]);
+      if (!orgId)
+        throw badRequest(`${label}的所属单位无法确认，请补全单位信息或改用单位选择后再建单`);
+      if (!deptUnder(depts, user.deptId, orgId))
+        throw badRequest(
+          `${label}必须是${metadata[nameOrgKey] || "该单位"}的人员，请重新选择或先调整人员所属部门`
         );
-        if (!user) throw badRequest("寄出人或签收人不存在或已停用");
-        // 寄出人、签收人必须是那一方单位里的人：只校验「账号存在且未停用」时，
-        // 建单方能把签收人写成任意单位的任意用户，那人再凭 signerId 签收、把箱子改挂到自己名下。
-        // direct（免物流）单同样校验，不再跳过。
-        const orgId = resolveOrgId(depts, metadata[idOrgKey], metadata[nameOrgKey]);
-        if (!orgId)
-          throw badRequest(`${label}的所属单位无法确认，请补全单位信息或改用单位选择后再建单`);
-        if (!deptUnder(depts, user.deptId, orgId))
-          throw badRequest(
-            `${label}必须是${metadata[nameOrgKey] || "该单位"}的人员，请重新选择或先调整人员所属部门`
-          );
-        metadata[idKey] = String(user.id);
-        metadata[nameKey] = user.nickname;
-      }
-    } else {
-      if (input.trip != null && input.trip !== "") {
-        // 带寄送：寄出单位把箱子寄给采样单位；双向的封箱后寄回寄出单位
-        if (!TRIPS.includes(input.trip)) throw badRequest("寄送方式只能是单向或双向");
-        const from = deptOf(input.fromOrgId),
-          org = deptOf(input.orgId);
-        if (!from || !org) throw badRequest("寄送采样箱要选择寄出单位和采样单位");
-        if (String(from.id) === String(org.id)) throw badRequest("寄出单位和采样单位不能相同");
-        if (!inScope(ctx, from.id)) throw badRequest("寄出单位不在你的管理范围内");
-        Object.assign(metadata, {
-          trip: input.trip,
-          fromOrgId: String(from.id),
-          fromOrg: from.name,
-          fromPlace: readPlace(input.fromPlace),
-        });
-        if (input.senderId != null && input.senderId !== "") {
-          const user = await this.db.get(
-            "SELECT id,nickname,dept_id AS deptId FROM sys_user WHERE id=? AND status=1",
-            [String(input.senderId)]
-          );
-          if (!user) throw badRequest("寄出人不存在或已停用");
-          // 同调拨：寄出人要在寄出单位（含下级部门）里
-          if (!deptUnder(depts, user.deptId, metadata.fromOrgId))
-            throw badRequest(`寄出人必须是${metadata.fromOrg}的人员，请重新选择`);
-          Object.assign(metadata, { senderId: String(user.id), sender: user.nickname });
-        }
-        if (!metadata.sender) throw badRequest("请填写寄出人");
-      }
-      if (input.orgId != null && input.orgId !== "") {
-        const org = deptOf(input.orgId);
-        if (!org) throw badRequest("采样单位不存在");
-        metadata.orgId = String(org.id);
-        metadata.org = org.name;
-      }
-      metadata.placeAt = readPlace(input.placeAt);
-      if (metadata.placeAt?.address && !metadata.place) metadata.place = metadata.placeAt.address;
-      // 开箱录像只给采样机构：采样单位必须是「采样机构」类型
-      if (input.recordVideo) {
-        const org = deptOf(input.orgId);
-        if (!org || org.type !== "采样机构")
-          throw badRequest("只有采样单位是采样机构时才能要求开箱录像");
-        metadata.recordVideo = true;
-      }
+      metadata[idKey] = String(user.id);
+      metadata[nameKey] = user.nickname;
     }
-    if ((input.kind === "调拨" || input.kind === "送检") && input.recordVideo)
-      throw badRequest("调拨任务不能要求开箱录像");
-    // 签收方是采样机构（就是检测站；调拨/送检的接收单位、双向采样单寄回的寄出单位）：签收后待检测，逐台扫码开始检测
-    const receiver =
-      input.kind === "调拨" || input.kind === "送检"
-        ? deptOf(metadata.toOrgId)
-        : metadata.trip === "双向"
-          ? deptOf(metadata.fromOrgId)
-          : null;
-    if (receiver?.type === "采样机构") metadata.inspect = true;
-    // 送检单本身就是送检测站：恒走检测站流程（签收→待检测→已检测）
-    if (input.kind === "送检") metadata.inspect = true;
+    // 开箱录像只给分公司（公司类型）采样现场；检测站恒禁（录音⑥）。trip 作废，新建忽略。
+    if (input.recordVideo) {
+      if (from.type !== "公司" || String(from.id) === String(station.id))
+        throw badRequest("只有分公司（公司类型）采样时才能要求开箱录像，检测站不设录像");
+      metadata.recordVideo = true;
+    }
     metadata.createdBy = actorOf(ctx).name;
     // 任务期间每台箱子最多开几次箱，不填不限
-    // 没填就是不限。填了就按这张单上的次数判断，采样和调拨一样。
     if (input.maxOpens != null && input.maxOpens !== "") {
       const max = Number(input.maxOpens);
       if (!Number.isInteger(max) || max < 0 || max > 999)
         throw badRequest("开箱次数上限要在 0 到 999 之间");
       metadata.maxOpens = max;
     }
-    if (
-      (input.kind === "调拨" || input.kind === "送检") &&
-      (!metadata.fromOrg || !metadata.toOrg || metadata.fromOrg === metadata.toOrg)
-    )
-      throw badRequest(
-        metadata.direct
-          ? "请选择不同的调出单位和调入单位"
-          : "请填写不同的寄出、接收公司及寄出人、签收人"
-      );
-    if (
-      (input.kind === "调拨" || input.kind === "送检") &&
-      !metadata.direct &&
-      (!metadata.sender || !metadata.signer)
-    )
-      throw badRequest("请填写不同的寄出、接收公司及寄出人、签收人");
-    if (metadata.direct && (!metadata.fromOrgId || !metadata.toOrgId))
-      throw badRequest("请选择调出单位和调入单位");
-    // 一张直接调拨单只含同一个单位的箱子，多个单位由页面拆成多张
-    if (metadata.direct && !isSystemAdmin(ctx)) {
-      const foreign = boxes.filter(
-        (box) => String(box.org_id ?? "") !== String(metadata.fromOrgId)
-      );
-      if (foreign.length) throw badRequest("直接调拨的箱子必须都属于调出单位，请按单位分开建单");
-    }
+    if (!metadata.fromOrg || !metadata.toOrg || metadata.fromOrg === metadata.toOrg)
+      throw badRequest("请填写不同的寄出分公司与检测站");
+    if (!metadata.sender || !metadata.signer) throw badRequest("请填写寄出人和签收人");
     const id = await this.policies.createTask(
       {
         ...metadata,
         name: input.name.trim(),
-        kind: input.kind,
+        kind: "采样",
         fromOrgId: metadata.fromOrgId,
         toOrgId: metadata.toOrgId,
         orgId: metadata.orgId,
@@ -514,17 +458,12 @@ export class ReportPolicyController {
       clauses.push("EXISTS (SELECT 1 FROM sample_task_box m WHERE m.task_id=t.id AND m.box_id=?)");
       params.push(ctx.query.boxId);
     }
-    // 开关开时（D-1）：任务单页默认只放采样，allKinds=1 兜底回全部；kind 白名单扩为四值。
-    // 开关关时与旧版完全一致：白名单 采样/调拨，不传 kind 返回全部。
-    const inspectEnabled = transferInspectEnabled();
-    if (
-      (inspectEnabled ? ["采样", "送检", "划拨", "调拨"] : ["采样", "调拨"]).includes(
-        ctx.query.kind
-      )
-    ) {
+    // 组织简化（P9）：任务单页默认只放合并采样单，allKinds=1 兜底回全部。
+    // kind 白名单含旧 送检/调拨/划拨，供迁移前过滤历史行；不传 kind 默认采样。
+    if (["采样", "送检", "划拨", "调拨"].includes(ctx.query.kind)) {
       clauses.push("t.kind=?");
       params.push(ctx.query.kind);
-    } else if (inspectEnabled && ctx.query.allKinds !== "1") {
+    } else if (ctx.query.allKinds !== "1") {
       clauses.push("t.kind='采样'");
     }
     const orgId = typeof ctx.query.orgId === "string" ? ctx.query.orgId.slice(0, 32) : "";
@@ -1029,9 +968,29 @@ export class ReportPolicyController {
     // 创建任务页的默认值都从系统设置来：前端不要再写死一个「60 秒」，
     // 管理员把默认上报周期改了，页面上的「本任务统一」初始值要跟着变。
     const settings = currentBoxSettings();
+    // 组织简化（P5/P10）：合并单接收方固定唯一检测站——候选只回 station（带位置/负责人，签收人默认检测站负责人）。
+    // orgs 仍列全部启用单位，供寄出分公司（采样单位）选择；接收方不再从 orgs 里挑。
+    // B1b：resolveStation 统一解析（配置优先→DB 恰一个自动认定），stationDeptId 回生效值。
+    const resolved = await resolveStation(this.db);
+    const stationId = resolved ? String(resolved.id) : "";
+    const stationRow = resolved ? byId.get(stationId) : null;
+    const station = stationRow
+      ? {
+          id: String(stationRow.id),
+          name: stationRow.name,
+          type: stationRow.type || "公司",
+          path: pathOf(stationRow.id),
+          location: effectiveDeptLocation(rows, stationRow.id),
+          leader: stationRow.leader_name
+            ? { id: String(stationRow.leader_user_id), name: stationRow.leader_name }
+            : null,
+        }
+      : null;
     ctx.ok({
       orgs,
       users,
+      station,
+      stationDeptId: stationId || "",
       myOrgId: String(ctx.user?.dept_id || ""),
       arriveRadiusM: settings.arriveRadiusM,
       defaultReportPeriodSec: settings.reportPeriodSec,
@@ -1152,9 +1111,9 @@ export class ReportPolicyController {
       // 开关箱、上电、充电各要各的记录权限
       events: filterEvents(track.events, perms),
       window,
-      // 开箱录像：采样机构开箱时向视频平台请求的录像，按开箱时间排
+      // 开箱录像：分公司采样现场开箱时向视频平台请求的录像，按开箱时间排（检测站不设录像）
       videos: perms.has(T.video) && this.videos ? await this.videos.list(row.id) : [],
-      // 监控通道（1–8 路）：采样任务取采样单位的、调拨取接收单位的；还没接平台时状态是「未接入」
+      // 监控通道（1–8 路）：采样任务取采样单位（分公司）的、旧调拨取接收单位的；检测站无通道
       cameras: perms.has(T.camera) ? await this.#cameras(task) : [],
       allow: {
         log: perms.has(T.log) || perms.has(BOX.log),
@@ -1198,16 +1157,43 @@ export class ReportPolicyController {
   #abilities(ctx, task, status) {
     const has = (perm) => ctx.access.perms.has(perm);
     const view = has(BOX.task);
+    const next = nextOf(task, status);
+    const signTo = signTargetOf(task);
+    const may = (perm, party) => Boolean(view && has(perm) && party);
+    const merged = task.kind === "采样" && !isLegacySample({ ...task, status });
+    if (merged) {
+      // 合并采样单（P6）：采样段归寄出分公司；签收/拒收/开始检测归检测站；
+      // 退回由检测站发起（待检测/已检测），分公司接收退回。
+      const sender = inScope(ctx, task.fromOrgId);
+      const receiver = inScope(ctx, task.toOrgId);
+      const signer = isSigner(ctx, task);
+      const sampler = task.orgId ? inScope(ctx, task.orgId) : sender;
+      const STEP = { 采样中: T.sampleStart, 已封箱: T.seal, 在途: T.sendBack };
+      const can = Object.fromEntries(
+        next.map((to) => {
+          if (to === "已取消") return [to, may(T.cancel, sender)];
+          if (to === "待签收") return [to, may(T.arrive, sender || receiver)];
+          if (STEP[to]) return [to, may(STEP[to], sampler || sender)];
+          if (to === signTo) return [to, may(T.sign, task.signerId ? signer : receiver)];
+          if (to === "已拒收") return [to, may(T.reject, signer || receiver)];
+          if (to === "退回中") return [to, may(T.rejectReturn, signer || receiver)];
+          if (to === "已退回") return [to, may(T.acceptReturn, sender)];
+          if (to === "已检测") return [to, may(T.inspect, receiver)];
+          return [to, false];
+        })
+      );
+      // 指定了签收人：检测站里不是签收人的人只能强制签收
+      if (task.signerId && next.includes(signTo))
+        can[FORCE_SIGN] = !signer && may(T.forceSign, receiver);
+      return can;
+    }
+    // 旧调拨/送检/采样单（只读兼容）：寄出、取消归寄出单位；确认到达寄出、接收方都可以；签收、拒收只归接收单位。
     const transfer = task.kind === "调拨" && task.toOrgId;
-    // 参与方：寄出单位、收货单位（调拨）、指定签收人、采样单位、寄回的寄出单位（带寄送的采样单）
     const sender = transfer ? inScope(ctx, task.fromOrgId) : true;
     const receiver = transfer ? inScope(ctx, task.toOrgId) : false;
     const signer = transfer && isSigner(ctx, task);
     const sampler = task.orgId ? inScope(ctx, task.orgId) : true;
     const home = task.kind === "采样" && task.trip ? inScope(ctx, task.fromOrgId) : true;
-    const may = (perm, party) => Boolean(view && has(perm) && party);
-    const next = nextOf(task, status);
-    const signTo = signTargetOf(task);
     // 采样单、通用任务每一步要的权限和参与方
     const STEP = {
       运送中: [T.send, home],
@@ -1257,6 +1243,11 @@ export class ReportPolicyController {
       const at = this.#abilities(ctx, task, "待签收");
       for (const to of [signTo, "已拒收", "退回中", FORCE_SIGN]) if (at[to]) can[to] = true;
     }
+    // 合并采样单：检测站在「在途」扫箱码可直接签收/拒收（推进时先自动记一笔「确认到达」）
+    if (task.kind === "采样" && !isLegacySample({ ...task, status }) && status === "在途") {
+      const at = this.#abilities(ctx, task, "待签收");
+      for (const to of [signTo, "已拒收", FORCE_SIGN]) if (at[to]) can[to] = true;
+    }
     if (check?.problems?.length && can[signTo]) {
       can[signTo] = false;
       can[FORCE_SIGN] = ctx.access.perms.has(T.forceSign);
@@ -1291,7 +1282,11 @@ export class ReportPolicyController {
         status: row.status,
         steps: stepsOf({ ...task, status: row.status }),
         from: task.fromOrg || "",
-        to: task.kind === "调拨" ? task.toOrg || "" : task.org || "",
+        to:
+          task.kind === "调拨" ||
+          (task.kind === "采样" && !isLegacySample({ ...task, status: row.status }))
+            ? task.toOrg || ""
+            : task.org || "",
         sender: task.sender || "",
         signer: task.signer || "",
         inspect: Boolean(task.inspect),
@@ -1341,7 +1336,11 @@ export class ReportPolicyController {
         status: row.status,
         createdAt: row.created_at,
         from: task.fromOrg || "",
-        to: task.kind === "调拨" ? task.toOrg || "" : task.org || "",
+        to:
+          task.kind === "调拨" ||
+          (task.kind === "采样" && !isLegacySample({ ...task, status: row.status }))
+            ? task.toOrg || ""
+            : task.org || "",
         boxes: (task.boxIds || []).length,
       };
       if (actionable(can)) groups.todo.push(brief);
@@ -1440,7 +1439,11 @@ export class ReportPolicyController {
           createdAt: row.created_at,
           active,
           from: task.fromOrg || "",
-          to: task.kind === "调拨" ? task.toOrg || "" : task.org || "",
+          to:
+            task.kind === "调拨" ||
+            (task.kind === "采样" && !isLegacySample({ ...task, status: row.status }))
+              ? task.toOrg || ""
+              : task.org || "",
           sender: task.sender || "",
           signer: task.signer || "",
           boxes: (task.boxIds || []).length,
@@ -1594,6 +1597,7 @@ export class ReportPolicyController {
   }
 
   async #cameras(task) {
+    // 监控通道（录音⑥）：采样单取采样单位（分公司）的通道；旧调拨取接收单位的；检测站不设摄像头（无通道）
     const orgId = task.kind === "调拨" ? task.toOrgId : task.orgId;
     if (!orgId) return [];
     const row = await this.db
@@ -1636,6 +1640,7 @@ export class ReportPolicyController {
       (b) => b.box_id
     );
     const transfer = task.kind === "调拨" && task.toOrgId;
+    const merged = task.kind === "采样" && !isLegacySample({ ...task, status: row.status });
     // 签收、强制签收、拒收：先做签收核验，有问题时不能直接签收
     const receiving = [signTo, FORCE_SIGN, "已拒收", "退回中"].includes(asked);
     const check = receiving
@@ -1656,19 +1661,19 @@ export class ReportPolicyController {
               .join("；")}。只能拒收或强制签收`
           : status === signTo && can[FORCE_SIGN]
             ? `只有签收人 ${task.signer} 可以签收，你可以强制签收`
-            : transfer && [signTo, "已拒收", "已检测"].includes(status)
-              ? "只有接收单位的人员可以签收、拒收或开始检测"
+            : (transfer || merged) && [signTo, "已拒收", "已检测"].includes(status)
+              ? "只有接收单位（检测站）的人员可以签收、拒收或开始检测"
               : "没有这项操作权限";
       throw noPermission(message);
     }
     if (force && !note.trim()) throw badRequest("请填写强制签收的原因");
-    if (status === "退回中" && !note.trim()) throw badRequest("请填写拒收原因");
+    if (status === "退回中" && !note.trim()) throw badRequest("请填写退回原因");
     if (!status) throw badRequest("请选择要推进到的状态");
     // 建单时已经要求签收人在接收单位里；这里再认一次，兜住建单后人被调走、以及改造前留下的外来 signerId。
     // 正常签收只拦「以签收人身份」这条路：接收单位里其他人本来就走强制签收，要写原因。
     // 同一次判定交给交接用：外来用户不能因为这张单把自己变成这批箱子的保管人。
     const signerFit =
-      transfer && status === signTo && task.signerId
+      (transfer || merged) && status === signTo && task.signerId
         ? await this.#signerFitsReceiver(task)
         : "none";
     if (asked === signTo && isSigner(ctx, task) && signerFit === "foreign")
@@ -1679,8 +1684,14 @@ export class ReportPolicyController {
     const party =
       task.kind === "采样" &&
       (inScope(ctx, task.orgId) || (task.trip && inScope(ctx, task.fromOrgId)));
+    // 合并单：检测站签收/拒收/开始检测/发起退回、分公司接收退回时，箱子可能已挂检测站，按参与方放行
+    const mergedReceive =
+      merged &&
+      ["待签收", "待检测", "已检测", "已拒收", "退回中", "已退回"].includes(status) &&
+      (inScope(ctx, task.toOrgId) || inScope(ctx, task.fromOrgId) || isSigner(ctx, task));
     if (
       !party &&
+      !mergedReceive &&
       !(
         transfer &&
         ["待签收", "已签收", "已拒收", "待检测", "已检测", "退回中", "已退回"].includes(status) &&
@@ -1696,8 +1707,11 @@ export class ReportPolicyController {
       target && hasCoords(target)
         ? distanceSnapshot(target, await boxDistances(this.db, ids, target))
         : null;
-    // 运送中直接扫码签收、拒收：先自动记一笔确认到达
-    if (transfer && row.status === "运送中" && [signTo, "已拒收", "退回中"].includes(status)) {
+    // 运送中（旧调拨）/在途（合并单）直接扫码签收、拒收：先自动记一笔确认到达
+    if (
+      ((transfer && row.status === "运送中") || (merged && row.status === "在途")) &&
+      [signTo, "已拒收", "退回中"].includes(status)
+    ) {
       await this.policies.transition(id, "待签收", {
         actor: actorOf(ctx),
         note: "扫码收货时自动确认到达",
@@ -1705,12 +1719,14 @@ export class ReportPolicyController {
     }
     // 签收交接（R-5）：归属迁移并入 transition 的同一事务，任一台失败整体回滚，
     // 不再出现「已签收但归属只移了一半」。跳过守卫（已改挂/不在寄出方）语义不变。
+    // 退回交接（D3）：合并单「已退回」时归属回迁原寄出分公司，同样同事务、整体回滚。
     const result = await this.policies.transition(id, status, {
       actor: actorOf(ctx),
       note,
       detail,
       action: force ? FORCE_SIGN : undefined,
-      handOver: transfer && status === signTo ? { signerFit } : null,
+      handOver: (transfer || merged) && status === signTo ? { signerFit } : null,
+      returnHandOver: merged && status === "已退回" ? true : null,
     });
     const handOver = result.handOver;
     // 旧字段兼容：handOverSkipped 仍是 [{id, reason}]；新字段 handOver 给全量 moved/skipped
@@ -1723,7 +1739,7 @@ export class ReportPolicyController {
     if (handOverSkipped.length) {
       await this.log(
         ctx,
-        `调拨签收跳过 ${handOverSkipped.length} 台箱子：建单后已改挂到别的单位，未自动改归属`,
+        `签收交接跳过 ${handOverSkipped.length} 台箱子：建单后已改挂到别的单位，未自动改归属`,
         id
       );
       for (const item of handOver.skipped)
@@ -1795,7 +1811,7 @@ export class ReportPolicyController {
       source: "task",
       level: "warn",
       kind: "hand-over-skipped",
-      message: `调拨单 #${taskId} 签收时跳过一台箱子：这台现在挂在${orgName}名下，未自动改为接收单位`,
+      message: `任务单 #${taskId} 交接时跳过一台箱子：这台现在挂在${orgName}名下，未自动改归属`,
       deviceId: boxId,
       actorId: ctx.user?.id,
     });
@@ -1815,7 +1831,7 @@ export class ReportPolicyController {
   }
 }
 
-/** 签收核验那一步：调拨叫「待签收」，采样寄回叫「待核验」。任务单列表的「待签收」标签两种都列。 */
+/** 签收核验那一步：合并单/调拨叫「待签收」，旧采样寄回叫「待核验」。任务单列表的「待签收」标签都列。 */
 const SIGN_STEPS = ["待签收", "待核验"];
 
 /** 有取消以外的动作可做：算「待我处理」。只能取消的（比如管理员看别人的单）不算。 */
@@ -1823,8 +1839,9 @@ function actionable(can) {
   return Object.entries(can).some(([to, ok]) => ok && to !== "已取消");
 }
 
-/** 任务要记进出的地点：调拨看寄出、收货地址，采样看计划地点（双向再加寄出地址）。没坐标的跳过。 */
+/** 任务要记进出的地点：调拨/合并单看寄出、收货地址，采样看计划地点（旧双向单再加寄出地址）。没坐标的跳过。 */
 function taskPlaces(task) {
+  const merged = task.kind === "采样" && !["单向", "双向"].includes(task.trip);
   return (
     task.kind === "调拨"
       ? [
@@ -1833,7 +1850,8 @@ function taskPlaces(task) {
         ]
       : [
           { ...task.placeAt, role: "计划地点" },
-          ...(task.trip ? [{ ...task.fromPlace, role: "寄出地址" }] : []),
+          ...(task.trip || merged ? [{ ...task.fromPlace, role: "寄出地址" }] : []),
+          ...(merged ? [{ ...task.toPlace, role: "收货地址" }] : []),
         ]
   )
     .filter((p) => hasCoords(p))

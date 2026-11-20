@@ -225,6 +225,11 @@ test("055b：GRANT_055 补角色和部门上限的导出码、旧 5→3、AGENCY
     await db.run(
       "INSERT INTO sys_role (id, name, code, data_scope, sort, status) VALUES ('85', '旧自定义', 'OLD5', 5, 95, 1)"
     );
+    // 组织简化（B1b）：新种子不再含 14 AGENCY_LEAD（056 合并进 BRANCH_ADMIN）；
+    // 055b 是存量库迁移，这里手工补旧种子角色行模拟升级前形态，补码逻辑仍要守住
+    await db.run(
+      "INSERT INTO sys_role (id, name, code, data_scope, sort, status) VALUES ('14', '机构负责人', 'AGENCY_LEAD', 2, 8, 1)"
+    );
     // 模拟管理员曾收回机构负责人的日志码（R3：一次性补回）
     await db.run(
       "DELETE FROM sys_role_perm WHERE role_id = '14' AND perm IN ('sys:oplog:read', 'sys:oplog:export', 'sys:user:create')"

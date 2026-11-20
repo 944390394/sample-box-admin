@@ -2,7 +2,7 @@
   <div class="page-container dept-page">
     <PageHeader
       title="部门"
-      subtitle="公司、分公司和采样机构（检测站）的层级。部门地址会带进任务单的寄出、接收和采样地点。"
+      subtitle="公司（总公司 / 分公司）与唯一检测站的层级。分公司自采，部门地址会带进任务单的寄出、收货和采样地点。"
     >
       <template #actions>
         <el-button
@@ -61,13 +61,13 @@
                   <el-tag size="small" type="info" effect="plain" class="node-type">仅可见</el-tag>
                 </el-tooltip>
                 <el-tag
-                  v-if="data.type === '采样机构'"
+                  v-if="data.type === '检测站'"
                   size="small"
-                  type="success"
+                  type="warning"
                   effect="plain"
                   class="node-type"
                 >
-                  机构
+                  检测站
                 </el-tag>
                 <el-icon v-if="data.lng != null" class="node-pin"><Location /></el-icon>
                 <span v-if="data.children?.length" class="node-count">
@@ -91,7 +91,7 @@
                 <el-tag size="small" type="info">{{ selected.code }}</el-tag>
                 <el-tag
                   size="small"
-                  :type="selected.type === '采样机构' ? 'success' : 'primary'"
+                  :type="selected.type === '检测站' ? 'warning' : 'primary'"
                   effect="plain"
                 >
                   {{ selected.type || "公司" }}
@@ -372,7 +372,7 @@
                 <el-input
                   v-model="formData.name"
                   maxlength="64"
-                  placeholder="如：采样机构丙"
+                  placeholder="如：华南分公司"
                   :disabled="basicLocked"
                 />
               </el-form-item>
@@ -404,20 +404,25 @@
               <el-form-item label="类型">
                 <el-radio-group v-model="formData.type" :disabled="!can('sys:dept:type')">
                   <el-radio-button value="公司">公司</el-radio-button>
-                  <el-radio-button value="采样机构">采样机构（检测站）</el-radio-button>
+                  <el-radio-button value="检测站">检测站</el-radio-button>
                 </el-radio-group>
                 <p class="tip">
-                  采样机构就是检测站：送到这里的任务签收后要逐台扫码「开始检测」，总览里单列；做采样单位时可以要求开箱录像
+                  {{
+                    formData.type === "检测站"
+                      ? "检测站全局唯一、须挂总公司子树：接收任务单后逐台扫码「开始检测」，总览里单列；禁配摄像头（开箱凭证靠扫码＋开箱次数差）。"
+                      : "公司＝总公司 / 分公司。分公司自采，可配采样现场监控通道；任务单接收方固定为唯一检测站。"
+                  }}
                 </p>
               </el-form-item>
             </el-col>
-            <el-col v-if="formData.type === '采样机构'" :span="24">
+            <el-col v-if="formData.type === '公司'" :span="24">
               <el-form-item label="监控通道">
                 <CameraEditor v-if="can('sys:dept:camera')" v-model="formData.cameras" />
                 <p v-else class="tip">
                   已配置
                   {{ formData.cameras?.length || 0 }} 路。没有「配置监控通道」权限，不能修改。
                 </p>
+                <p class="tip">分公司采样现场的监控通道（1–8 路）；检测站不设摄像头。</p>
               </el-form-item>
             </el-col>
             <el-col :span="12" :xs="24">
@@ -940,16 +945,10 @@ async function searchUsers(keywords = "") {
   }
 }
 
-/** 新建负责人时按上级类型给角色建议：合作机构下是机构负责人，其余是分公司管理员。 */
+/** 新建负责人时按类型给角色建议：检测站建议值班员，其余分公司管理员（机构负责人已并入分公司管理员）。 */
 function suggestRoles() {
   if (leader.create.roleIds.length) return;
-  const names: string[] = [];
-  let cursor = formData.parentId ? deptIndex.value.get(String(formData.parentId)) : undefined;
-  while (cursor && names.length < 10) {
-    names.push(cursor.name || "");
-    cursor = cursor.parentId ? deptIndex.value.get(String(cursor.parentId)) : undefined;
-  }
-  const wanted = names.some((name) => name.includes("机构")) ? "机构负责人" : "分公司管理员";
+  const wanted = formData.type === "检测站" ? "值班员" : "分公司管理员";
   const role = roleOptions.value.find((r) => r.label === wanted);
   if (role) leader.create.roleIds = [String(role.value)];
 }
@@ -1189,11 +1188,11 @@ async function handleSubmit(): Promise<void> {
   saving.value = true;
   try {
     const deptId = formData.id;
-    // 只有采样机构有监控通道，改成公司时清掉
+    // 只有分公司（公司类型）有采样现场监控通道，改成检测站时清掉（检测站禁配）
     const payload: DeptForm = {
       ...formData,
       leader: leaderPayload(),
-      cameras: formData.type === "采样机构" ? formData.cameras || [] : [],
+      cameras: formData.type === "公司" ? formData.cameras || [] : [],
     };
     const result = deptId ? await DeptAPI.update(deptId, payload) : await DeptAPI.create(payload);
     ElMessage.success(deptId ? "修改成功" : "新增成功");

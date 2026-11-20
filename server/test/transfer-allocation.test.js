@@ -10,6 +10,7 @@
  * 4. candidate-boxes 服务端下发可选箱集，与提交守卫同一结论（替换前端 16 台 POOL）；
  * 5. 特性开关关：新端点报未开通，旧 /tasks 行为完全不变；开：tasks 默认采样（D-1）、
  *    送检 IN- 前缀 + is_inspect=1、划拨走错端点被拒。
+ * 6. P8 划拨目标类型闸门（组织简化 B1c）：检测站拒绝、总部/分公司（公司类型）允许、非公司类型拒绝。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -75,7 +76,7 @@ async function setup({ enabled = true } = {}) {
     ["1", "0", "总公司", "公司"],
     ["2", "1", "深圳分公司", "公司"],
     ["3", "1", "广州分公司", "公司"],
-    ["4", "1", "花都检测站", "采样机构"],
+    ["4", "1", "花都检测站", "检测站"],
     ["5", "1", "第三方公司", "公司"],
   ])
     await db.run(
@@ -254,13 +255,69 @@ test("划拨提交即生效：单据+快照+归属同一事务，AL- 前缀，�
   }
 });
 
+test("P8 划拨目标类型闸门（B1c）：检测站拒绝、总部允许（收回未分配）、分公司允许、非公司类型拒绝；拒绝不落单不占幂等 token", async () => {
+  const s = await setup();
+  try {
+    const b1 = await s.makeBox("2");
+    const actor = s.ctx(s.people.a, ["1", "2", "3", "4", "5"]);
+    const transfer = (toOrgId, extra = {}) =>
+      s.run(s.controller.createTransfer.bind(s.controller), actor, {
+        body: { name: "P8 类型闸门", toOrgId, boxIds: [b1], ...extra },
+      });
+    // 检测站：友好拒绝——单据/归属/幂等行都不落
+    const toStation = await transfer("4", { clientToken: "tok-p8" });
+    assert.equal(toStation.ok, false);
+    assert.match(toStation.message, /检测站不参与归属划拨/);
+    assert.equal((await s.boxRow(b1)).org_id, "2", "拒绝不转移归属");
+    assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task WHERE kind='划拨'"), 0);
+    assert.equal(
+      await s.count("SELECT COUNT(*) AS n FROM transfer_request"),
+      0,
+      "拒绝不占幂等 token"
+    );
+    // 总部（type=公司）：允许＝收回未分配语义；同一 token 可正常提交（上次拒绝未落幂等行）
+    const toHq = await transfer("1", { clientToken: "tok-p8" });
+    assert.ok(toHq.ok, `${toHq.code} ${toHq.message}`);
+    assert.equal(toHq.data.idempotent, false);
+    assert.match(toHq.data.id, /^AL-/);
+    assert.deepEqual(toHq.data.toOrg, { id: "1", name: "总公司" });
+    assert.equal((await s.boxRow(b1)).org_id, "1");
+    assert.equal((await s.boxRow(b1)).org, "总公司");
+    // 分公司：允许（总部收回后再分配 1→3）
+    const toBranch = await transfer("3");
+    assert.ok(toBranch.ok, `${toBranch.code} ${toBranch.message}`);
+    assert.equal((await s.boxRow(b1)).org_id, "3");
+    // 非公司类型（056 归一前的旧采样机构残留）：通用友好报错
+    await s.db.run("UPDATE sys_dept SET type='采样机构' WHERE id='5'");
+    const toLegacy = await transfer("5");
+    assert.equal(toLegacy.ok, false);
+    assert.match(toLegacy.message, /划拨目标必须是公司类型/);
+    assert.equal((await s.boxRow(b1)).org_id, "3", "拒绝不转移归属");
+    // 停用目标：仍先报不存在/停用（类型闸门不改变既有前置校验顺序）
+    await s.db.run("UPDATE sys_dept SET status=0 WHERE id='3'");
+    const disabled = await transfer("3");
+    assert.equal(disabled.ok, false);
+    assert.match(disabled.message, /不存在或已停用/);
+    assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task WHERE kind='划拨'"), 2);
+  } finally {
+    await s.teardown();
+  }
+});
+
 test("划拨守卫拒绝全回滚：第二台被未结束任务占用，第一台归属不得残留", async () => {
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
     const b2 = await s.makeBox("2");
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.a, ["2"]), {
-      body: { name: "南山管网水样采集", kind: "采样", boxIds: [b2], fromOrgId: "2", sender: "x", signer: "y" },
+      body: {
+        name: "南山管网水样采集",
+        kind: "采样",
+        boxIds: [b2],
+        fromOrgId: "2",
+        sender: "x",
+        signer: "y",
+      },
     });
     assert.ok(occ.ok, occ.message);
     const before1 = await s.boxRow(b1);
@@ -453,7 +510,14 @@ test("划拨撤销守卫 IN_ACTIVE_TASK：已进入未结束任务，整单禁�
     const b1 = await s.makeBox("2");
     const d = await submit(s, [b1]);
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.b, ["3"]), {
-      body: { name: "南山管网水样采集", kind: "采样", boxIds: [b1], fromOrgId: "3", sender: "x", signer: "y" },
+      body: {
+        name: "南山管网水样采集",
+        kind: "采样",
+        boxIds: [b1],
+        fromOrgId: "3",
+        sender: "x",
+        signer: "y",
+      },
     });
     assert.ok(occ.ok, occ.message);
     const res = await s.run(
@@ -599,7 +663,14 @@ test("candidate-boxes：服务端下发可选箱集，与提交守卫同一结�
     const disabled = await s.makeBox("2", { life: "停用" });
     const atTarget = await s.makeBox("3");
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.a, ["2"]), {
-      body: { name: "南山管网水样采集", kind: "采样", boxIds: [busy], fromOrgId: "2", sender: "x", signer: "y" },
+      body: {
+        name: "南山管网水样采集",
+        kind: "采样",
+        boxIds: [busy],
+        fromOrgId: "2",
+        sender: "x",
+        signer: "y",
+      },
     });
     assert.ok(occ.ok, occ.message);
     const res = await s.run(
@@ -655,20 +726,29 @@ test("candidate-boxes：服务端下发可选箱集，与提交守卫同一结�
   }
 });
 
-test("开关关：新端点报未开通，旧 /tasks 行为完全不变（白名单/默认全部/送检拒收）", async () => {
+test("开关关：划拨新端点报未开通；合并采样单不受开关影响，调拨/送检不再新建", async () => {
   const s = await setup({ enabled: false });
   try {
     const b1 = await s.makeBox("2");
     const b2 = await s.makeBox("2");
+    // 合并采样单：不受划拨/送检开关影响
     const sample = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
       {
-        body: { name: "采样单", kind: "采样", boxIds: [b1] },
+        body: {
+          name: "采样单",
+          kind: "采样",
+          boxIds: [b1],
+          fromOrgId: "2",
+          sender: "x",
+          signer: "y",
+        },
       }
     );
     assert.ok(sample.ok, sample.message);
-    const legacy = await s.run(
+    // 调拨不再新建（只读保留）
+    const legacyReject = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
       {
@@ -683,27 +763,36 @@ test("开关关：新端点报未开通，旧 /tasks 行为完全不变（白名
         },
       }
     );
-    assert.ok(legacy.ok, legacy.message);
-    assert.match(legacy.data.id, /^TK-/, "开关关时旧调拨仍发 TK-");
-    // 不传 kind：返回全部（旧行为）
-    const all = await s.run(
+    assert.match(legacyReject.message, /调拨单已停用/);
+    // 存量旧调拨单：policy 层建单模拟迁移前数据，仍发 TK-
+    const legacyId = await s.policies.createTask({
+      name: "旧调拨单",
+      kind: "调拨",
+      boxIds: [b2],
+      fromOrgId: "2",
+      fromOrg: "深圳分公司",
+      toOrgId: "3",
+      toOrg: "广州分公司",
+      senderId: "101",
+      signerId: "201",
+    });
+    assert.match(legacyId, /^TK-/);
+    // 不传 kind：默认采样（合并单主口径）
+    const def = await s.run(
       s.controller.tasks.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
       {}
     );
-    assert.ok(all.ok, all.message);
+    assert.ok(def.ok, def.message);
+    assert.equal(def.data.total, 1);
+    assert.equal(def.data.list[0].kind, "采样");
+    // allKinds=1 兜底回全部
+    const all = await s.run(s.controller.tasks.bind(s.controller), s.ctx(s.people.a, ["2", "3"]), {
+      query: { allKinds: "1" },
+    });
     assert.equal(all.data.total, 2);
     assert.deepEqual(new Set(all.data.list.map((t) => t.kind)), new Set(["采样", "调拨"]));
-    // 未知 kind 被忽略（旧白名单行为）
-    const unknown = await s.run(
-      s.controller.tasks.bind(s.controller),
-      s.ctx(s.people.a, ["2", "3"]),
-      {
-        query: { kind: "送检" },
-      }
-    );
-    assert.equal(unknown.data.total, 2);
-    // 送检建单被拒（旧白名单）
+    // 送检建单被拒（已并入采样单）
     const inspect = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
@@ -720,21 +809,22 @@ test("开关关：新端点报未开通，旧 /tasks 行为完全不变（白名
       }
     );
     assert.equal(inspect.code, "A0400");
+    assert.match(inspect.message, /送检已并入采样单/);
     // 新端点一律明确未开通（A0409 notConfigured）
     for (const [fn, extra] of [
       [s.controller.createTransfer, { body: { name: "x", toOrgId: "3", boxIds: [b1] } }],
       [s.controller.transfers, {}],
       [s.controller.transferCandidates, {}],
-      [s.controller.transferDetail, { params: { id: legacy.data.id } }],
-      [s.controller.revokeTransfer, { params: { id: legacy.data.id }, body: { reason: "误划拨" } }],
+      [s.controller.transferDetail, { params: { id: legacyId } }],
+      [s.controller.revokeTransfer, { params: { id: legacyId }, body: { reason: "误划拨" } }],
     ]) {
       const res = await s.run(fn.bind(s.controller), s.ctx(s.people.a, ["2", "3"]), extra);
       assert.equal(res.code, "A0409", `${fn.name} 应报未开通`);
       assert.match(res.message, /未开通/);
     }
-    // 旧调拨流程照常推进（不受开关影响）
+    // 存量旧调拨流程照常推进（不受开关影响）
     const step = await s.run(s.controller.transition.bind(s.controller), s.ctx(s.people.a, ["2"]), {
-      params: { id: legacy.data.id },
+      params: { id: legacyId },
       body: { status: "运送中" },
     });
     assert.ok(step.ok, `${step.code} ${step.message}`);
@@ -743,7 +833,7 @@ test("开关关：新端点报未开通，旧 /tasks 行为完全不变（白名
   }
 });
 
-test("开关开：tasks 默认采样/allKinds 兜底（D-1），送检 IN-+is_inspect，划拨列表/详情/走错端点", async () => {
+test("开关开：tasks 默认采样/allKinds 兜底，合并单 TK-+is_inspect，划拨列表/详情/走错端点", async () => {
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
@@ -754,27 +844,30 @@ test("开关开：tasks 默认采样/allKinds 兜底（D-1），送检 IN-+is_in
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
       {
-        body: { name: "采样单", kind: "采样", boxIds: [b1] },
-      }
-    );
-    assert.ok(sample.ok, sample.message);
-    const legacy = await s.run(
-      s.controller.createTask.bind(s.controller),
-      s.ctx(s.people.a, ["2"]),
-      {
         body: {
-          name: "旧调拨单",
-          kind: "调拨",
-          boxIds: [b2],
+          name: "采样单",
+          kind: "采样",
+          boxIds: [b1],
           fromOrgId: "2",
-          toOrgId: "3",
-          senderId: "101",
-          signerId: "201",
+          sender: "x",
+          signer: "y",
         },
       }
     );
-    assert.ok(legacy.ok, legacy.message);
-    // 默认只回采样；allKinds=1 兜底回全部；kind=送检 精确过滤
+    assert.ok(sample.ok, sample.message);
+    const legacyId = await s.policies.createTask({
+      name: "旧调拨单",
+      kind: "调拨",
+      boxIds: [b2],
+      fromOrgId: "2",
+      fromOrg: "深圳分公司",
+      toOrgId: "3",
+      toOrg: "广州分公司",
+      senderId: "101",
+      signerId: "201",
+    });
+    assert.ok(legacyId);
+    // 默认只回采样；allKinds=1 兜底回全部
     const def = await s.run(
       s.controller.tasks.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
@@ -790,40 +883,42 @@ test("开关开：tasks 默认采样/allKinds 兜底（D-1），送检 IN-+is_in
       }
     );
     assert.equal(allKinds.data.total, 2);
-    // 送检建单：IN- 前缀 + is_inspect=1 + 待寄出 + 5 步
+    // 合并采样单：TK- 前缀 + is_inspect=1 + 待采样 + 7 步
     const inspect = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
       {
         body: {
           name: "花都水样送检",
-          kind: "送检",
+          kind: "采样",
           boxIds: [b3],
           fromOrgId: "2",
-          toOrgId: "4",
           senderId: "101",
           signerId: "401",
         },
       }
     );
     assert.ok(inspect.ok, `${inspect.code} ${inspect.message}`);
-    assert.match(inspect.data.id, /^IN-\d+-[0-9a-f]{6}$/);
+    assert.match(inspect.data.id, /^TK-\d+-[0-9a-f]{6}$/);
     const inspRow = await s.taskRow(inspect.data.id);
-    assert.equal(inspRow.kind, "送检");
-    assert.equal(inspRow.status, "待寄出");
+    assert.equal(inspRow.kind, "采样");
+    assert.equal(inspRow.status, "待采样");
+    assert.equal(inspRow.to_org_id, "4", "接收方固定检测站");
     assert.equal(Number(inspRow.is_inspect), 1);
     assert.equal(JSON.parse(inspRow.body).inspect, true);
     const inspList = await s.run(
       s.controller.tasks.bind(s.controller),
       s.ctx(s.people.a, ["2", "4"]),
       {
-        query: { kind: "送检" },
+        query: { kind: "采样", q: "花都" },
       }
     );
     assert.equal(inspList.data.total, 1);
     assert.deepEqual(inspList.data.list[0].steps, [
-      "待寄出",
-      "运送中",
+      "待采样",
+      "采样中",
+      "已封箱",
+      "在途",
       "待签收",
       "待检测",
       "已检测",

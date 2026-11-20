@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 验收隔离环境（任务 #12 交付物 1、2 的执行部分）。
+ * 验收隔离环境（任务 #12 交付物 1、2 的执行部分；组织简化 B4a 改新树口径）。
  *
  * 这个脚本只做四件事：
  *   doctor  端口/环境体检，不写任何东西
@@ -10,6 +10,19 @@
  *           （上一轮 up 中途失败留下孤儿进程、没有 instance.json 时，用 down --pid <PID>：
  *            必须同时通过「8010 监听者 == 该 PID」和「命令行是 server/index.js」两道复核才 kill）
  *
+ * 组织简化（B4a）口径：
+ *   - 13＝总部检测站（type=检测站、挂总公司 1 下，shared/org.js 新种子直接给，不再改类型）；
+ *     机构子树 5/51/52/511/521 不再构造；分公司现场组 22（现场一组）为夹具新增部门。
+ *   - accept.agency 改绑 BRANCH_ADMIN 挂 22 现场一组；lin.xia 挂华南分公司 2（新种子）。
+ *   - 「送检单」夹具改真合并流：kind=采样、接收方固定 13（服务端 resolveStation），
+ *     推进到合并 7 步＋4 分支各态；不再用 kind=调拨 绕过（调拨/送检新建已被服务端拒绝）。
+ *   - 划拨守卫/可撤样本走 POST /sample/transfers（划拨 AL-，提交即生效）。
+ *   - stationDeptId 选择：**显式写入夹具 config**（box.stationDeptId="13"，确定性优先；
+ *     DB 回退认定路径由 org-b1b 单测与 B1c 探针覆盖）。
+ *   - 宽限口径：config 显式 taskOfflineGraceSec=2400（40 分钟，PLAN.graceMinutes），
+ *     不靠服务端默认 3600——check 的「两张单取最早 50 分钟→计离线」档要 40 分钟线才判得动。
+ *     unified-r2 会把宽限改回 3600，所以复跑顺序固定：up → check → unified-r2 → unified-r7。
+ *
  * 隔离边界（硬性）：
  *   - 库文件、系统日志、db.config.json（含随机 secret）全在 %TEMP%/samplebox-acceptance-20261119 下新建；
  *     绝不读写 server/data/**、reports/demo2/**。
@@ -18,6 +31,12 @@
  *   - SAMPLE_ACCEPTANCE=1、SAMPLE_WECHAT_FAKE_OPENID 只加到本脚本 spawn 的子进程 env 上。
  *   - 停进程前先用 netstat 确认目标端口 8010 的监听 PID 就是 instance.json 里记的那个，否则拒绝 kill。
  *   - 账号口令随机生成，只写进临时目录里的 accounts.local.json（仓库外），报告里只出现文件路径。
+ *
+ * 隔离副本复跑（B4a，不重启 8010 主夹具）：三个环境变量把整套 up/check/down 指到别的 home 与端口，
+ * 默认值不变、既有消费方零影响：
+ *   SAMPLE_ACCEPTANCE_HOME=<临时目录> SAMPLE_ACCEPTANCE_API_PORT=18088 SAMPLE_ACCEPTANCE_TCP_PORT=19008
+ *   node tools/acceptance-setup.mjs up --fresh   （unified-r2/r7 用 SAMPLE_ACCEPTANCE_API 与
+ *   SAMPLE_ACCEPTANCE_ACCOUNTS 指到同一副本；口令文件随副本 home 随机生成，不覆盖主夹具）
  *
  * 用法：
  *   node tools/acceptance-setup.mjs up --fresh
@@ -43,13 +62,13 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const OUT_DIR = path.join(ROOT, "reports", "acceptance", "20261119");
 
 export const PLAN = {
-  home: path.join(os.tmpdir(), "samplebox-acceptance-20261119"),
-  apiPort: 8010,
-  tcpPort: 9010,
+  home: process.env.SAMPLE_ACCEPTANCE_HOME || path.join(os.tmpdir(), "samplebox-acceptance-20261119"),
+  apiPort: Number(process.env.SAMPLE_ACCEPTANCE_API_PORT) || 8010,
+  tcpPort: Number(process.env.SAMPLE_ACCEPTANCE_TCP_PORT) || 9010,
   webPort: 3000,
   /** 系统默认上报周期（秒）。离在线阈值 = 3 个周期 = 30 分钟，夹具的「超 3 周期」按这个算。 */
   reportPeriodSec: 600,
-  /** 派发口径：建单后 40 分钟内从未上报算中性「待上线」，不计离线。当前代码未实现，check 会实测。 */
+  /** 派发口径：建单后 40 分钟内从未上报算中性「待上线」，不计离线。config 显式写 2400 秒钉住这条线。 */
   graceMinutes: 40,
   forbiddenPorts: [8000, 8002, 9000, 9002, 9001, 5173, 3001, 8100, 9100, 3200, 8123, 8124, 9123, 9124],
 };
@@ -62,9 +81,11 @@ const isoAgo = (ms) => new Date(Date.now() - ms).toISOString();
 
 /* ---------------------------------------------------------------- 夹具清单 -- */
 
-/** 检测站：默认组织里的「核验中心」改成采样机构类型（采样机构 = 检测站，签收后进待检测）。 */
-export const STATION = { id: "13", name: "验收检测站", signerUserId: "5" };
+/** 唯一检测站（组织简化 P5）：新种子 13＝总部检测站，type=检测站、挂总公司 1 下；config 显式指定。 */
+export const STATION = { id: "13", name: "总部检测站", signerUserId: "5" };
 export const HOME_ORG = { id: "21", name: "调度室" };
+/** 夹具新增的分公司现场组（新种子无机构层；accept.agency 改绑 BRANCH_ADMIN 后挂这里）。 */
+export const FIELD_DEPT = { id: "22", parentId: "2", name: "现场一组", code: "SOUTH_FIELD1" };
 const SZ = { lng: 114.0579, lat: 22.5431 };
 
 /**
@@ -91,31 +112,35 @@ export const BOXES = {
   guardInspected: { imei: "861199900000303", name: "验收-守卫已完成开箱检测", tier: "撤销守卫/已完成开箱检测" },
   revocableA: { imei: "861199900000304", name: "验收-可撤划拨A", tier: "撤销守卫/全部可撤的划拨单" },
   revocableB: { imei: "861199900000305", name: "验收-可撤划拨B", tier: "撤销守卫/全部可撤的划拨单" },
-  // 送检单 9 状态，一台一个
-  insp1: { imei: "861199900000401", name: "验收-送检待寄出", tier: "送检单/待寄出" },
-  insp2: { imei: "861199900000402", name: "验收-送检运送中", tier: "送检单/运送中" },
-  insp3: { imei: "861199900000403", name: "验收-送检待签收", tier: "送检单/待签收" },
-  insp4: { imei: "861199900000404", name: "验收-送检待检测", tier: "送检单/待检测" },
-  insp5: { imei: "861199900000405", name: "验收-送检退回中", tier: "送检单/退回中" },
-  insp6: { imei: "861199900000406", name: "验收-送检已检测", tier: "送检单/已检测" },
-  insp7: { imei: "861199900000407", name: "验收-送检已退回", tier: "送检单/已退回" },
-  insp8: { imei: "861199900000408", name: "验收-送检已拒收", tier: "送检单/已拒收" },
-  insp9: { imei: "861199900000409", name: "验收-送检已取消", tier: "送检单/已取消" },
+  // 合并采样单（采样＋送检一张单，TK-）：主路径 7 步＋4 分支，一台一个
+  insp1: { imei: "861199900000401", name: "验收-合并单已封箱", tier: "合并单/已封箱" },
+  insp2: { imei: "861199900000402", name: "验收-合并单在途", tier: "合并单/在途" },
+  insp3: { imei: "861199900000403", name: "验收-合并单待签收", tier: "合并单/待签收" },
+  insp4: { imei: "861199900000404", name: "验收-合并单待检测", tier: "合并单/待检测" },
+  insp5: { imei: "861199900000405", name: "验收-合并单退回中", tier: "合并单/退回中" },
+  insp6: { imei: "861199900000406", name: "验收-合并单已检测", tier: "合并单/已检测" },
+  insp7: { imei: "861199900000407", name: "验收-合并单已退回", tier: "合并单/已退回" },
+  insp8: { imei: "861199900000408", name: "验收-合并单已拒收", tier: "合并单/已拒收" },
+  insp9: { imei: "861199900000409", name: "验收-合并单已取消", tier: "合并单/已取消" },
+  insp10: { imei: "861199900000410", name: "验收-合并单待采样", tier: "合并单/待采样" },
+  insp11: { imei: "861199900000411", name: "验收-合并单采样中", tier: "合并单/采样中" },
   // 供 #4 现场新建任务用的空箱 + 告警样本
   spare1: { imei: "861199900000501", name: "验收-可用空箱1", tier: "可用（未使用）" },
   spare2: { imei: "861199900000502", name: "验收-可用空箱2", tier: "可用（未使用）" },
   alertLow: { imei: "861199900000503", name: "验收-低电开盖告警", tier: "告警/低电+开盖+温度异常" },
 };
 
-/** 角色模板账号：8 个模板 + 系统管理员。id 沿用 shared/org.js，新账号从 9101 起。 */
+/** 角色模板账号：模板 + 系统管理员。id 沿用 shared/org.js，新账号从 9101 起。
+ * 组织简化（B4a）：agency 改绑 BRANCH_ADMIN 挂分公司现场组 22；sampler 挂分公司 2（新种子）；
+ * AGENCY_LEAD 不再种（056 存量改绑），夹具不再构造该角色账号。 */
 export const ACCOUNTS = {
   admin: { userId: "2", username: "admin", nickname: "系统管理员", role: "ADMIN", dept: "11", label: "系统管理员（全部权限）" },
   asset: { userId: "4", username: "zhou.ning", nickname: "周宁", role: "ASSET", dept: "12", label: "资产管理员（有设备标识权限）" },
-  verify: { userId: "5", username: "wu.di", nickname: "吴迪", role: "VERIFY", dept: "13", label: "核验员 / 检测站签收人" },
-  dispatch: { userId: "6", username: "chen.ke", nickname: "陈可", role: "DISPATCH", dept: "21", label: "调度员（建单、推进、取消）" },
-  sampler: { userId: "7", username: "lin.xia", nickname: "林夏", role: "SAMPLER", dept: "511", label: "现场采样员（仅本人，无设备标识权限）" },
+  verify: { userId: "5", username: "wu.di", nickname: "吴迪", role: "VERIFY", dept: "13", label: "核验员 / 总部检测站签收人" },
+  dispatch: { userId: "6", username: "chen.ke", nickname: "陈可", role: "DISPATCH", dept: "21", label: "调度员（建合并采样单、推进、取消）" },
+  sampler: { userId: "7", username: "lin.xia", nickname: "林夏", role: "SAMPLER", dept: "2", label: "现场采样员（分公司，仅本人，无设备标识权限）" },
   duty: { userId: "9101", username: "accept.duty", nickname: "验收值班员", role: "DUTY", dept: "14", label: "值班员（离线/低电 KPI 视角）" },
-  agency: { userId: "9102", username: "accept.agency", nickname: "验收机构负责人", role: "AGENCY_LEAD", dept: "51", label: "采样机构负责人（检测）" },
+  agency: { userId: "9102", username: "accept.agency", nickname: "验收现场组管理员", role: "BRANCH_ADMIN", dept: FIELD_DEPT.id, label: "分公司管理员（现场组，采样/检测视角）" },
   branch: { userId: "9103", username: "accept.branch", nickname: "验收分公司管理员", role: "BRANCH_ADMIN", dept: "2", label: "分公司管理员（人员/角色）" },
   leader: { userId: "9104", username: "accept.leader", nickname: "验收只读领导", role: "LEADER", dept: "1", label: "只读领导（集团视角）" },
 };
@@ -246,7 +271,17 @@ export async function prepareHome(home, { fresh = true } = {}) {
     password: "",
     database: "",
     secret: randomBytes(24).toString("hex"),
-    box: { reportPeriodSec: PLAN.reportPeriodSec, reportOnlyWhenCharging: false, batteryReserve: 20 },
+    box: {
+      reportPeriodSec: PLAN.reportPeriodSec,
+      reportOnlyWhenCharging: false,
+      batteryReserve: 20,
+      // 划拨/送检功能开关：夹具要走 /sample/transfers 建划拨单，恒开
+      enableTransferInspect: true,
+      // 组织简化（B4a/P5）：显式指定唯一检测站（确定性优先；DB 回退认定由单测/探针另行覆盖）
+      stationDeptId: STATION.id,
+      // 宽限 40 分钟钉死夹具口径（服务端默认 3600；check 的 50 分钟档要 40 分钟线才判得动）
+      taskOfflineGraceSec: PLAN.graceMinutes * 60,
+    },
   };
   await writeFile(path.join(home, "db.config.json"), JSON.stringify(config, null, 2), "utf8");
   await writeFile(path.join(home, "install.lock"), new Date().toISOString(), "utf8");
@@ -256,7 +291,12 @@ export async function prepareHome(home, { fresh = true } = {}) {
   try {
     await migrate(db);
     await seedOrg(db);
-    await db.run("UPDATE sys_dept SET type = '采样机构', name = ? WHERE id = ?", [STATION.name, STATION.id]);
+    // 组织简化（B4a）：13＝总部检测站 type=检测站 由新种子直接给（挂总公司 1 下），不再改类型；
+    // 机构子树 5/51/52/511/521 新种子不构造。这里只补检测站地址与分公司现场组。
+    await db.run(
+      "INSERT INTO sys_dept (id, parent_id, name, code, type, sort, status) VALUES (?, ?, ?, ?, '公司', 2, 1)",
+      [FIELD_DEPT.id, FIELD_DEPT.parentId, FIELD_DEPT.name, FIELD_DEPT.code]
+    );
     // 检测站要有地址，签收核验的「离收货点多远」才有得算
     await db.run("UPDATE sys_dept SET address = ?, lng = ?, lat = ? WHERE id = ?", [
       "广东省深圳市南山区验收大道 100 号",
@@ -372,7 +412,7 @@ async function seedBoxes(db) {
   await insert({ id: BOXES.revocableA.imei, imei: BOXES.revocableA.imei, name: BOXES.revocableA.name, life: "未使用" });
   await insert({ id: BOXES.revocableB.imei, imei: BOXES.revocableB.imei, name: BOXES.revocableB.name, life: "未使用" });
 
-  // —— 送检单 9 状态，一台一个
+  // —— 合并采样单 7 步＋4 分支，一台一个
   for (const [key, box] of Object.entries(BOXES)) {
     if (!key.startsWith("insp")) continue;
     await insert({ id: box.imei, imei: box.imei, name: box.name, life: "未使用" });
@@ -478,6 +518,9 @@ export async function applyChargeOnlyPolicy(admin, imei) {
 /**
  * 建单全部用管理员账号（隔离实例上唯一稳妥的推进方），
  * 角色视角的 can/权限在 check 阶段按各账号读回来核对。
+ * 组织简化（B4a）：通用建单端点只收 kind=采样（合并单，接收方固定唯一检测站）；
+ * 划拨走 POST /sample/transfers（AL-，提交即生效）。调拨/送检新建已被服务端拒绝，
+ * 旧「kind=调拨 绕成送检」的写法全部替换为真合并流推进。
  */
 export async function createFixtureTasks(api) {
   const created = {};
@@ -490,6 +533,17 @@ export async function createFixtureTasks(api) {
       return created[name];
     } catch (error) {
       errors.push({ phase: `建单 ${name}`, error: String(error.message || error) });
+      return null;
+    }
+  };
+  const addTransfer = async (name, body) => {
+    try {
+      const res = await api.post("/api/v1/sample/transfers", body);
+      if (res.body?.code !== "00000") throw new Error(`HTTP ${res.status} ${JSON.stringify(res.body)}`);
+      created[name] = res.body.data.id;
+      return created[name];
+    } catch (error) {
+      errors.push({ phase: `划拨 ${name}`, error: String(error.message || error) });
       return null;
     }
   };
@@ -515,52 +569,34 @@ export async function createFixtureTasks(api) {
       return null;
     }
   };
+  /** 合并单公共底：寄出分公司＝调度室（21，华南下），签收人＝检测站吴迪；只写姓名不写 id，
+   * 管理员（全范围＝接收方）才能正常签收推进（写了 signerId 就只能强制签收）。 */
+  const mergedBase = (boxImei, name) => ({
+    name,
+    kind: "采样",
+    boxIds: [boxImei],
+    fromOrgId: HOME_ORG.id,
+    sender: ACCOUNTS.dispatch.nickname,
+    signer: ACCOUNTS.verify.nickname,
+    place: "深圳市南山区验收大道 1 号",
+    maxOpens: 2,
+  });
+  /** 合并流采样段梯子：待采样→采样中→已封箱→在途→待签收→待检测（签收）。 */
+  const ladder = async (id, to, note = "") => {
+    const order = ["采样中", "已封箱", "在途", "待签收", "待检测"];
+    for (const status of order.slice(0, order.indexOf(to) + 1))
+      await step(id, status, status === "待检测" ? note || "夹具代签" : "");
+  };
 
-  // 宽限三态：箱子从未上报，任务建单时间决定宽限内/外
-  await add("graceIn", {
-    name: "验收-宽限内未上报",
-    kind: "调拨",
-    boxIds: [BOXES.graceIn.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: "3",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
-  });
-  created.graceOver = await add("graceOver", {
-    name: "验收-宽限外未上报",
-    kind: "调拨",
-    boxIds: [BOXES.graceOver.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: "3",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
-  });
-  created.twoEarly = await add("twoEarly", {
-    name: "验收-两张单里的较早一张",
-    kind: "调拨",
-    boxIds: [BOXES.graceTwoTasks.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: "3",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
-  });
-  // 「一台箱子同时挂两张未结束单」接口构造不出来：ReportPolicy.js:349 明确 409 拒绝
+  // 宽限三态：箱子从未上报，任务建单时间决定宽限内/外（合并单停在待采样即占用箱子）
+  await add("graceIn", mergedBase(BOXES.graceIn.imei, "验收-宽限内未上报"));
+  created.graceOver = await add("graceOver", mergedBase(BOXES.graceOver.imei, "验收-宽限外未上报"));
+  created.twoEarly = await add("twoEarly", mergedBase(BOXES.graceTwoTasks.imei, "验收-两张单里的较早一张"));
+  // 「一台箱子同时挂两张未结束单」接口构造不出来：ReportPolicy.createTask 明确 409 拒绝
   //（未结束且未检测的单里已经绑了这台箱子），而且 box_active_task.box_id 是主键，
   // 一台箱子结构性地只能挂一个活跃单。这里把接口真实拒绝取成证据；
   // 第二张未结束单由 up 阶段的 DB 夹具（cloneUnfinishedTask）复制出来，只为验目标语义。
-  const twoLateProbe = await api.post("/api/v1/sample/tasks", {
-    name: "验收-两张单里的较晚一张（接口应拒绝）",
-    kind: "调拨",
-    boxIds: [BOXES.graceTwoTasks.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: "3",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
-  });
+  const twoLateProbe = await api.post("/api/v1/sample/tasks", mergedBase(BOXES.graceTwoTasks.imei, "验收-两张单里的较晚一张（接口应拒绝）"));
   created.twoLateByApi = {
     status: twoLateProbe.status,
     code: twoLateProbe.body?.code ?? null,
@@ -571,45 +607,32 @@ export async function createFixtureTasks(api) {
   if (created.twoLateByApi.allowed)
     errors.push({ phase: "一箱两单", error: "接口居然允许了，请与产品确认规则是否已放开（原 409 A0409）" });
 
-  // 守卫一：已进入未结束任务（采样单，停在待采样，也是 #4 走采样流程的样本）
+  // 守卫一：已进入未结束任务（合并采样单，停在待采样，也是现场走采样流程的样本）
   created.guardInTask = await add("guardInTask", {
-    name: "验收-采样进行中（守卫：已进任务）",
-    kind: "采样",
-    boxIds: [BOXES.guardInTask.imei],
-    orgId: "51",
-    place: "深圳市南山区验收大道 5 号",
+    ...mergedBase(BOXES.guardInTask.imei, "验收-采样进行中（守卫：已进任务）"),
+    fromOrgId: "2",
     note: "夹具：这张单停在待采样，用来验「已进入未结束任务」不该撤",
   });
 
-  // 守卫二：划拨后已开箱（建完单再发开箱包）
-  created.guardOpened = await add("guardOpened", {
-    name: "验收-调拨后开箱（守卫：划拨后已开箱）",
-    kind: "调拨",
-    boxIds: [BOXES.guardOpened.imei],
-    fromOrgId: HOME_ORG.id,
+  // 守卫二：划拨后已开箱（划拨提交即生效，建完单再发开箱包）
+  created.guardOpened = await addTransfer("guardOpened", {
+    name: "验收-划拨后开箱（守卫：划拨后已开箱）",
     toOrgId: "3",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
+    boxIds: [BOXES.guardOpened.imei],
   });
 
   // 全部可撤的一张划拨单（两台，都没进过别的单、没开箱、没检测）
-  created.revocable = await add("revocable", {
+  created.revocable = await addTransfer("revocable", {
     name: "验收-全部可撤的划拨单",
-    kind: "调拨",
-    boxIds: [BOXES.revocableA.imei, BOXES.revocableB.imei],
-    fromOrgId: HOME_ORG.id,
     toOrgId: "3",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
+    boxIds: [BOXES.revocableA.imei, BOXES.revocableB.imei],
   });
 
-  // 送检单：签收方是采样机构（检测站），9 个状态各一张。
-  // 单名里直接写目标状态（不是 insp6 这种脚本键），任务列表和截图一眼能看懂。
-  const INSPECT_LABELS = {
-    insp1: "待寄出",
-    insp2: "运送中",
+  // 合并采样单（采样＋送检一张单）：接收方固定总部检测站 13，主路径 7 步＋4 分支各一张。
+  // 单名里直接写目标状态，任务列表和截图一眼能看懂。
+  const MERGED_LABELS = {
+    insp1: "已封箱",
+    insp2: "在途",
     insp3: "待签收",
     insp4: "待检测",
     insp5: "退回中",
@@ -617,77 +640,50 @@ export async function createFixtureTasks(api) {
     insp7: "已退回",
     insp8: "已拒收",
     insp9: "已取消",
+    insp10: "待采样",
+    insp11: "采样中",
   };
-  const inspectBase = (key) => ({
-    name: `验收-送检单-${INSPECT_LABELS[key] || key}`,
-    kind: "调拨",
-    boxIds: [BOXES[key].imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: STATION.id,
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    maxOpens: 2,
-  });
+  const merged = (key) => mergedBase(BOXES[key].imei, `验收-合并单-${MERGED_LABELS[key]}`);
 
-  created.inspWaitSend = await add("inspWaitSend", inspectBase("insp1"));
-  created.inspMoving = await add("inspMoving", inspectBase("insp2"));
-  await step(created.inspMoving, "运送中");
-  created.inspWaitSign = await add("inspWaitSign", inspectBase("insp3"));
-  await step(created.inspWaitSign, "运送中");
-  await step(created.inspWaitSign, "待签收");
-  created.inspWaitInspect = await add("inspWaitInspect", inspectBase("insp4"));
-  await step(created.inspWaitInspect, "运送中");
-  await step(created.inspWaitInspect, "待签收");
-  await step(created.inspWaitInspect, "待检测", "夹具代签");
-  created.inspReturning = await add("inspReturning", inspectBase("insp5"));
-  await step(created.inspReturning, "运送中");
-  await step(created.inspReturning, "待签收");
-  await step(created.inspReturning, "退回中", "夹具：样品箱不合格，退回寄出单位");
-  created.inspInspected = await add("inspInspected", inspectBase("insp6"));
-  await step(created.inspInspected, "运送中");
-  await step(created.inspInspected, "待签收");
-  await step(created.inspInspected, "待检测", "夹具代签");
+  created.inspWaitSample = await add("inspWaitSample", merged("insp10"));
+  created.inspSampling = await add("inspSampling", merged("insp11"));
+  await step(created.inspSampling, "采样中");
+  created.inspSealed = await add("inspSealed", merged("insp1"));
+  await ladder(created.inspSealed, "已封箱");
+  created.inspMoving = await add("inspMoving", merged("insp2"));
+  await ladder(created.inspMoving, "在途");
+  created.inspWaitSign = await add("inspWaitSign", merged("insp3"));
+  await ladder(created.inspWaitSign, "待签收");
+  created.inspWaitInspect = await add("inspWaitInspect", merged("insp4"));
+  await ladder(created.inspWaitInspect, "待检测");
+  created.inspReturning = await add("inspReturning", merged("insp5"));
+  await ladder(created.inspReturning, "待检测");
+  await step(created.inspReturning, "退回中", "夹具：样品箱不合格，退回原寄出分公司");
+  created.inspInspected = await add("inspInspected", merged("insp6"));
+  await ladder(created.inspInspected, "待检测");
   // 逐台「开始检测」这一调用本身就会把单推到已检测，不能再 PUT 一次（再 PUT 会被当成越权，403）
   await inspectBox(created.inspInspected, BOXES.insp6.imei);
-  created.inspReturned = await add("inspReturned", inspectBase("insp7"));
-  await step(created.inspReturned, "运送中");
-  await step(created.inspReturned, "待签收");
-  await step(created.inspReturned, "退回中", "夹具：退回寄出单位");
+  created.inspReturned = await add("inspReturned", merged("insp7"));
+  await ladder(created.inspReturned, "待检测");
+  await step(created.inspReturned, "退回中", "夹具：退回原寄出分公司");
   await step(created.inspReturned, "已退回");
-  created.inspRejected = await add("inspRejected", inspectBase("insp8"));
-  await step(created.inspRejected, "运送中");
-  await step(created.inspRejected, "待签收");
+  created.inspRejected = await add("inspRejected", merged("insp8"));
+  await ladder(created.inspRejected, "待签收");
   await step(created.inspRejected, "已拒收", "夹具：开箱超限拒收");
-  created.inspCancelled = await add("inspCancelled", inspectBase("insp9"));
-  await step(created.inspCancelled, "已取消", "夹具：建单后取消");
+  created.inspCancelled = await add("inspCancelled", merged("insp9"));
+  await step(created.inspCancelled, "已取消", "夹具：建单后取消（待签收前可取消）");
 
-  // 守卫三：已完成开箱检测 —— 单独一张送检单推到待检测、逐台开始检测
-  created.guardInspected = await add("guardInspected", {
-    name: "验收-已完成开箱检测（守卫：检测已完成）",
-    kind: "调拨",
-    boxIds: [BOXES.guardInspected.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: STATION.id,
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-  });
-  await step(created.guardInspected, "运送中");
-  await step(created.guardInspected, "待签收");
-  await step(created.guardInspected, "待检测", "夹具代签");
+  // 守卫三：已完成开箱检测 —— 单独一张合并单推到待检测、逐台开始检测
+  created.guardInspected = await add("guardInspected", mergedBase(BOXES.guardInspected.imei, "验收-已完成开箱检测（守卫：检测已完成）"));
+  await ladder(created.guardInspected, "待检测");
   await inspectBox(created.guardInspected, BOXES.guardInspected.imei);
 
   // 样本 A：这台箱子在那张未结束单里已经「开始检测」，对它算结束 → 接口允许再进新单。
   // 这就是「一箱两张未结束单」在现网规则下唯一可达的形态，宽限该取哪张的建单时间是实现歧义点。
-  created.twoTasksAfterInspect = await add("twoTasksAfterInspect", {
-    name: "验收-检测完成后另建单（一箱两单·接口可达形态）",
-    kind: "调拨",
-    boxIds: [BOXES.guardInspected.imei],
-    fromOrgId: HOME_ORG.id,
-    toOrgId: "4",
-    sender: ACCOUNTS.dispatch.nickname,
-    signer: ACCOUNTS.verify.nickname,
-    direct: true,
-  });
+  created.twoTasksAfterInspect = await add(
+    "twoTasksAfterInspect",
+    mergedBase(BOXES.guardInspected.imei, "验收-检测完成后另建单（一箱两单·接口可达形态）")
+  );
 
   return { created, errors };
 }
@@ -699,6 +695,8 @@ export async function createFixtureTasks(api) {
  * 所以这两件事只能在服务器空转时直接写夹具库完成：
  *   1) clone：把较早那张单复制成第二张未结束单（只动 sample_task / sample_task_box / sample_task_log）；
  *   2) backdate：把 created_at（ISO UTC）拨到 2 小时前 / 50 分钟前 / 10 分钟前。
+ * 计划键（graceOver/twoEarly/twoLate）不变；B4a 后源单是合并采样单（kind=采样、停待采样），
+ * 复制按整行照搬（kind/body/from/to 列一起带过去），无需按 kind 分支。
  * SQLite 是单文件回滚日志模式，写入带 busy_timeout + 重试；失败只记进证据、不影响其它夹具。
  */
 async function dbFixturePass(sqlitePath, { backdate = {}, clone = null } = {}) {
@@ -729,8 +727,15 @@ async function dbFixturePass(sqlitePath, { backdate = {}, clone = null } = {}) {
         attempt += 1;
         try {
           await db.run("UPDATE sample_task SET created_at = ? WHERE id = ?", [isoAgo(msAgo), String(taskId)]);
+          // 宽限锚点是 sample_box.bound_task_at（墙钟，syncBoundTask 口径），不是 task.created_at——
+          // 只回拨建单时间不回拨锚点，离线宽限档会误判「宽限内」。占用这张单的箱子锚点一起回拨；
+          // 一箱两单时 bound 指向最早那张（twoEarly），较晚的复制单（twoLate）不动锚点，正好验「取最早」。
+          const bound = await db.run("UPDATE sample_box SET bound_task_at = ? WHERE bound_task_id = ?", [
+            formatTimestamp(new Date(Date.now() - msAgo)).slice(0, 19),
+            String(taskId),
+          ]);
           const row = await db.get("SELECT id, created_at FROM sample_task WHERE id = ?", [String(taskId)]);
-          results.push({ taskId, created_at: row?.created_at || "", targetAgoMin: Math.round(msAgo / MIN), attempts: attempt, ok: true });
+          results.push({ taskId, created_at: row?.created_at || "", boundBackdated: bound?.changes ?? null, targetAgoMin: Math.round(msAgo / MIN), attempts: attempt, ok: true });
           break;
         } catch (error) {
           if (attempt >= 6) {
@@ -1075,25 +1080,36 @@ async function check() {
   const staleCase = positions.find((item) => item.tier.startsWith("位置/GPS 过时"));
   record("位置卡：GPS 旧 + 基站新 >10 分钟 → 判定改用基站", staleCase?.gpsStaleByRule === true && staleCase?.derivedSource === "基站", staleCase);
 
-  // —— 送检单 9 状态
+  // —— 合并采样单：主路径 7 步＋4 分支（组织简化 B4a，替换旧送检 9 状态口径）
   const taskList = await admin.get("/api/v1/sample/tasks?pageSize=100");
   const tasks = taskList.body?.data?.list || [];
-  const byName = new Map(tasks.map((task) => [String(task.name), task]));
-  const statusOf = (name) => byName.get(name)?.status;
-  const nine = ["待寄出", "运送中", "待签收", "待检测", "退回中", "已检测", "已退回", "已拒收", "已取消"];
-  const nineRows = nine.map((status) => {
-    const task = tasks.find((item) => String(item.name).startsWith("验收-送检") && item.status === status);
+  const mergedStates = ["待采样", "采样中", "已封箱", "在途", "待签收", "待检测", "已检测", "退回中", "已退回", "已拒收", "已取消"];
+  const mergedRows = mergedStates.map((status) => {
+    const task = tasks.find((item) => String(item.name).startsWith("验收-合并单") && item.status === status);
     return { status, name: task?.name || null, id: task?.id || null, kind: task?.kind || null, steps: task?.steps || null };
   });
-  evidence.inspectStatuses = nineRows;
-  record("送检单 9 状态样本齐备", nineRows.every((row) => row.name), nineRows.map((row) => `${row.status}:${row.name || "缺"}`));
+  evidence.mergedFlowStatuses = mergedRows;
+  record("合并采样单 7 步＋4 分支状态样本齐备（kind=采样、TK- 前缀）", mergedRows.every((row) => row.name && row.kind === "采样" && /^TK-/.test(String(row.id))), mergedRows.map((row) => `${row.status}:${row.name || "缺"}`));
+  // 主路径单的进度条＝合并 7 步；退回分支单＝返程 8 步（shared/taskFlow.js 单源）
+  const mainRow = mergedRows.find((row) => row.status === "待检测");
+  const returnRow = mergedRows.find((row) => row.status === "退回中");
+  const mainDetail = mainRow?.id ? (await admin.get(`/api/v1/sample/tasks/${mainRow.id}`)).body?.data?.task : null;
+  const returnDetail = returnRow?.id ? (await admin.get(`/api/v1/sample/tasks/${returnRow.id}`)).body?.data?.task : null;
+  evidence.mergedFlowSteps = { main: mainDetail?.steps || null, returning: returnDetail?.steps || null };
   record(
-    "送检单不出现「已签收」状态（签收即进待检测）",
-    !tasks.some((task) => String(task.name).startsWith("验收-送检") && task.status === "已签收"),
-    { inspectTaskStatuses: tasks.filter((t) => String(t.name).startsWith("验收-送检")).map((t) => t.status) }
+    "合并单进度条：主路径 7 步、退回分支返程 8 步（服务端 steps 下发）",
+    JSON.stringify(mainDetail?.steps) === JSON.stringify(["待采样", "采样中", "已封箱", "在途", "待签收", "待检测", "已检测"]) &&
+      JSON.stringify(returnDetail?.steps) === JSON.stringify(["待采样", "采样中", "已封箱", "在途", "待签收", "待检测", "退回中", "已退回"]),
+    evidence.mergedFlowSteps
+  );
+  record(
+    "合并单不出现「已签收」状态（签收即进待检测）",
+    !tasks.some((task) => String(task.name).startsWith("验收-合并单") && task.status === "已签收"),
+    { mergedTaskStatuses: tasks.filter((t) => String(t.name).startsWith("验收-合并单")).map((t) => t.status) }
   );
 
-  // —— 划拨撤销守卫现状（目标语义未实现时，这里给出可断言的当前行为）
+  // —— 划拨撤销守卫数据形态（组织简化 B4a：守卫单走划拨 AL-，提交即生效；
+  //    撤销行为本身——可撤/三类原因禁撤——由 unified-r2 对 /transfers/:id/revoke 实测）
   const guardPlan = [
     { label: "已进入未结束任务", taskKey: "guardInTask", box: BOXES.guardInTask, expectOpensDuring: null },
     { label: "划拨后已开箱", taskKey: "guardOpened", box: BOXES.guardOpened, expectOpensDuring: 1 },
@@ -1109,8 +1125,6 @@ async function check() {
     }
     const detail = (await admin.get(`/api/v1/sample/tasks/${taskId}`)).body?.data || {};
     const boxRow = (detail.boxes || []).find((row) => String(row.id) === item.box.imei) || {};
-    const listAsOwner = await admin.get(`/api/v1/sample/tasks?q=${encodeURIComponent(String(taskId))}`);
-    const listed = (listAsOwner.body?.data?.list || []).find((task) => String(task.id) === String(taskId)) || {};
     guards.push({
       label: item.label,
       taskId,
@@ -1118,7 +1132,6 @@ async function check() {
       kind: detail.task?.kind ?? null,
       createdAt: detail.task?.createdAt ?? null,
       canCancel: detail.can?.["已取消"] ?? null,
-      listActions: listed.actions ?? null,
       boxId: item.box.imei,
       boxLife: byImei.get(item.box.imei)?.life ?? null,
       opensDuringTask: boxRow.opensDuring ?? null,
@@ -1141,9 +1154,10 @@ async function check() {
     }))
   );
   record(
-    "划拨撤销：当前代码仍允许取消（「提交即生效 + 整单禁撤 + 三类原因守卫」未实现，属 wave2）",
-    guards.filter((row) => row.canCancel === true).length >= 1 && !guards.some((row) => row.blockedReason),
-    guards.map((row) => `${row.label}: can已取消=${row.canCancel}`)
+    "划拨单提交即生效（AL- 已划拨、无通用推进位）；采样守卫单仍可取消（守卫只针对划拨撤销）",
+    guards.filter((row) => row.kind === "划拨").every((row) => row.status === "已划拨" && row.canCancel === null) &&
+      guards.find((row) => row.label === "已进入未结束任务")?.canCancel === true,
+    guards.map((row) => `${row.label}: kind=${row.kind} status=${row.status} can已取消=${row.canCancel}`)
   );
 
   // —— 任务状态标签数字 == 落地列表行数（L-P0-3 的任务侧口径）
@@ -1155,7 +1169,7 @@ async function check() {
     countCompare.push({ tab, counts: taskCounts[tab] ?? null, listTotal: res.body?.data?.total ?? null });
   }
   countCompare.unshift({ tab: "全部", counts: taskCounts["全部"] ?? null, listTotal: unfilteredTotal });
-  for (const status of nine) {
+  for (const status of mergedStates) {
     const res = await admin.get(`/api/v1/sample/tasks?status=${encodeURIComponent(status)}&pageSize=100`);
     countCompare.push({ tab: status, counts: taskCounts[status] ?? null, listTotal: res.body?.data?.total ?? null });
   }
@@ -1241,43 +1255,39 @@ async function check() {
     { hits: (searchAsSampler.body?.data?.list || []).length, code: searchAsSampler.body?.code }
   );
 
-  // —— 越权：403 与 401
+  // —— 越权：403 与 401（B4a：建单探针改 kind=采样——调拨/送检新建已被服务端拒绝，
+  //    用旧 kind 探权限会先撞 400 类型闸门，测不到权限层）
   const forbidden = await api("sampler").post("/api/v1/sample/tasks", {
     name: "验收-越权建单",
-    kind: "调拨",
+    kind: "采样",
     boxIds: [BOXES.spare1.imei],
     fromOrgId: HOME_ORG.id,
-    toOrgId: "3",
-    direct: true,
+    sender: ACCOUNTS.dispatch.nickname,
+    signer: ACCOUNTS.verify.nickname,
   });
   evidence.authz.samplerCreateTask = { status: forbidden.status, code: forbidden.body?.code, msg: forbidden.body?.msg };
   record("采样员建单 → 403 + 业务错误码", forbidden.status === 403, evidence.authz.samplerCreateTask);
-  const badParam = await admin.post("/api/v1/sample/tasks", { name: "", kind: "调拨", boxIds: [] });
+  const badParam = await admin.post("/api/v1/sample/tasks", { name: "", kind: "采样", boxIds: [] });
   evidence.authz.badParam = { status: badParam.status, code: badParam.body?.code, msg: badParam.body?.msg };
   record("参数校验 → 400 且不外泄内部文案", badParam.status === 400 && !/undefined|SQL|at \w+ \(/.test(String(badParam.body?.msg)), evidence.authz.badParam);
 
   // —— 越权签收链（L-P0-1 回归口径）
   // 两件事分开验，别混成一条：
-  //   1) 角色不够的人（机构负责人没有建单调拨的参与方身份）→ 403 A0301；
+  //   1) 角色不够的人（现场组管理员 BRANCH_ADMIN 没有划拨建单码）→ 403 A0301；
   //   2) 有资格建单的人把签收人设成别的单位的人 → 400 A0400（建单校验，不落库）。
-  const crossOrgActor = await api("agency").post("/api/v1/sample/tasks", {
-    name: "验收-签收人越权（机构负责人发起）",
-    kind: "调拨",
+  const crossOrgActor = await api("agency").post("/api/v1/sample/transfers", {
+    name: "验收-划拨越权（现场组管理员发起）",
     boxIds: [BOXES.spare2.imei],
-    fromOrgId: "51",
     toOrgId: "3",
-    senderId: ACCOUNTS.agency.userId,
-    signerId: ACCOUNTS.sampler.userId,
   });
   evidence.authz.crossOrgActor = { status: crossOrgActor.status, code: crossOrgActor.body?.code, msg: crossOrgActor.body?.msg };
   record("非参与方角色发起划拨 → 403 + 业务错误码", crossOrgActor.status === 403, evidence.authz.crossOrgActor);
 
   const crossOrg = await admin.post("/api/v1/sample/tasks", {
     name: "验收-签收人越权",
-    kind: "调拨",
+    kind: "采样",
     boxIds: [BOXES.spare2.imei],
-    fromOrgId: "21",
-    toOrgId: "3",
+    fromOrgId: HOME_ORG.id,
     sender: ACCOUNTS.dispatch.nickname,
     senderId: ACCOUNTS.dispatch.userId,
     signer: ACCOUNTS.sampler.nickname,
@@ -1285,7 +1295,7 @@ async function check() {
   });
   evidence.authz.crossOrgSigner = { status: crossOrg.status, code: crossOrg.body?.code, msg: crossOrg.body?.msg };
   record(
-    "签收人不属于接收单位 → 建单被拒（400 A0400，且不落库）",
+    "签收人不属于检测站 → 建单被拒（400 A0400，且不落库）",
     crossOrg.status === 400 && crossOrg.body?.code === "A0400",
     evidence.authz.crossOrgSigner
   );

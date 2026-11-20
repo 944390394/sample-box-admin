@@ -19,7 +19,7 @@
     <p v-else-if="presetMissing" class="tip" data-test="create-boxes-missing">
       带过来的采样箱有 {{ presetMissing }} 台没取到（不在你的管理范围内或已删除），已跳过。
     </p>
-    <el-empty v-if="!canManage" description="当前角色没有「新建采样任务」或「新建送检单」权限" />
+    <el-empty v-if="!canManage" description="当前角色没有「新建采样任务」权限" />
     <div v-else class="create-layout" :class="{ solo: !showSummary }">
       <el-card shadow="never" class="task-form">
         <el-steps :active="step" finish-status="success" align-center class="steps">
@@ -41,38 +41,14 @@
         >
           <template v-if="current === 'basic'">
             <el-form-item label="任务类型">
-              <el-radio-group v-model="form.kind">
-                <el-radio-button value="采样" :disabled="!canSample">采样</el-radio-button>
-                <el-radio-button v-if="enableTransferInspect" value="送检" :disabled="!canInspect">
-                  送检
-                </el-radio-button>
-                <el-radio-button v-else value="调拨" :disabled="!canTransfer">调拨</el-radio-button>
-              </el-radio-group>
-              <p class="tip">
-                {{
-                  form.kind === "送检"
-                    ? "把采样箱寄到检测站开箱检测：签收后待检测，逐台「开始检测」，全部检测完整单已检测。"
-                    : form.kind === "调拨"
-                      ? "把采样箱从一个单位寄到另一个单位，由接收单位签收，签收后箱子归接收单位。"
-                      : "安排采样箱到采样单位采样。箱子的归属不变。"
-                }}
-              </p>
-            </el-form-item>
-            <el-form-item v-if="form.kind === '采样'" label="寄送方式">
-              <el-radio-group v-model="form.trip">
-                <el-radio-button value="双向">双向</el-radio-button>
-                <el-radio-button value="单向">单向</el-radio-button>
-                <el-radio-button value="">不寄送</el-radio-button>
-              </el-radio-group>
-              <p class="tip">
-                {{ TRIP_TEXT[form.trip] || "箱子已经在采样单位，直接采样，封箱后寄回核验。" }}
-              </p>
+              <el-tag type="success" effect="plain" size="large">采样（含送检）</el-tag>
+              <p class="tip">{{ MERGED_FLOW_TEXT }}</p>
             </el-form-item>
             <el-form-item label="任务名称" required :error="errors.name">
               <el-input
                 v-model="form.name"
                 maxlength="120"
-                placeholder="比如：深圳仓 → 华东中心 第 3 批"
+                placeholder="比如：华南分公司 第 3 批采样送检"
               />
             </el-form-item>
             <el-form-item label="备注">
@@ -87,21 +63,24 @@
           </template>
 
           <template v-else-if="current === 'from'">
-            <el-form-item label="寄出单位" required :error="errors.fromOrgId">
+            <el-form-item label="采样单位" required :error="errors.fromOrgId">
               <el-select
                 v-model="form.fromOrgId"
                 filterable
-                placeholder="选择寄出单位"
+                placeholder="选择采样单位（寄出分公司）"
                 style="width: 100%"
               >
                 <el-option
-                  v-for="o in orgs"
+                  v-for="o in companyOrgs"
                   :key="o.id"
                   :value="o.id"
                   :label="o.path"
                   :disabled="!o.inScope"
                 />
               </el-select>
+              <p class="tip">
+                分公司自采：采样单位即寄出分公司，默认本单位。封箱后直寄唯一检测站，箱子归属签收后交检测站。
+              </p>
             </el-form-item>
             <el-form-item label="寄出人" required :error="errors.sender">
               <el-select
@@ -124,7 +103,7 @@
               type="warning"
               :closable="false"
               class="indent"
-              :title="`${outside.join('、')} 不在「${orgById(form.fromOrgId)?.name}」及其上下级里，确认要从这里调出吗？`"
+              :title="`${outside.join('、')} 不在「${orgById(form.fromOrgId)?.name}」及其上下级里，确认要从这里寄出吗？`"
             />
             <el-form-item label="寄出地址">
               <PlaceField
@@ -133,97 +112,26 @@
                 :org="orgById(form.fromOrgId)"
                 :default-radius="arriveRadius"
               />
-              <span v-else class="tip">先选寄出单位</span>
-            </el-form-item>
-          </template>
-
-          <template v-else-if="current === 'to'">
-            <el-form-item label="接收单位" required :error="errors.toOrgId">
-              <el-select
-                v-model="form.toOrgId"
-                filterable
-                placeholder="选择接收单位"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="o in orgs"
-                  :key="o.id"
-                  :value="o.id"
-                  :label="o.path"
-                  :disabled="o.id === form.fromOrgId || agencyToAgency(o)"
-                />
-              </el-select>
-              <p v-if="fromIsAgency" class="tip">采样机构只能寄给公司。</p>
-            </el-form-item>
-            <el-form-item label="签收人" required :error="errors.signer">
-              <el-select
-                v-model="signerPick"
-                filterable
-                allow-create
-                default-first-option
-                placeholder="选择人员，或直接输入姓名"
-                style="width: 100%"
-                :disabled="!form.toOrgId"
-              >
-                <el-option v-for="u in toUsers" :key="u.id" :value="`u:${u.id}`" :label="u.name">
-                  <span>{{ u.name }}</span>
-                  <span class="dept">{{ u.dept }}</span>
-                </el-option>
-              </el-select>
-              <p class="tip">
-                默认是接收单位的负责人。只有接收单位的人员能签收；签收后箱子改归接收单位，选了系统用户作签收人时由他保管。
-              </p>
-            </el-form-item>
-            <el-form-item label="收货地址">
-              <PlaceField
-                v-if="form.toOrgId"
-                v-model="form.toPlace"
-                :org="orgById(form.toOrgId)"
-                :default-radius="arriveRadius"
-              />
-              <span v-else class="tip">先选接收单位</span>
+              <span v-else class="tip">先选采样单位</span>
             </el-form-item>
           </template>
 
           <template v-else-if="current === 'sample'">
-            <el-form-item label="采样单位" :required="Boolean(form.trip)" :error="errors.orgId">
-              <el-select
-                v-model="form.orgId"
-                filterable
-                clearable
-                :placeholder="form.trip ? '选择箱子寄到的采样单位' : '选填，选了可直接用单位地址'"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="o in orgs"
-                  :key="o.id"
-                  :value="o.id"
-                  :label="o.path"
-                  :disabled="Boolean(form.trip) && (o.id === form.fromOrgId || agencyToAgency(o))"
-                >
-                  <span>{{ o.path }}</span>
-                  <el-tag v-if="o.type === '采样机构'" size="small" type="success" class="tag">
-                    采样机构
-                  </el-tag>
-                </el-option>
-              </el-select>
-              <p v-if="form.trip && fromIsAgency" class="tip">采样机构只能寄给公司。</p>
-            </el-form-item>
             <el-form-item label="开箱录像">
-              <el-switch v-model="form.recordVideo" :disabled="!isAgency" />
+              <el-switch v-model="form.recordVideo" :disabled="!isCompany" />
               <p class="tip">
                 {{
-                  isAgency
+                  isCompany
                     ? "开启后，任务进行中箱子每次在计划地点（误差范围内）开箱，服务器会通知视频平台录像，录像显示在任务详情里。"
-                    : "只有采样单位是「采样机构」时才能开启。机构类型在「组织管理 › 部门」里设置。"
+                    : "只有采样单位是分公司（公司类型）时才能开启；检测站不设录像。单位类型在「组织管理 › 部门」里设置。"
                 }}
               </p>
             </el-form-item>
             <el-form-item label="计划地点">
               <PlaceField
-                :key="form.orgId || 'none'"
+                :key="form.fromOrgId || 'none'"
                 v-model="form.placeAt"
-                :org="orgById(form.orgId)"
+                :org="orgById(form.fromOrgId)"
                 :default-radius="arriveRadius"
               />
             </el-form-item>
@@ -239,13 +147,62 @@
                 default-first-option
                 placeholder="选采样单位里的人，也可以直接输入姓名"
                 style="width: 100%"
-                :disabled="!form.orgId"
+                :disabled="!form.fromOrgId"
               >
-                <el-option v-for="u in sampleUsers" :key="u.id" :value="u.name" :label="u.name">
+                <el-option v-for="u in fromUsers" :key="u.id" :value="u.name" :label="u.name">
                   <span>{{ u.name }}</span>
                   <span class="dept">{{ u.dept }}</span>
                 </el-option>
               </el-select>
+            </el-form-item>
+          </template>
+
+          <template v-else-if="current === 'to'">
+            <el-form-item label="接收单位" required :error="errors.toOrgId">
+              <div v-if="station" class="station-fixed" data-test="create-station-fixed">
+                <div class="station-line">
+                  <b>{{ station.name }}</b>
+                  <el-tag size="small" type="warning" effect="plain">检测站 · 唯一</el-tag>
+                </div>
+                <div class="text-muted">{{ station.path }}</div>
+              </div>
+              <el-alert
+                v-else
+                type="warning"
+                :closable="false"
+                show-icon
+                title="尚未指定唯一检测站"
+                description="请先在「系统设置 › 采样箱」指定唯一检测站，再回来创建任务单。"
+              />
+              <p class="tip">任务单接收方固定为唯一检测站，总部 / 分公司不可作接收方。</p>
+            </el-form-item>
+            <el-form-item label="签收人" required :error="errors.signer">
+              <el-select
+                v-model="signerPick"
+                filterable
+                allow-create
+                default-first-option
+                placeholder="选择人员，或直接输入姓名"
+                style="width: 100%"
+                :disabled="!station"
+              >
+                <el-option v-for="u in toUsers" :key="u.id" :value="`u:${u.id}`" :label="u.name">
+                  <span>{{ u.name }}</span>
+                  <span class="dept">{{ u.dept }}</span>
+                </el-option>
+              </el-select>
+              <p class="tip">
+                默认是检测站的负责人。只有检测站的人员能签收；签收后箱子改归检测站，选了系统用户作签收人时由他保管。
+              </p>
+            </el-form-item>
+            <el-form-item label="收货地址">
+              <PlaceField
+                v-if="station"
+                v-model="form.toPlace"
+                :org="stationOrg"
+                :default-radius="arriveRadius"
+              />
+              <span v-else class="tip">指定检测站后带出收货地址</span>
             </el-form-item>
           </template>
 
@@ -258,7 +215,7 @@
               type="info"
               :closable="false"
               class="indent"
-              :title="`选中的箱子分属 ${boxOrgs.join('、')}，寄送单只能写一个寄出单位，请确认`"
+              :title="`选中的箱子分属 ${boxOrgs.join('、')}，任务单只能写一个寄出单位，请确认`"
             />
             <el-form-item label="开箱次数上限">
               <div class="limit">
@@ -281,11 +238,7 @@
                 </template>
               </div>
               <p class="tip">
-                从任务开始到结束，按箱子上报的开箱次数计算；超过上限会在任务列表和详情里标红。{{
-                  logistics
-                    ? "寄送途中一般不该开箱，可设为 0。"
-                    : "采样一般开一次装样、一次封箱，可按流程设置。"
-                }}
+                从任务开始到结束，按箱子上报的开箱次数计算；超过上限会在任务列表和详情里标红。采样一般开一次装样、一次封箱，可按流程设置；寄送途中一般不该开箱。
               </p>
             </el-form-item>
           </template>
@@ -305,56 +258,16 @@
                 </header>
                 <dl>
                   <dt>类型</dt>
-                  <dd>{{ form.kind }}</dd>
+                  <dd>采样（含送检）</dd>
                   <dt>名称</dt>
                   <dd>{{ form.name }}</dd>
                   <dt>备注</dt>
                   <dd>{{ form.note || "—" }}</dd>
                 </dl>
               </section>
-              <template v-if="logistics">
-                <section>
-                  <header>
-                    <b>寄出方</b>
-                    <el-button link type="primary" @click="goto('from')">修改</el-button>
-                  </header>
-                  <dl>
-                    <dt>单位</dt>
-                    <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
-                    <dt>寄出人</dt>
-                    <dd>
-                      {{ form.sender }}
-                      <el-tag v-if="!form.senderId" size="small" type="info" class="tag">
-                        外部人员
-                      </el-tag>
-                    </dd>
-                    <dt>地址</dt>
-                    <dd>{{ placeText(form.fromPlace) }}</dd>
-                  </dl>
-                </section>
-                <section>
-                  <header>
-                    <b>接收方</b>
-                    <el-button link type="primary" @click="goto('to')">修改</el-button>
-                  </header>
-                  <dl>
-                    <dt>单位</dt>
-                    <dd>{{ orgById(form.toOrgId)?.path }}</dd>
-                    <dt>签收人</dt>
-                    <dd>
-                      {{ form.signer }}
-                      <el-tag v-if="!form.signerId" size="small" type="info" class="tag">
-                        外部人员
-                      </el-tag>
-                    </dd>
-                    <dt>地址</dt>
-                    <dd>{{ placeText(form.toPlace) }}</dd>
-                  </dl>
-                </section>
-              </template>
-              <section v-if="form.kind === '采样' && form.trip">
+              <section>
                 <header>
-                  <b>寄出方</b>
+                  <b>采样单位（寄出方）</b>
                   <el-button link type="primary" @click="goto('from')">修改</el-button>
                 </header>
                 <dl>
@@ -369,18 +282,14 @@
                   </dd>
                   <dt>地址</dt>
                   <dd>{{ placeText(form.fromPlace) }}</dd>
-                  <dt>寄送方式</dt>
-                  <dd>{{ form.trip }}：{{ TRIP_TEXT[form.trip] }}</dd>
                 </dl>
               </section>
-              <section v-if="form.kind === '采样'">
+              <section>
                 <header>
                   <b>采样安排</b>
                   <el-button link type="primary" @click="goto('sample')">修改</el-button>
                 </header>
                 <dl>
-                  <dt>采样单位</dt>
-                  <dd>{{ orgById(form.orgId)?.path || "—" }}</dd>
                   <dt>计划地点</dt>
                   <dd>{{ placeText(form.placeAt) }}</dd>
                   <dt>样品</dt>
@@ -389,6 +298,25 @@
                   <dd>{{ form.people || "—" }}</dd>
                   <dt>开箱录像</dt>
                   <dd>{{ form.recordVideo ? "开启" : "不录" }}</dd>
+                </dl>
+              </section>
+              <section>
+                <header>
+                  <b>检测站（接收方）</b>
+                  <el-button link type="primary" @click="goto('to')">修改</el-button>
+                </header>
+                <dl>
+                  <dt>单位</dt>
+                  <dd>{{ station?.path || "未指定" }}</dd>
+                  <dt>签收人</dt>
+                  <dd>
+                    {{ form.signer }}
+                    <el-tag v-if="!form.signerId" size="small" type="info" class="tag">
+                      外部人员
+                    </el-tag>
+                  </dd>
+                  <dt>地址</dt>
+                  <dd>{{ placeText(form.toPlace) }}</dd>
                 </dl>
               </section>
               <section>
@@ -525,6 +453,7 @@ import API, {
   type PolicyState,
   type TaskCreate,
   type TaskOrg,
+  type TaskStation,
 } from "@/api/sample/report-policy";
 import type { SampleBox } from "../data";
 import PolicyFields from "../boxes/PolicyFields.vue";
@@ -532,59 +461,46 @@ import PlaceField from "./PlaceField.vue";
 import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
-import { TRIP_TEXT } from "./status";
+import { MERGED_FLOW_TEXT } from "./status";
 import { useUserStore } from "@/stores/user";
-import { useBoxFeatures } from "@/composables/useBoxFeatures";
 import SampleBoxAPI from "@/api/sample/box";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import InfoList, { type InfoItem } from "@/components/biz/InfoList.vue";
 import SectionCard from "@/components/biz/SectionCard.vue";
 
 type Person = { id: string; name: string; dept: string };
-type StepKey = "basic" | "boxes" | "from" | "to" | "sample" | "policy" | "review";
+type StepKey = "basic" | "boxes" | "from" | "sample" | "to" | "review";
 const router = useRouter(),
   route = useRoute(),
   user = useUserStore();
-// 新建采样、新建送检、新建调拨（legacy）、任务期间上报策略分开授权
-const canTransfer = computed(() => Boolean(user.userInfo.perms?.includes("task:create:transfer")));
+// 组织简化（P6/P9）：采样＋送检合并成一张 TK 单，只按「新建采样任务」授权；旧送检/调拨不再新建。
 const canSample = computed(() => Boolean(user.userInfo.perms?.includes("task:create:sample")));
-const canInspect = computed(() => Boolean(user.userInfo.perms?.includes("task:create:inspect")));
 const canPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.task)));
 const canReadPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.read)));
-const { enableTransferInspect, loadBoxFeatures } = useBoxFeatures();
-/** 送检与旧调拨共用同一套物流表单（寄出方/接收方/地址）；采样是另一套。 */
-const logistics = computed(() => form.kind === "调拨" || form.kind === "送检");
+const canManage = computed(() => canSample.value);
 const previewFailed = ref(false);
 let previewRequest = 0;
-const canManage = computed(
-  () => canSample.value || canInspect.value || (canTransfer.value && !enableTransferInspect.value)
-);
 const form = reactive({
   name: "",
-  kind: route.query.type === "送检" ? "送检" : route.query.type === "调拨" ? "调拨" : "采样",
   boxIds: [] as string[],
   overrides: {} as Record<string, Policy>,
   fromOrgId: "",
-  toOrgId: "",
   sender: "",
   senderId: "",
   signer: "",
   signerId: "",
   fromPlace: null as Place | null,
   toPlace: null as Place | null,
-  orgId: "",
   placeAt: null as Place | null,
   people: "",
   sample: "",
   note: "",
   recordVideo: false,
-  trip: "双向" as "" | "单向" | "双向",
 });
 /** 各步骤的字段错误，显示在对应输入框下面。 */
 const errors = reactive<Record<string, string>>({});
 const advancedOpen = ref(false);
 const saved = ref(false);
-const sampleUsers = ref<Person[]>([]);
 const peoplePick = computed({
   get: () => (form.people ? form.people.split("、").filter(Boolean) : []),
   set: (names: string[]) => {
@@ -594,11 +510,8 @@ const peoplePick = computed({
       .join("、");
   },
 });
-const isAgency = computed(() => orgById(form.orgId)?.type === "采样机构");
-watch(
-  () => form.orgId,
-  (id) => void loadUsers(id, sampleUsers)
-);
+/** 采样单位＝寄出分公司；录像 gate 公司类型（检测站禁录）。 */
+const isCompany = computed(() => orgById(form.fromOrgId)?.type === "公司");
 const boxNames = computed(() =>
   form.boxIds
     .map((id) => {
@@ -609,9 +522,8 @@ const boxNames = computed(() =>
     .join("、")
 );
 /**
- * 「脏」按整页算：以前只看 name / 箱子 / 备注三项，改了寄出方、地点、上报策略、误差范围
- * 却离开，一样会丢，但页面不问一句（L-P1-10）。这里把可编辑状态整体序列化，跟初始化完成
- * 时的快照比一次；初始化（含 ?boxIds= 预选的箱子和从服务端取回的默认值）落在基线里，不算用户改过。
+ * 「脏」按整页算：把可编辑状态整体序列化，跟初始化完成时的快照比一次；
+ * 初始化（含 ?boxIds= 预选的箱子和从服务端取回的默认值）落在基线里，不算用户改过。
  */
 const snapshot = () =>
   JSON.stringify({
@@ -644,14 +556,14 @@ function onBeforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = "";
 }
 const custom = ref(false),
-  /** 「本任务统一」的初始策略取系统默认（L-P1-9）：默认周期归管理员在设置页改，前端不再写死 60 秒。 */
+  /** 「本任务统一」的初始策略取系统默认：默认周期归管理员在设置页改，前端不再写死 60 秒。 */
   defaultPolicy = ref<Policy>({ reportPeriodSec: 60, reportOnlyWhenCharging: false }),
   policy = ref<Policy>({ ...defaultPolicy.value });
 const saving = ref(false),
   states = reactive<Record<string, PolicyState>>({});
 const chosenBoxes = ref<SampleBox[]>([]);
 const myOrgId = ref("");
-// 换了箱子就重新取它们现在的策略，给「上报策略」那一步预览
+// 换了箱子就重新取它们现在的策略，给「上报策略」预览
 watch(
   () => form.boxIds.join(","),
   () => void refreshPreview()
@@ -662,80 +574,74 @@ const editOpen = ref(false),
 const arriveRadius = ref(2000);
 const limitOpens = ref(false),
   maxOpens = ref(0);
-// 寄送途中一般不该开箱，打开限制时物流单默认 0 次、采样默认 2 次
+// 采样一般开一次装样、一次封箱，打开限制时默认 2 次
 watch(limitOpens, (on) => {
-  if (on) maxOpens.value = logistics.value ? 0 : 2;
+  if (on) maxOpens.value = 2;
 });
 const orgs = ref<TaskOrg[]>([]),
   fromUsers = ref<Person[]>([]),
   toUsers = ref<Person[]>([]);
-// 采样单位不是采样机构时不能要求录像
-watch(isAgency, (on) => {
+/** 唯一检测站（taskOptions 回生效值）：接收方固定为它，只读展示。 */
+const station = ref<TaskStation | null>(null);
+/** 采样单位候选＝公司类型（分公司自采），排除检测站。 */
+const companyOrgs = computed(() =>
+  orgs.value.filter((o) => o.type === "公司" && o.id !== station.value?.id)
+);
+/** 检测站作 PlaceField 的 org：优先用 orgs 里的行，取不到时按 station 拼一个。 */
+const stationOrg = computed<TaskOrg | null>(() => {
+  const st = station.value;
+  if (!st) return null;
+  return (
+    orgById(st.id) || {
+      id: st.id,
+      parentId: "",
+      name: st.name,
+      type: "检测站",
+      path: st.path,
+      inScope: true,
+      location: st.location,
+      leader: st.leader,
+    }
+  );
+});
+// 采样单位不是公司类型时不能要求录像
+watch(isCompany, (on) => {
   if (!on) form.recordVideo = false;
 });
 
 /**
- * 分步填写。先选箱子，寄出单位就能按箱子的归属自动带出：
- * 调拨是 基本 → 采样箱 → 寄出方 → 接收方 → 确认；采样是 基本 → 采样箱 →（要寄送时）寄出方 → 采样安排 → 确认。
+ * 分步填写（合并流 P6）：基本 → 采样箱 → 采样单位（寄出分公司）→ 采样安排 → 检测站（固定接收方）→ 核对。
+ * 先选箱子，寄出单位就能按箱子的归属自动带出。
  */
-const steps = computed<{ key: StepKey; title: string }[]>(() =>
-  logistics.value
-    ? [
-        { key: "basic", title: "基本信息" },
-        { key: "boxes", title: "采样箱" },
-        { key: "from", title: "寄出方" },
-        { key: "to", title: form.kind === "送检" ? "检测站" : "接收方" },
-        { key: "review", title: "核对" },
-      ]
-    : form.trip
-      ? [
-          { key: "basic", title: "基本信息" },
-          { key: "boxes", title: "采样箱" },
-          { key: "from", title: "寄出方" },
-          { key: "sample", title: "采样安排" },
-          { key: "review", title: "核对" },
-        ]
-      : [
-          { key: "basic", title: "基本信息" },
-          { key: "boxes", title: "采样箱" },
-          { key: "sample", title: "采样安排" },
-          { key: "review", title: "核对" },
-        ]
-);
+const steps = computed<{ key: StepKey; title: string }[]>(() => [
+  { key: "basic", title: "基本信息" },
+  { key: "boxes", title: "采样箱" },
+  { key: "from", title: "采样单位" },
+  { key: "sample", title: "采样安排" },
+  { key: "to", title: "检测站" },
+  { key: "review", title: "核对" },
+]);
 const step = ref(0);
 const current = computed(() => steps.value[step.value]?.key || "basic");
 /** 选箱子和核对这两步要整宽，不显示右边的摘要；核对页本身就是完整摘要。 */
 const showSummary = computed(() => current.value !== "boxes" && current.value !== "review");
-const summaryItems = computed<InfoItem[]>(() => {
-  const ship = logistics.value || Boolean(form.trip);
-  const list: InfoItem[] = [
-    {
-      label: "类型",
-      value: logistics.value ? form.kind : `采样 · ${form.trip ? `${form.trip}寄送` : "不寄送"}`,
-    },
-    { label: "名称", value: form.name.trim() || "—" },
-    {
-      label: "采样箱",
-      value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
-    },
-  ];
-  if (ship)
-    list.push({
-      label: "寄出",
-      value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
-    });
-  if (logistics.value)
-    list.push({
-      label: form.kind === "送检" ? "检测站" : "接收",
-      value: [orgById(form.toOrgId)?.name, form.signer].filter(Boolean).join(" · ") || "—",
-    });
-  else
-    list.push(
-      { label: "采样单位", value: orgById(form.orgId)?.name || "—" },
-      { label: "地点", value: form.placeAt ? placeText(form.placeAt) : "—" }
-    );
-  return list;
-});
+const summaryItems = computed<InfoItem[]>(() => [
+  { label: "类型", value: "采样（含送检）" },
+  { label: "名称", value: form.name.trim() || "—" },
+  {
+    label: "采样箱",
+    value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
+  },
+  {
+    label: "采样单位",
+    value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
+  },
+  { label: "地点", value: form.placeAt ? placeText(form.placeAt) : "—" },
+  {
+    label: "检测站",
+    value: [station.value?.name, form.signer].filter(Boolean).join(" · ") || "—",
+  },
+]);
 function goto(key: StepKey) {
   const index = steps.value.findIndex((s) => s.key === key);
   if (index >= 0) step.value = index;
@@ -745,44 +651,34 @@ function goto(key: StepKey) {
 function checkStep(key: StepKey) {
   for (const name of Object.keys(errors)) delete errors[name];
   if (key === "basic" && !form.name.trim()) errors.name = "请填写任务名称";
-  if (key === "from" && !form.fromOrgId) errors.fromOrgId = "请选择寄出单位";
+  if (key === "from" && !form.fromOrgId) errors.fromOrgId = "请选择采样单位（寄出分公司）";
+  if (key === "from" && form.fromOrgId && orgById(form.fromOrgId)?.type !== "公司")
+    errors.fromOrgId = "采样单位必须是分公司（公司类型）";
   if (key === "from" && !form.sender) errors.sender = "请选择或填写寄出人";
-  if (key === "to" && !form.toOrgId) errors.toOrgId = "请选择接收单位";
-  if (key === "to" && form.toOrgId && form.toOrgId === form.fromOrgId)
-    errors.toOrgId = "接收单位不能和寄出单位相同";
-  if (key === "to" && agencyToAgency(orgById(form.toOrgId)))
-    errors.toOrgId = "采样机构只能寄给公司";
+  if (key === "to" && !station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
   if (key === "to" && !form.signer) errors.signer = "请选择或填写签收人";
   if (key === "boxes" && !form.boxIds.length) errors.boxIds = "请至少绑定一台采样箱";
-  if (key === "sample" && form.trip && !form.orgId) errors.orgId = "寄送采样箱要选择采样单位";
-  if (key === "sample" && form.trip && form.orgId && form.orgId === form.fromOrgId)
-    errors.orgId = "采样单位不能和寄出单位相同";
-  if (key === "sample" && form.trip && agencyToAgency(orgById(form.orgId)))
-    errors.orgId = "采样机构只能寄给公司";
   return !Object.keys(errors).length;
 }
 function next() {
   if (!checkStep(current.value)) return;
-  if (current.value === "boxes" && (logistics.value || form.trip) && !form.fromOrgId)
-    form.fromOrgId = suggestedFrom();
+  if (current.value === "boxes" && !form.fromOrgId) form.fromOrgId = suggestedFrom();
   step.value = Math.min(step.value + 1, steps.value.length - 1);
 }
 
-/** 寄出单位默认取选中箱子共同的单位（在自己范围内才用），否则用自己所在单位。 */
+/** 寄出单位默认取选中箱子共同的单位（在自己范围内、公司类型才用），否则用自己所在单位。 */
 function suggestedFrom() {
   const ids = [...new Set(chosenBoxes.value.map((box) => String(box.orgId || "")))];
   const common = ids.length === 1 && ids[0] ? orgById(ids[0]) : null;
-  if (common?.inScope) return common.id;
-  return orgs.value.find((o) => o.inScope && o.id === myOrgId.value)?.id || "";
+  if (common?.inScope && common.type === "公司" && common.id !== station.value?.id)
+    return common.id;
+  const mine = orgById(myOrgId.value);
+  if (mine?.inScope && mine.type === "公司") return mine.id;
+  return companyOrgs.value.find((o) => o.inScope)?.id || "";
 }
 
 function orgById(id?: string) {
   return orgs.value.find((o) => o.id === id) || null;
-}
-const fromIsAgency = computed(() => orgById(form.fromOrgId)?.type === "采样机构");
-/** 寄出单位是采样机构时，不能再寄给另一家采样机构。 */
-function agencyToAgency(org: { type?: string } | null) {
-  return fromIsAgency.value && org?.type === "采样机构";
 }
 
 function placeText(place: Place | null) {
@@ -827,7 +723,7 @@ const signerPick = personModel("signer", "signerId", toUsers);
 async function loadUsers(orgId: string, target: Ref<Person[]>) {
   target.value = orgId ? (await API.taskOptions(orgId)).users : [];
 }
-// 寄出人默认是自己（自己在寄出单位里时）
+// 寄出人默认是自己（自己在寄出单位里时）；授权人员同单位
 watch(
   () => form.fromOrgId,
   async (id) => {
@@ -838,26 +734,19 @@ watch(
     if (me && !form.sender) Object.assign(form, { sender: me.name, senderId: me.id });
   }
 );
-// 签收人默认是接收单位的负责人
+// 签收人默认是检测站的负责人
 watch(
-  () => form.toOrgId,
+  () => station.value?.id,
   async (id) => {
-    const lead = orgById(id)?.leader;
+    const lead = station.value?.leader;
     form.signer = lead?.name || "";
     form.signerId = lead?.id || "";
-    await loadUsers(id, toUsers);
+    await loadUsers(id || "", toUsers);
     if (lead && !toUsers.value.some((u) => u.id === lead.id))
       toUsers.value = [
-        { id: lead.id, name: lead.name, dept: orgById(id)?.path || "" },
+        { id: lead.id, name: lead.name, dept: station.value?.path || "" },
         ...toUsers.value,
       ];
-  }
-);
-// 换任务类型后步骤不同，回到第一步
-watch(
-  () => form.kind,
-  () => {
-    step.value = 0;
   }
 );
 
@@ -866,7 +755,7 @@ watch(
  * 箱子挂在上级（比如挂在总公司、从总公司下的部门寄出）算正常；还没分配单位的箱子不提示。
  */
 const outside = computed(() => {
-  if ((!logistics.value && !form.trip) || !form.fromOrgId) return [];
+  if (!form.fromOrgId) return [];
   const root = orgById(form.fromOrgId);
   if (!root) return [];
   return (
@@ -948,46 +837,33 @@ function effective(id: string) {
 }
 
 async function submit() {
-  // 总览页上再整体校验一遍，防止回头改了前面的步骤
+  // 核对页上再整体校验一遍，防止回头改了前面的步骤
   for (const item of steps.value) {
     if (!checkStep(item.key)) return goto(item.key);
   }
-  const transfer = logistics.value;
+  if (!station.value) return goto("to");
   const data: TaskCreate = {
     name: form.name.trim(),
-    kind: form.kind,
+    kind: "采样",
     boxIds: form.boxIds,
     overrides: canPolicy.value ? form.overrides : {},
     policy: canPolicy.value && custom.value ? policy.value : null,
     note: form.note,
     maxOpens: limitOpens.value ? maxOpens.value : null,
-    ...(transfer
-      ? {
-          fromOrgId: form.fromOrgId,
-          toOrgId: form.toOrgId,
-          sender: form.sender,
-          senderId: form.senderId,
-          signer: form.signer,
-          signerId: form.signerId,
-          fromPlace: form.fromPlace,
-          toPlace: form.toPlace,
-        }
-      : {
-          orgId: form.orgId,
-          placeAt: form.placeAt,
-          people: form.people,
-          sample: form.sample,
-          recordVideo: form.recordVideo,
-          ...(form.trip
-            ? {
-                trip: form.trip,
-                fromOrgId: form.fromOrgId,
-                sender: form.sender,
-                senderId: form.senderId,
-                fromPlace: form.fromPlace,
-              }
-            : {}),
-        }),
+    // 合并单：采样单位＝寄出分公司，接收方固定唯一检测站
+    fromOrgId: form.fromOrgId,
+    toOrgId: station.value.id,
+    sender: form.sender,
+    senderId: form.senderId,
+    signer: form.signer,
+    signerId: form.signerId,
+    fromPlace: form.fromPlace,
+    toPlace: form.toPlace,
+    orgId: form.fromOrgId,
+    placeAt: form.placeAt,
+    people: form.people,
+    sample: form.sample,
+    recordVideo: form.recordVideo,
   };
   saving.value = true;
   try {
@@ -1004,23 +880,16 @@ const optionsFailed = ref(false);
 /** 带过来的 ?boxIds= 里没取到的台数（不在范围内或已删除）：取到几台就用几台，但要告诉用户少了几台。 */
 const presetMissing = ref(0);
 /**
- * 初始化：单位列表、系统默认（上报周期、到达误差）、?boxIds= 预选的箱子。
- * 取失败时页面会是一张填不下去的半张表（没有单位可选、箱子全丢），所以要留一条能重试的提示（L-P1-5）。
+ * 初始化：单位列表、唯一检测站、系统默认（上报周期、到达误差）、?boxIds= 预选的箱子。
+ * 取失败时页面会是一张填不下去的半张表，所以要留一条能重试的提示。
  */
 async function init() {
-  await loadBoxFeatures();
   if (!canManage.value) return;
-  // 类型按开关 + 权限校正：送检未开通/无权限回落采样；开关开后 legacy 调拨优先转送检
-  if (form.kind === "送检" && (!enableTransferInspect.value || !canInspect.value))
-    form.kind = canSample.value ? "采样" : "调拨";
-  if (form.kind === "调拨" && enableTransferInspect.value)
-    form.kind = canInspect.value ? "送检" : "采样";
-  if (form.kind === "采样" && !canSample.value)
-    form.kind = canInspect.value && enableTransferInspect.value ? "送检" : "调拨";
   optionsFailed.value = false;
   try {
     const loaded = await API.taskOptions();
     orgs.value = loaded.orgs;
+    station.value = loaded.station;
     arriveRadius.value = loaded.arriveRadiusM;
     myOrgId.value = loaded.myOrgId;
     defaultPolicy.value = {
@@ -1028,6 +897,8 @@ async function init() {
       reportOnlyWhenCharging: loaded.defaultReportOnlyWhenCharging,
     };
     if (!custom.value) policy.value = { ...defaultPolicy.value };
+    // 采样单位默认本单位（公司类型），否则范围内第一家分公司
+    if (!form.fromOrgId) form.fromOrgId = suggestedFrom();
     // 从箱子详情、工作台跳过来时带着 ?boxIds=，先选好
     const preset = String(route.query.boxIds || "")
       .split(",")
@@ -1123,6 +994,18 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
 .indent {
   width: auto;
   margin: -6px 0 16px 110px;
+}
+.station-fixed {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+.station-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 .actions {
   display: flex;

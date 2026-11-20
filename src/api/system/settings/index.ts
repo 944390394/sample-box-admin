@@ -36,6 +36,12 @@ export interface BoxSettings {
   enableTransferInspect?: boolean;
   /** 建单后未上线的离线宽限，秒（B3/#18）：默认 3600。设置页以分钟展示（1–1440）。 */
   taskOfflineGraceSec?: number;
+  /**
+   * 唯一检测站部门 id（组织简化 P5）：合并采样单接收方固定为它。
+   * 空串＝未配置（服务端按「总公司下恰一个启用检测站」自动认定）；
+   * 保存走 saveBox，服务端 assertStationSavable 校验存在/启用/类型/总公司子树/全局唯一。
+   */
+  stationDeptId?: string;
 }
 
 export interface TcpSettings {

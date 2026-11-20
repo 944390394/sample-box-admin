@@ -396,19 +396,23 @@ test("箱子：编号是 IMEI，激活可起名、重名拒绝、按名称找旧
   }
 });
 
-test("采样任务录像：只有采样机构能勾；采样中在计划地点开箱才请求，平台未接入时记下状态；任务列表计数和待我处理", async () => {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000 } });
+test("采样任务录像：分公司（公司类型）能勾、检测站恒禁；采样中在计划地点开箱才请求，平台未接入时记下状态；任务列表计数和待我处理", async () => {
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const env = await fresh("redesign-video-");
   const boxes = new SqlBoxStore(env.db),
     policies = new ReportPolicy(env.db);
   try {
-    for (const [id, name, type] of [
-      ["2", "华南分公司", "公司"],
-      ["5", "检测机构甲", "采样机构"],
+    for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
+      ["6", "1", "总部检测站", "检测站"],
+      ["2", "0", "华南分公司", "公司"],
+      ["7", "0", "旧采样机构", "采样机构"],
     ]) {
       await env.db.run(
         "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
-        [id, "0", name, `C${id}`, type]
+        [id, parent, name, `C${id}`, type]
       );
     }
     const videos = new TaskVideoService(env.db, new VideoPlatform(() => readVideo({})));
@@ -425,7 +429,8 @@ test("采样任务录像：只有采样机构能勾；采样中在计划地点�
     );
     await boxes.updateBox(box.id, (b) => {
       b.life = "未使用";
-      b.orgId = "5";
+      b.orgId = "2";
+      b.org = "华南分公司";
     });
     const c = new ReportPolicyController(boxes, policies);
     c.videos = videos;
@@ -439,6 +444,7 @@ test("采样任务录像：只有采样机构能勾；采样中在计划地点�
             "device:box:policyTask",
             "device:box:location",
             "device:box:event",
+            "task:sample-start",
             "task:sign",
             "task:cancel",
             "task:video",
@@ -452,15 +458,25 @@ test("采样任务录像：只有采样机构能勾；采样中在计划地点�
       name: "录像采样",
       kind: "采样",
       boxIds: [box.id],
-      placeAt: { address: "机构甲", lng: 114.1, lat: 22.6 },
+      fromOrgId: "2",
+      sender: "华南寄件人",
+      signer: "检测站",
+      placeAt: { address: "华南采样点", lng: 114.1, lat: 22.6 },
     };
+    // 采样单位非公司类型（旧采样机构）：拒绝录像
     await assert.rejects(
-      call(c.createTask.bind(c), { ...ctx, body: { ...base, orgId: "2", recordVideo: true } }),
-      /采样机构/
+      call(c.createTask.bind(c), { ...ctx, body: { ...base, fromOrgId: "7", recordVideo: true } }),
+      /采样单位必须是分公司/
     );
+    // 检测站作采样单位：拒绝（恒禁录像）
+    await assert.rejects(
+      call(c.createTask.bind(c), { ...ctx, body: { ...base, fromOrgId: "6", recordVideo: true } }),
+      /采样单位不能是检测站/
+    );
+    // 分公司（公司类型）：允许录像
     const { id } = await call(c.createTask.bind(c), {
       ...ctx,
-      body: { ...base, orgId: "5", recordVideo: true },
+      body: { ...base, recordVideo: true },
     });
 
     const counts = await call(c.tasks.bind(c), { ...ctx, query: {} });
@@ -506,19 +522,22 @@ test("箱子状态跟随任务；动态里推出离开寄出地址、失联后�
       reportOnlyWhenCharging: false,
       batteryReserve: 20,
       arriveRadiusM: 500,
+      stationDeptId: "6",
     },
   });
   const env = await fresh("redesign-events-");
   const boxes = new SqlBoxStore(env.db),
     policies = new ReportPolicy(env.db);
   try {
-    for (const [id, name] of [
-      ["2", "华南分公司"],
-      ["3", "华东分公司"],
+    for (const [id, parent, name, type] of [
+      ["1", "0", "总公司", "公司"],
+      ["6", "1", "总部检测站", "检测站"],
+      ["2", "0", "华南分公司", "公司"],
+      ["3", "0", "华东分公司", "公司"],
     ]) {
       await env.db.run(
-        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status) VALUES (?,?,?,?,1,1)",
-        [id, "0", name, `C${id}`]
+        "INSERT INTO sys_dept (id,parent_id,name,code,sort,status,type) VALUES (?,?,?,?,1,1,?)",
+        [id, parent, name, `C${id}`, type]
       );
     }
     const clock = Date.now() - 100 * 60000;
@@ -566,10 +585,9 @@ test("箱子状态跟随任务；动态里推出离开寄出地址、失联后�
       ...ctx,
       body: {
         name: "进出测试",
-        kind: "调拨",
+        kind: "采样",
         boxIds: [box.id],
         fromOrgId: "2",
-        toOrgId: "3",
         sender: "甲",
         signer: "乙",
         fromPlace: { address: "仓库", lng: 114.1, lat: 22.6, radiusM: 500 },
@@ -581,7 +599,10 @@ test("箱子状态跟随任务；动态里推出离开寄出地址、失联后�
       new Date(clock - 60000).toISOString(),
       id,
     ]);
-    await call(c.transition.bind(c), { ...ctx, params: { id }, body: { status: "运送中" } });
+    // 合并采样单主路径采样段→寄出（在途）；箱子建单即占用「在途」
+    await call(c.transition.bind(c), { ...ctx, params: { id }, body: { status: "采样中" } });
+    await call(c.transition.bind(c), { ...ctx, params: { id }, body: { status: "已封箱" } });
+    await call(c.transition.bind(c), { ...ctx, params: { id }, body: { status: "在途" } });
     assert.equal((await boxes.findById(box.id)).life, "在途");
     // 上报写库不能把任务改的状态盖回去
     await send(1, 114.1001, 22.6001);
