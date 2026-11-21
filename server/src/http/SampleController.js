@@ -381,7 +381,11 @@ export class SampleController {
       box.reportPolicy?.effective?.reportPeriodSec ??
       box.policyPeriodSec ??
       currentBoxSettings().reportPeriodSec;
-    ctx.ok(bucketBattery(rows, 360, { model: box.batteryModel, periodSec }));
+    const points = bucketBattery(rows, 360, { model: box.batteryModel, periodSec });
+    // 降采样一直是 360 段（≤1500 目标内）；头部标明返回点数/原始样本数，数组形状不变旧客户端照常
+    ctx.header?.("X-Battery-Point-Count", String(points.length));
+    ctx.header?.("X-Battery-Raw-Count", String(rows.length));
+    ctx.ok(points);
   }
 
   async places(ctx) {

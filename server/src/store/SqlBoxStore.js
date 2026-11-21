@@ -35,6 +35,18 @@ const UPLINK_LIST_COLUMNS = [
 /** 管理操作和任务维护的列：上报写库时不覆盖（新建箱子时照常写入）。 */
 const MANAGED_COLUMNS = ["life", "org", "org_id", "owner", "owner_id", "name"];
 
+/** 电量序列：每页行数（页间让出事件循环）、缓存门槛与按箱 LRU 上限。 */
+const BATTERY_PAGE = 4000;
+const BATTERY_CACHE_MIN = 2000;
+const BATTERY_CACHE_MAX = 3;
+
+/** 曲线落位时间：设备时间优先（补传落在真实发生时刻），没有才用收到时间。 */
+function batteryDeviceTime(row) {
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(row.device_time)
+    ? row.device_time.slice(0, 19)
+    : String(row.received_at).slice(0, 19);
+}
+
 const BOX_COLUMNS = [
   "id",
   "name",
@@ -87,6 +99,9 @@ export class SqlBoxStore extends BoxStore {
     this.executor = executor;
     this.tail = Promise.resolve();
     this.batch = new UplinkBatch(executor);
+    // 电量序列解码缓存（按箱 LRU）：7 天 ~7 万行逐行 gunzip 要几百毫秒，
+    // 范围切换不该每次重解。COUNT+MAX(id) 守卫保证行集没变才复用（上报只追加，id 不复用）。
+    this.batteryCache = new Map();
   }
 
   async findByImei(imei) {
@@ -424,27 +439,61 @@ export class SqlBoxStore extends BoxStore {
 
   /**
    * 单箱上报必须带时间。语句不取原文，翻页用上一页最后的时间和主键。
+   * 电量曲线要解码 raw（chg/bat/rp/rc），7 天真机 ~7 万行：
+   * - 键集分页取行＋每页之间让出事件循环，其他请求/上报 ACK 不被冻结；
+   * - 先按设备时间过滤再解压，补传窗口外的行不白花 gunzip；
+   * - 大序列解码结果按箱缓存（LRU），COUNT+MAX(id) 守卫行集不变才复用，
+   *   范围切换（1h⊂7d）直接命中，不再每次全量重解。
    */
   async listBattery(boxId, from, to) {
     if (this.batch && typeof this.batch.flush === "function") await this.batch.flush();
     const columns = await this.#uplinkColumns();
-    const selected = ["received_at", "summary"];
-    if (columns.has("device_time")) selected.push("device_time");
-    if (columns.has("raw")) selected.push("raw");
-    if (columns.has("raw_gz")) selected.push("raw_gz");
     // 补传的记录晚到：收到时间往后多看一天，再按设备时间筛回到所选范围
     const later = new Date(Date.parse(to.replace(" ", "T")) + 86400000);
     const until = Number.isFinite(later.getTime()) ? formatTimestamp(later) : to;
-    const rows = await this.executor.all(
-      `SELECT ${selected.join(", ")} FROM sample_uplink
-       WHERE box_id = ? AND received_at >= ? AND received_at <= ?
-       ORDER BY received_at`,
-      [boxId, from, until]
-    );
-    const mapped = rows
-      .map((row) => {
+    const cached = this.batteryCache.get(boxId);
+    if (cached && cached.from <= from) {
+      const guard = await this.#batteryGuard(boxId, cached.from, cached.until);
+      if (guard.count === cached.count && guard.maxId === cached.maxId) {
+        this.batteryCache.delete(boxId);
+        this.batteryCache.set(boxId, cached);
+        const rows = cached.rows.filter(
+          (row) =>
+            row.received_at >= from &&
+            row.received_at <= until &&
+            batteryDeviceTime(row) >= from &&
+            batteryDeviceTime(row) <= to
+        );
+        rows.startFull = await this.#batteryStartsFull(boxId, from, columns);
+        return rows;
+      }
+      this.batteryCache.delete(boxId);
+    }
+    const selected = ["id", "received_at", "summary"];
+    if (columns.has("device_time")) selected.push("device_time");
+    if (columns.has("raw")) selected.push("raw");
+    if (columns.has("raw_gz")) selected.push("raw_gz");
+    const before = await this.#batteryGuard(boxId, from, until);
+    const mapped = [];
+    let keyAt = null;
+    let keyId = null;
+    for (;;) {
+      const keyset = keyAt == null ? "" : " AND (received_at > ? OR (received_at = ? AND id > ?))";
+      const params =
+        keyAt == null ? [boxId, from, until] : [boxId, from, until, keyAt, keyAt, keyId];
+      const page = await this.executor.all(
+        `SELECT ${selected.join(", ")} FROM sample_uplink
+         WHERE box_id = ? AND received_at >= ? AND received_at <= ?${keyset}
+         ORDER BY received_at, id LIMIT ${BATTERY_PAGE}`,
+        params
+      );
+      for (const row of page) {
+        keyAt = row.received_at;
+        keyId = row.id;
+        const time = batteryDeviceTime(row);
+        if (time < from || time > to) continue;
         const raw = uplinkText(row);
-        return {
+        mapped.push({
           received_at: row.received_at,
           device_time: row.device_time || "",
           summary: row.summary,
@@ -452,16 +501,42 @@ export class SqlBoxStore extends BoxStore {
           charge: chargeFromRaw(raw),
           periodSec: Number(raw.match(/,rp=(\d+)(?=,|\\|\s|"|$)/)?.[1]),
           chargeOnly: /,rc=1(?=,|\\|\s|"|$)/.test(raw),
-        };
-      })
-      .filter((row) => {
-        const time = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(row.device_time)
-          ? row.device_time.slice(0, 19)
-          : String(row.received_at).slice(0, 19);
-        return time >= from && time <= to;
+        });
+      }
+      if (page.length < BATTERY_PAGE) break;
+      // 让出事件循环：分页解码期间心跳/轮询/其他用户请求照常响应
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const after = await this.#batteryGuard(boxId, from, until);
+    // 解码期间有新上报（守卫变了）就不缓存，避免把缺行的快照钉住；下次请求重建
+    if (
+      mapped.length >= BATTERY_CACHE_MIN &&
+      before.count === after.count &&
+      before.maxId === after.maxId
+    ) {
+      this.batteryCache.delete(boxId);
+      this.batteryCache.set(boxId, {
+        from,
+        until,
+        count: after.count,
+        maxId: after.maxId,
+        rows: mapped,
       });
+      while (this.batteryCache.size > BATTERY_CACHE_MAX)
+        this.batteryCache.delete(this.batteryCache.keys().next().value);
+    }
     mapped.startFull = await this.#batteryStartsFull(boxId, from, columns);
     return mapped;
+  }
+
+  /** 行集指纹：只走 (box_id, received_at) 索引（叶子含主键 id），毫秒级。 */
+  async #batteryGuard(boxId, from, until) {
+    const row = await this.executor.get(
+      `SELECT COUNT(*) AS c, MAX(id) AS m FROM sample_uplink
+       WHERE box_id = ? AND received_at >= ? AND received_at <= ?`,
+      [boxId, from, until]
+    );
+    return { count: Number(row?.c ?? 0), maxId: Number(row?.m ?? -1) };
   }
 
   async #uplinkColumns() {
@@ -479,7 +554,7 @@ export class SqlBoxStore extends BoxStore {
 
   /**
    * 往前看最多约 3 小时。先碰到充满且电压一直不低于 4.1 V，窗口一开始就算充满。
-   * 先碰到电压掉下去，就不继承之前的充满。
+   * 先碰到电压掉下去，就不继承之前的充满。逐行解压同样分块让出事件循环。
    */
   async #batteryStartsFull(boxId, from, columns) {
     const selected = ["summary"];
@@ -491,10 +566,12 @@ export class SqlBoxStore extends BoxStore {
        ORDER BY received_at DESC LIMIT 2000`,
       [boxId, from]
     );
-    for (const row of rows) {
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
       const mv = readMillivolts(row.summary);
       if (mv != null && mv < FULL_RELEASE_MV) return false;
       if (chargeFromRaw(uplinkText(row)) === 2) return true;
+      if (index % 256 === 255) await new Promise((resolve) => setImmediate(resolve));
     }
     return false;
   }

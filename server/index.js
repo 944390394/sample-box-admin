@@ -1818,6 +1818,8 @@ const httpServer = createServer(async (req, res) => {
       invalidateSessions: (id) => sampleRuntime?.disconnectUser(id),
       ok: (data, msg) => ok(res, data, msg),
       fail: (msg, code, status, data) => fail(res, msg, code, status, data),
+      // 附加响应头（如电量序列的点数/原始样本数）：不动 JSON 形状，旧客户端兼容
+      header: (name, value) => res.setHeader(name, value),
       download: (filename, chunks, extraHeaders) =>
         streamDownload(res, filename, chunks, extraHeaders),
     };

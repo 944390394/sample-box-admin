@@ -47,6 +47,8 @@ const props = defineProps<{
   options: echarts.EChartsCoreOption;
   width?: string;
   height?: string;
+  /** 整组替换的组件（如 ["series"]）：切换数据集时旧系列/标记不残留；缺省仍走增量合并 */
+  replaceMerge?: string[];
 }>();
 const emit = defineEmits<{
   select: [payload: { seriesName?: string; name?: string; dataIndex?: number }];
@@ -63,7 +65,7 @@ const initChart = () => {
       emit("select", { seriesName: p.seriesName, name: p.name, dataIndex: p.dataIndex })
     );
     if (props.options) {
-      chartInstance.setOption(props.options);
+      chartInstance.setOption(props.options, { replaceMerge: props.replaceMerge });
     }
   }
 };
@@ -78,7 +80,10 @@ watch(
   () => props.options,
   (newOptions) => {
     if (chartInstance && newOptions) {
-      chartInstance.setOption(newOptions, { lazyUpdate: true });
+      chartInstance.setOption(newOptions, {
+        lazyUpdate: true,
+        replaceMerge: props.replaceMerge,
+      });
     }
   }
 );

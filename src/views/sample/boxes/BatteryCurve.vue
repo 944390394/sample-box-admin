@@ -5,6 +5,9 @@
       <span class="charge-key">绿色为接电时段（含已充满），断线为采样间隔过长</span>
     </template>
     <template #extra>
+      <el-icon v-if="loading" class="is-loading loading-hint" :size="14" title="正在刷新">
+        <Loading />
+      </el-icon>
       <el-radio-group v-model="preset" size="small" @change="onPreset">
         <el-radio-button value="1h">1 小时</el-radio-button>
         <el-radio-button value="6h">6 小时</el-radio-button>
@@ -21,47 +24,42 @@
         end-placeholder="结束"
         value-format="YYYY-MM-DD HH:mm:ss"
         class="range"
-        @change="load"
+        @change="onCustom"
       />
     </template>
-    <ECharts v-if="points.length" :options="options" height="280px" />
-    <el-empty v-else description="这段时间没有电压上报" :image-size="56" />
+    <!-- 实例常驻：范围切换只换数据不重建画布；空数据时隐藏而不是销毁 -->
+    <ECharts
+      v-if="hasChart"
+      v-show="points.length"
+      :options="options"
+      height="280px"
+      :replace-merge="['series']"
+    />
+    <el-skeleton v-if="!points.length && loading" :rows="4" animated class="chart-skeleton" />
+    <el-empty v-else-if="!points.length" description="这段时间没有电压上报" :image-size="56" />
   </SectionCard>
 </template>
 
 <script setup lang="ts">
+import { Loading } from "@element-plus/icons-vue";
+
 import SampleBoxAPI, { type BatteryPoint } from "@/api/sample/box";
 import ECharts from "@/components/ECharts/index.vue";
 import SectionCard from "@/components/biz/SectionCard.vue";
+import { chargeBands, createSeriesCache, onCharge, presetRange } from "@/utils/batteryChart";
 
 const props = defineProps<{ boxId: string; lastReport: string }>();
 
 const preset = ref("24h");
 const custom = ref<[string, string] | null>(null);
 const points = ref<BatteryPoint[]>([]);
-
-function pad(value: number, width = 2) {
-  return String(value).padStart(width, "0");
-}
-
-function stamp(date: Date) {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-function presetRange(key: string) {
-  const end = new Date();
-  const start = new Date(end);
-  const hours = key === "1h" ? 1 : key === "6h" ? 6 : key === "24h" ? 24 : 24 * 7;
-  start.setTime(end.getTime() - hours * 60 * 60 * 1000);
-  return [stamp(start), stamp(end)] as [string, string];
-}
+const loading = ref(false);
+const hasChart = ref(false);
+// 按范围缓存上一次结果：切换先即时回显，再后台刷新（7 天全量请求不再挡住每次切换）
+const cache = createSeriesCache<BatteryPoint[]>(8);
 
 const REST = "#5470c6";
 const CHARGE = "#67C23A";
-
-function onCharge(item: BatteryPoint | undefined) {
-  return item?.charge === 1 || item?.charge === 2;
-}
 
 function chargeText(charge: number | null | undefined) {
   if (charge === 1) return "充电中";
@@ -72,21 +70,12 @@ function chargeText(charge: number | null | undefined) {
 
 /**
  * 时间轴按真实时间排（补传的点落在设备时间上），不做平滑；服务端在没数据的空档插了空点，曲线在那里断开。
- * 充电的时段用绿色底色标出来。电量是实际电量（不扣预留），页头的「可用电量」扣了预留，所以会低一些。
+ * 充电的时段用绿色底色标出来（区间数组 markArea，不逐点）。电量是实际电量（不扣预留），
+ * 页头的「可用电量」扣了预留，所以会低一些。大点集关动画，切换不播放过渡。
  */
 const options = computed(() => {
   const ms = (time: string) => Date.parse(time.replace(" ", "T"));
-  const bands: Array<[{ xAxis: number }, { xAxis: number }]> = [];
-  let start: number | null = null;
-  points.value.forEach((item, index) => {
-    if (onCharge(item) && start == null) start = ms(item.time);
-    const ends = !onCharge(item) || item.gap || index === points.value.length - 1;
-    if (start != null && ends) {
-      const end = item.gap && index > 0 ? ms(points.value[index - 1].time) : ms(item.time);
-      bands.push([{ xAxis: start }, { xAxis: end }]);
-      start = null;
-    }
-  });
+  const bands = chargeBands(points.value);
   // 前后都断开（或在头尾）的单独一个读数：线画不出来，单独标个小圆点，不至于整片空白
   const readings = points.value.map((item, index) => {
     const before = points.value[index - 1],
@@ -95,6 +84,7 @@ const options = computed(() => {
     return { value: [ms(item.time), item.gap ? null : item.percent], symbolSize: isolated ? 5 : 0 };
   });
   return {
+    animation: false,
     grid: { left: 48, right: 24, top: 28, bottom: 32 },
     tooltip: {
       trigger: "axis",
@@ -134,40 +124,89 @@ const options = computed(() => {
   };
 });
 
+function rangeKey() {
+  return custom.value?.length === 2 ? `c:${custom.value[0]}~${custom.value[1]}` : preset.value;
+}
+
+function currentRange(): [string, string] {
+  return custom.value?.length === 2 ? custom.value : presetRange(preset.value);
+}
+
+/** 切换即时回显缓存（不等网络），有数据才立起画布 */
+function applyCached(key: string) {
+  const hit = cache.get(key);
+  if (!hit) return false;
+  points.value = hit;
+  if (hit.length) hasChart.value = true;
+  return true;
+}
+
 let requestId = 0;
 let lastRequestAt = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
-async function load() {
+let debounce: ReturnType<typeof setTimeout> | undefined;
+
+async function runLoad() {
   clearTimeout(timer);
   timer = undefined;
   lastRequestAt = Date.now();
   const request = ++requestId;
   const id = props.boxId;
   if (!id) return;
-  const [from, to] = custom.value?.length === 2 ? custom.value : presetRange(preset.value);
+  const key = rangeKey();
+  const [from, to] = currentRange();
+  loading.value = true;
   try {
     const rows = await SampleBoxAPI.battery(id, from, to);
     if (request !== requestId) return;
-    points.value = Array.isArray(rows) ? rows : [];
+    const list = Array.isArray(rows) ? rows : [];
+    cache.set(key, list);
+    points.value = list;
+    if (list.length) hasChart.value = true;
   } catch {
-    if (request === requestId) points.value = [];
+    if (request === requestId && !cache.get(key)) points.value = [];
+  } finally {
+    if (request === requestId) loading.value = false;
   }
+}
+
+/** 范围切换 debounce 250ms：连点只发最后一次请求；缓存回显在点击当下已完成 */
+function scheduleLoad() {
+  clearTimeout(debounce);
+  debounce = setTimeout(() => void runLoad(), 250);
 }
 
 function onPreset() {
   custom.value = null;
-  void load();
+  applyCached(preset.value);
+  scheduleLoad();
 }
 
-watch(() => props.boxId, load, { immediate: true });
+function onCustom() {
+  applyCached(rangeKey());
+  scheduleLoad();
+}
+
+watch(
+  () => props.boxId,
+  () => {
+    cache.clear();
+    points.value = [];
+    void runLoad();
+  },
+  { immediate: true }
+);
 watch(
   () => props.lastReport,
   () => {
     if (custom.value || timer !== undefined) return;
-    timer = setTimeout(load, Math.max(0, 60000 - (Date.now() - lastRequestAt)));
+    timer = setTimeout(() => void runLoad(), Math.max(0, 60000 - (Date.now() - lastRequestAt)));
   }
 );
-onBeforeUnmount(() => clearTimeout(timer));
+onBeforeUnmount(() => {
+  clearTimeout(timer);
+  clearTimeout(debounce);
+});
 </script>
 
 <style scoped>
@@ -185,6 +224,13 @@ onBeforeUnmount(() => clearTimeout(timer));
   content: "";
   background: rgb(103 194 58 / 25%);
   border-radius: 2px;
+}
+.loading-hint {
+  margin-right: 8px;
+  color: var(--el-color-primary);
+}
+.chart-skeleton {
+  padding: 12px 8px;
 }
 .range {
   width: 320px;
