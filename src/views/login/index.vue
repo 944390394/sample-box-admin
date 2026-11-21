@@ -471,8 +471,19 @@ $input-h: 44px;
   }
 }
 
+/* EP 校验红字默认 absolute/top:100% 不占布局（盒高 2+12=14px），
+   原 margin-bottom:14px 恰好被红字压到下一输入框边框。
+   改为在 form-item 上预留恒定 20px error 槽：padding 不随报错增减（零跳动），
+   红字落在槽内，槽底距下一控件仍有 margin-bottom 呼吸间距。 */
 :deep(.el-form-item) {
-  margin-bottom: 14px;
+  padding-bottom: 20px;
+  margin-bottom: 8px;
+}
+
+:deep(.el-form-item__error) {
+  padding-top: 2px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 :deep(.el-input__wrapper) {

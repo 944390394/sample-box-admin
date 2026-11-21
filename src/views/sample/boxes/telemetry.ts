@@ -17,6 +17,8 @@ export function telemetryState(
     hasReport,
     reportedAt,
     online,
+    /** 仅充电上报且当前未充电的豁免态（R-4）：online 为 true 时列表标「待机·仅充电」而非「在线」。 */
+    exempt,
     // 离线后只知道上次上报时的运行情况，不能继续推算设备仍在运行。
     referenceTime: online ? now : reportedAt,
   };

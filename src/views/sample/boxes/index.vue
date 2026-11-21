@@ -69,7 +69,6 @@
         <el-table-column label="采样箱" min-width="180" fixed="left">
           <template #default="{ row }">
             <div class="name-cell">
-              <span class="dot" :class="onlineOf(row) ? 'on' : 'off'" :title="dotTitle(row)" />
               <div class="name-text">
                 <b>{{ boxName(row) }}</b>
                 <div class="text-muted mono">{{ imeiText(row) }}</div>
@@ -83,6 +82,16 @@
         <el-table-column label="状态 · 上报" width="170">
           <template #default="{ row }">
             <el-tag size="small" :type="lifeTone(row.life)">{{ lifeLabel(row.life) }}</el-tag>
+            <el-tag
+              v-if="connTag(row)"
+              size="small"
+              :type="connTag(row)!.type"
+              effect="plain"
+              class="ml"
+              :title="connTitle(row)"
+            >
+              {{ connTag(row)!.label }}
+            </el-tag>
             <el-tag v-if="graceOf(row) && !graceOf(row)!.over" size="small" type="info" class="ml">
               待上线
             </el-tag>
@@ -301,7 +310,7 @@ const loading = ref(false);
 const exporting = ref(false);
 const selected = ref<SampleBox[]>([]);
 const orgOptions = ref<OptionItem[]>([]);
-// 跟全站时钟走：在线点和「x 秒前」每秒刷新
+// 跟全站时钟走：在线/离线徽标和「x 秒前」每秒刷新
 const now = clock;
 // 建单后未上线宽限（秒）由服务端设置下发，不写死「1 小时」
 const { taskOfflineGraceSec, loadBoxFeatures } = useBoxFeatures();
@@ -442,7 +451,7 @@ watch(
   }
 );
 
-function onlineOf(input: Partial<SampleBox>) {
+function stateOf(input: Partial<SampleBox>) {
   const row = input as SampleBox;
   return telemetryState(
     row.last,
@@ -450,20 +459,37 @@ function onlineOf(input: Partial<SampleBox>) {
     now.value,
     row.charge,
     row.reportOnlyWhenCharging
-  ).online;
+  );
+}
+function onlineOf(input: Partial<SampleBox>) {
+  return stateOf(input).online;
 }
 /** 建单后未上线宽限徽标：占用且从未上报才适用；宽限内中性待上线（不计离线），超宽限计离线。 */
 function graceOf(input: Partial<SampleBox>): GraceState | null {
   const row = input as SampleBox;
   return graceState(row.boundTaskAt, row.last, taskOfflineGraceSec.value, now.value);
 }
-/** 状态点 title：宽限内「待上线…（宽限内不计离线）」，超宽限「离线…」，其余按在线/离线。 */
-function dotTitle(input: Partial<SampleBox>) {
+/**
+ * 显式在线/离线徽标（R17）：与离线卡 flagMatch/boxOnline 同口径——
+ * 在线 success plain；离线 info plain（灰，不抢告警红）；仅充电且未充电的豁免态算在线，
+ * 文案「待机·仅充电」（info plain）；建单宽限内让位给「待上线」徽标，不另标在线/离线。
+ */
+function connTag(input: Partial<SampleBox>): { label: string; type: "success" | "info" } | null {
+  const grace = graceOf(input);
+  if (grace && !grace.over) return null;
+  const state = stateOf(input);
+  if (state.online && state.exempt) return { label: "待机·仅充电", type: "info" };
+  return state.online ? { label: "在线", type: "success" } : { label: "离线", type: "info" };
+}
+/** 徽标 title：宽限内「待上线…（宽限内不计离线）」，超宽限「离线…」，豁免说明不计离线，其余在线/离线。 */
+function connTitle(input: Partial<SampleBox>) {
   const grace = graceOf(input);
   if (grace) {
     return grace.over ? `离线 · ${grace.text}` : `待上线 · ${grace.text}（宽限内不计离线）`;
   }
-  return onlineOf(input) ? "在线" : "离线";
+  const state = stateOf(input);
+  if (state.online && state.exempt) return "待机 · 仅充电时上报且当前未充电（不计离线）";
+  return state.online ? "在线" : "离线";
 }
 /** 离线卡 hint 的第二情形随服务端宽限变（「或建单后 X未上线」）。 */
 const offlineHint = computed(
@@ -649,20 +675,6 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 8px;
   align-items: flex-start;
-}
-.dot {
-  flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  margin-top: 7px;
-  border-radius: 50%;
-}
-.dot.on {
-  background: var(--el-color-success);
-  box-shadow: 0 0 0 3px var(--el-color-success-light-8);
-}
-.dot.off {
-  background: var(--el-text-color-placeholder);
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
