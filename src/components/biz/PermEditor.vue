@@ -4,12 +4,12 @@
       <el-input
         v-model="word"
         :prefix-icon="Search"
-        placeholder="搜权限名称或说明，如「轨迹」「签收」"
+        placeholder="搜权限名称、说明或 code，如「轨迹」「签收」"
         clearable
         class="pe-search"
         data-test="perm-search"
       />
-      <el-radio-group v-model="filter" size="small" data-test="perm-filter">
+      <el-radio-group v-model="filter" size="small" class="pe-filter" data-test="perm-filter">
         <el-radio-button value="all">全部</el-radio-button>
         <el-radio-button value="checked">已勾</el-radio-button>
         <el-radio-button v-if="showGrant" value="grant">可转授</el-radio-button>
@@ -18,37 +18,71 @@
       <el-checkbox v-if="outside.size" v-model="showOutside" data-test="show-outside">
         显示上级没有的 {{ outside.size }} 项
       </el-checkbox>
+      <span class="pe-total" data-test="perm-checked-count">
+        已勾
+        <b>{{ totalChecked }}</b>
+        项
+      </span>
+      <span class="pe-foldops">
+        <el-button link type="primary" data-test="perm-expand-all" @click="expandAll">
+          展开全部
+        </el-button>
+        <el-button link type="primary" data-test="perm-collapse-all" @click="collapseAll">
+          收起全部
+        </el-button>
+      </span>
     </div>
 
-    <div class="pe-body">
-      <nav class="pe-nav" aria-label="权限模块">
-        <a
-          v-for="mod in modules"
-          :key="mod.key"
-          :class="{ on: active === mod.key, dim: !shownKeys.has(mod.key) }"
-          :data-test="`perm-nav-${mod.key}`"
-          @click="jump(mod.key)"
+    <nav class="pe-nav" aria-label="权限模块">
+      <a
+        v-for="mod in modules"
+        :key="mod.key"
+        :class="{ on: active === mod.key, dim: !shownKeys.has(mod.key) }"
+        :data-test="`perm-nav-${mod.key}`"
+        @click="jump(mod.key)"
+      >
+        <span>{{ mod.label }}</span>
+        <em
+          :class="{
+            full: mod.checked && mod.checked === mod.total,
+            some: mod.checked && mod.checked < mod.total,
+          }"
         >
-          <span>{{ mod.label }}</span>
-          <em
-            :class="{
-              full: mod.checked && mod.checked === mod.total,
-              some: mod.checked && mod.checked < mod.total,
-            }"
-          >
-            {{ mod.checked }}/{{ mod.total }}
-          </em>
-        </a>
-      </nav>
+          {{ mod.checked }}/{{ mod.total }}
+        </em>
+      </a>
+    </nav>
 
-      <div ref="mainRef" class="pe-main">
-        <section v-for="mod in shown" :key="mod.key" class="pe-module" :data-module="mod.key">
-          <header class="pe-mhead">
-            <div class="pe-mtitle">
-              <b>{{ mod.label }}</b>
-              <span class="pe-count">已勾 {{ mod.checked }} / {{ mod.total }}</span>
-              <p class="pe-hint">{{ mod.hint }}</p>
-            </div>
+    <div ref="mainRef" class="pe-main">
+      <section v-for="mod in shown" :key="mod.key" class="pe-module" :data-module="mod.key">
+        <header class="pe-mhead">
+          <div class="pe-mtitle">
+            <button
+              type="button"
+              class="pe-fold"
+              :class="{ closed: folded(mod.key) }"
+              :data-test="`perm-toggle-${mod.key}`"
+              :aria-expanded="!folded(mod.key)"
+              :aria-label="`${folded(mod.key) ? '展开' : '收起'}「${mod.label}」`"
+              @click="toggleFold(mod.key)"
+            >
+              <el-icon><ArrowRight /></el-icon>
+            </button>
+            <b>{{ mod.label }}</b>
+            <span
+              class="pe-count"
+              :class="{
+                full: mod.checked && mod.checked === mod.total,
+                some: mod.checked && mod.checked < mod.total,
+              }"
+            >
+              {{ mod.checked }}/{{ mod.total }}
+            </span>
+            <el-tooltip v-if="mod.hint" :content="mod.hint" placement="top">
+              <el-icon class="pe-help" tabindex="0" :aria-label="mod.hint">
+                <QuestionFilled />
+              </el-icon>
+            </el-tooltip>
             <div v-if="editable && mod.changeable" class="pe-quick">
               <el-button
                 link
@@ -56,7 +90,7 @@
                 :data-test="`quick-all-${mod.key}`"
                 @click="quick(mod.key, 'all')"
               >
-                全部
+                全选
               </el-button>
               <el-button
                 link
@@ -75,34 +109,34 @@
                 清空
               </el-button>
             </div>
-          </header>
-
-          <div class="pe-row pe-colhead">
-            <span class="pe-name">权限</span>
-            <span class="pe-col">
-              <el-checkbox
-                :model-value="mod.ownAll"
-                :indeterminate="mod.checked > 0 && !mod.ownAll"
-                :disabled="!editable || !mod.changeable"
-                @change="(on: unknown) => quick(mod.key, on ? 'all' : 'none')"
-              >
-                拥有
-              </el-checkbox>
-            </span>
-            <span v-if="showGrant" class="pe-col">
-              <el-tooltip content="勾了的，拥有这个角色的人还能把这项再授给别人" placement="top">
-                <el-checkbox
-                  :model-value="mod.grantAll"
-                  :indeterminate="mod.granted > 0 && !mod.grantAll"
-                  :disabled="!editable || !mod.changeable"
-                  @change="(on: unknown) => grantColumn(mod.key, Boolean(on))"
-                >
-                  可转授
-                </el-checkbox>
-              </el-tooltip>
-            </span>
           </div>
+          <span class="pe-col">
+            <el-checkbox
+              :model-value="mod.ownAll"
+              :indeterminate="mod.checked > 0 && !mod.ownAll"
+              :disabled="!editable || !mod.changeable"
+              :data-test="`group-own-${mod.key}`"
+              @change="(on: unknown) => quick(mod.key, on ? 'all' : 'none')"
+            >
+              拥有
+            </el-checkbox>
+          </span>
+          <span v-if="showGrant" class="pe-col">
+            <el-tooltip content="勾了的，拥有这个角色的人还能把这项再授给别人" placement="top">
+              <el-checkbox
+                :model-value="mod.grantAll"
+                :indeterminate="mod.granted > 0 && !mod.grantAll"
+                :disabled="!editable || !mod.changeable"
+                :data-test="`group-pass-${mod.key}`"
+                @change="(on: unknown) => grantColumn(mod.key, Boolean(on))"
+              >
+                可转授
+              </el-checkbox>
+            </el-tooltip>
+          </span>
+        </header>
 
+        <div v-show="!folded(mod.key)" class="pe-mbody">
           <template v-for="tier in mod.tiers" :key="tier.key">
             <div class="pe-tier">{{ tier.label }}</div>
             <div
@@ -135,20 +169,39 @@
                     </el-icon>
                   </el-tooltip>
                 </div>
-                <p v-if="item.hint" class="pe-hint">
-                  <template v-for="(part, i) in parts(item.hint)" :key="i">
+                <span class="pe-code">
+                  <template v-for="(part, i) in parts(item.code)" :key="i">
                     <mark v-if="part.hit">{{ part.text }}</mark>
                     <template v-else>{{ part.text }}</template>
                   </template>
-                </p>
-                <p v-if="has(item.code) && missing(item)" class="pe-warn">
-                  <el-icon><WarningFilled /></el-icon>
-                  还要有{{ missing(item) }}才用得上
-                </p>
-                <p v-if="notes[item.code]" class="pe-warn">
-                  <el-icon><WarningFilled /></el-icon>
-                  {{ notes[item.code] }}
-                </p>
+                </span>
+                <el-tooltip v-if="item.hint" placement="top" trigger="hover">
+                  <template #content>
+                    <span class="pe-tip">
+                      <template v-for="(part, i) in parts(item.hint)" :key="i">
+                        <mark v-if="part.hit">{{ part.text }}</mark>
+                        <template v-else>{{ part.text }}</template>
+                      </template>
+                    </span>
+                  </template>
+                  <el-icon class="pe-help" tabindex="0" :aria-label="item.hint">
+                    <QuestionFilled />
+                  </el-icon>
+                </el-tooltip>
+                <el-tooltip
+                  v-if="has(item.code) && missing(item)"
+                  :content="`还要有${missing(item)}才用得上`"
+                  placement="top"
+                >
+                  <el-icon class="pe-warn" tabindex="0" aria-label="缺前置权限">
+                    <WarningFilled />
+                  </el-icon>
+                </el-tooltip>
+                <el-tooltip v-if="notes[item.code]" :content="notes[item.code]" placement="top">
+                  <el-icon class="pe-warn" tabindex="0" :aria-label="notes[item.code]">
+                    <WarningFilled />
+                  </el-icon>
+                </el-tooltip>
               </div>
               <span class="pe-col">
                 <el-checkbox
@@ -160,25 +213,31 @@
                 />
               </span>
               <span v-if="showGrant" class="pe-col">
-                <el-checkbox
-                  :model-value="allFixed || grant.has(item.code)"
-                  :disabled="!canChange(item.code)"
-                  :aria-label="`可转授：${item.label}`"
-                  :data-test="`pass-${item.code}`"
-                  @change="(on: unknown) => toggleGrant(item.code, Boolean(on))"
-                />
+                <el-tooltip
+                  :content="grantTip(item.code)"
+                  :disabled="!grantTip(item.code)"
+                  placement="top"
+                >
+                  <el-checkbox
+                    :model-value="allFixed || grant.has(item.code)"
+                    :disabled="!canChange(item.code) || !has(item.code)"
+                    :aria-label="`可转授：${item.label}`"
+                    :data-test="`pass-${item.code}`"
+                    @change="(on: unknown) => toggleGrant(item.code, Boolean(on))"
+                  />
+                </el-tooltip>
               </span>
             </div>
           </template>
-        </section>
-        <el-empty v-if="!shown.length" description="没有符合的权限" :image-size="60" />
-      </div>
+        </div>
+      </section>
+      <el-empty v-if="!shown.length" description="没有符合的权限" :image-size="60" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { Lock, Search, WarningFilled } from "@element-plus/icons-vue";
+import { ArrowRight, Lock, QuestionFilled, Search, WarningFilled } from "@element-plus/icons-vue";
 import type { PermGroup, PermItem } from "@/api/system/role";
 import {
   addWithNeeds,
@@ -190,12 +249,15 @@ import {
 } from "@/utils/permDeps";
 
 /**
- * 授权编辑器：角色页、部门「权限上限」页签共用。
- * - 左边模块目录（和菜单一一对应），每个模块显示已勾 / 总数，点一下滚过去；窄的时候变成顶部横向标签；
- * - 每个模块分三段：能进这页 → 能看到什么 → 能做什么；每行「拥有」「可转授」两列，列头整列全选；
+ * 授权编辑器：角色页、部门「权限上限」页签共用。企业级密排（阿里云 RAM 基线）：
+ * - 工具栏：搜索（名称/说明/code）＋筛选 chips＋已勾计数＋展开/收起全部；
+ * - 模块目录一条横向 sticky 导航（和菜单一一对应），每个模块显示已勾 / 总数，点一下展开并滚过去；
+ * - 每个模块是可折叠 section，sticky 组头＝折叠把手＋组名＋已勾/总数 badge＋全选/只读/清空
+ *   ＋「拥有」「可转授」两列的列头三态 checkbox（组级全选）；
+ * - 行 32px 密排：权限名＋code（等宽 12px）＋说明 tooltip（?）＋拥有/可转授两列；
+ *   「可转授」未拥有时禁用并 tooltip 说明（先勾拥有）；灰掉的项悬停锁图标看原因；
  * - 勾一项自动补上前置（如「编辑人员资料」补上「查看人员」），取消前置时连带取消依赖它的项（先确认）；
- * - 模块快捷：全部 / 只读（能进这页 + 能看到什么）/ 清空；
- * - 灰掉的项悬停锁图标看原因；搜索高亮；筛选 全部 / 已勾 / 可转授 / 我能改的。
+ * - 搜索高亮＋自动展开命中组；筛选 全部 / 已勾 / 可转授 / 我能改的。
  * 只改 v-model 里的集合，保存由页面负责。
  */
 const props = withDefaults(
@@ -244,6 +306,8 @@ const filter = ref<"all" | "checked" | "grant" | "mine">("all");
 const showOutside = ref(false);
 const active = ref("");
 const mainRef = ref<HTMLElement>();
+/** 收起的模块 key（纯呈现状态；搜索时命中组强制展开）。 */
+const collapsed = ref(new Set<string>());
 
 const index = computed(() => buildIndex(props.groups));
 const TIER_ORDER = ["enter", "see", "do"] as const;
@@ -260,6 +324,12 @@ function reasonOf(code: string) {
   if (props.outside.has(code)) return props.outsideReason;
   if (props.assignable && !props.assignable.has(code))
     return props.reasons[code] || "你不能转授这一项";
+  return "";
+}
+/** 「可转授」禁用时的解释：不能改→原因；还没拥有→先勾拥有。 */
+function grantTip(code: string) {
+  if (!canChange(code)) return reasonOf(code);
+  if (!has(code)) return "先勾「拥有」，才能设置可转授";
   return "";
 }
 function isChanged(code: string) {
@@ -302,6 +372,27 @@ const modules = computed(() =>
     };
   })
 );
+/** 工具栏的当前已勾总数（和组头 badge 同口径：不含收起的上级没有项）。 */
+const totalChecked = computed(() => modules.value.reduce((n, mod) => n + mod.checked, 0));
+
+/* ---------------- 折叠 ---------------- */
+
+/** 搜索时命中组自动展开；清空搜索恢复用户自己的折叠状态。 */
+function folded(key: string) {
+  return word.value.trim() ? false : collapsed.value.has(key);
+}
+function toggleFold(key: string) {
+  const next = new Set(collapsed.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  collapsed.value = next;
+}
+function expandAll() {
+  collapsed.value = new Set();
+}
+function collapseAll() {
+  collapsed.value = new Set(modules.value.map((mod) => mod.key));
+}
 
 function parts(text = "") {
   const key = word.value.trim();
@@ -330,7 +421,10 @@ const shown = computed(() => {
         if (filter.value === "grant" && !(props.allFixed || props.grant.has(item.code)))
           return false;
         if (filter.value === "mine" && !canChange(item.code)) return false;
-        if (key && !`${mod.label}${item.label}${item.hint || ""}`.toLowerCase().includes(key))
+        if (
+          key &&
+          !`${mod.label}${item.label}${item.hint || ""}${item.code}`.toLowerCase().includes(key)
+        )
           return false;
         return true;
       });
@@ -397,7 +491,7 @@ function toggleGrant(code: string, on: boolean) {
   const nextGrant = new Set(props.grant);
   let added: string[] = [];
   if (on) {
-    // 勾「可转授」同时勾上「拥有」
+    // 勾「可转授」同时勾上「拥有」（行内未拥有时已禁用，这里保留兜底语义）
     if (!next.has(code)) added = addWithNeeds(next, code, index.value, canChangeFn);
     nextGrant.add(code);
   } else nextGrant.delete(code);
@@ -482,6 +576,12 @@ function jump(key: string) {
     word.value = "";
     filter.value = "all";
   }
+  // 折叠着的组先展开再滚
+  if (collapsed.value.has(key)) {
+    const next = new Set(collapsed.value);
+    next.delete(key);
+    collapsed.value = next;
+  }
   active.value = key;
   nextTick(() => sectionOf(key)?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
@@ -516,43 +616,84 @@ onBeforeUnmount(() => observer?.disconnect());
   width: 100%;
   min-width: 0;
   container-type: inline-size;
+  --pe-nav-h: 36px;
+  --pe-col-w: 72px;
 }
 .pe-tools {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 14px;
+  gap: 8px 12px;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 .pe-search {
-  width: 280px;
+  width: 260px;
   max-width: 100%;
 }
-.pe-body {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
+/* 筛选 chips：浅灰底圆角小片，选中浅蓝底主色字（阿里云紧凑密度） */
+.pe-filter :deep(.el-radio-button__inner) {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
+  border: none;
+  border-radius: 4px !important;
+  box-shadow: none !important;
 }
+.pe-filter :deep(.el-radio-button + .el-radio-button) {
+  margin-left: 4px;
+}
+.pe-filter :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  color: var(--el-color-primary);
+  background: var(--menu-active-bg);
+  box-shadow: none !important;
+}
+.pe-total {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.pe-total b {
+  font-variant-numeric: tabular-nums;
+  color: var(--el-color-primary);
+}
+.pe-foldops {
+  display: flex;
+  gap: 4px;
+}
+.pe-foldops .el-button {
+  padding: 4px 2px;
+  font-size: 12px;
+}
+
+/* 模块目录：一条横向 sticky 导航，滚动时钉在编辑区顶部 */
 .pe-nav {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 3;
   display: flex;
-  flex: 0 0 150px;
-  flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+  align-items: center;
+  height: var(--pe-nav-h);
+  padding: 0 2px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  background: var(--content-bg);
+  border-bottom: 1px solid var(--card-divider);
 }
 .pe-nav a {
   display: flex;
+  flex: none;
   gap: 6px;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  font-size: 13px;
+  padding: 4px 10px;
+  font-size: 12px;
   color: var(--el-text-color-regular);
   white-space: nowrap;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 4px;
 }
 .pe-nav a:hover {
   background: var(--el-fill-color-light);
@@ -560,7 +701,7 @@ onBeforeUnmount(() => observer?.disconnect());
 .pe-nav a.on {
   font-weight: 600;
   color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
+  background: var(--menu-active-bg);
 }
 .pe-nav a.dim {
   opacity: 0.45;
@@ -577,83 +718,108 @@ onBeforeUnmount(() => observer?.disconnect());
 .pe-nav em.full {
   color: var(--el-color-success);
 }
+
+/* 模块列表：一张带边线的表，组间 1px divider，组头 sticky 钉在目录下面 */
 .pe-main {
   display: flex;
-  flex: 1;
   flex-direction: column;
-  gap: 14px;
   min-width: 0;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
 }
 .pe-module {
-  scroll-margin-top: 12px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  scroll-margin-top: calc(var(--pe-nav-h) + 8px);
+}
+.pe-module + .pe-module {
+  border-top: 1px solid var(--card-divider);
+}
+.pe-module:first-child .pe-mhead {
+  border-radius: 6px 6px 0 0;
 }
 .pe-mhead {
+  position: sticky;
+  top: var(--pe-nav-h);
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--pe-col-w);
+  gap: 8px;
+  align-items: center;
+  min-height: 40px;
+  padding: 4px 12px;
+  background: var(--content-bg);
+  border-bottom: 1px solid var(--card-divider);
+}
+.with-grant .pe-mhead {
+  grid-template-columns: minmax(0, 1fr) var(--pe-col-w) var(--pe-col-w);
+}
+.pe-mtitle {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 10px 14px 6px;
+  gap: 4px 8px;
+  align-items: center;
+  min-width: 0;
 }
 .pe-mtitle b {
-  font-size: 15px;
+  font-size: 14px;
+}
+.pe-fold {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-radius: 4px;
+}
+.pe-fold:hover {
+  color: var(--el-text-color-primary);
+  background: var(--el-fill-color-light);
+}
+.pe-fold .el-icon {
+  transform: rotate(90deg);
+  transition: transform 0.15s;
+}
+.pe-fold.closed .el-icon {
+  transform: rotate(0deg);
 }
 .pe-count {
-  margin-left: 8px;
+  padding: 0 6px;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
   color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-radius: 9px;
+}
+.pe-count.some {
+  color: var(--el-color-primary);
+  background: var(--menu-active-bg);
+}
+.pe-count.full {
+  color: var(--el-color-success);
+  background: var(--status-ok-bg);
+}
+.pe-help {
+  flex: none;
+  font-size: 14px;
+  color: var(--el-text-color-placeholder);
+  cursor: help;
+}
+.pe-help:hover {
+  color: var(--el-color-primary);
 }
 .pe-quick {
   display: flex;
   gap: 2px;
+  margin-left: 4px;
 }
-.pe-hint {
-  margin: 2px 0 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--el-text-color-secondary);
-}
-.pe-warn {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--el-color-warning-dark-2);
-}
-.pe-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px;
-  gap: 8px;
-  align-items: center;
-  padding: 7px 14px;
-  border-top: 1px solid var(--el-border-color-extra-light);
-  border-left: 3px solid transparent;
-}
-.with-grant .pe-row {
-  grid-template-columns: minmax(0, 1fr) 72px 72px;
-}
-.pe-row.changed {
-  background: var(--el-color-primary-light-9);
-  border-left-color: var(--el-color-primary);
-}
-.pe-row.locked .pe-label {
-  color: var(--el-text-color-secondary);
-}
-.pe-row.outside {
-  opacity: 0.6;
-}
-.pe-colhead {
-  padding-top: 4px;
-  padding-bottom: 4px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-lighter);
-}
-.pe-colhead :deep(.el-checkbox__label) {
-  padding-left: 4px;
+.pe-quick .el-button {
+  padding: 4px;
   font-size: 12px;
 }
 .pe-col {
@@ -664,21 +830,88 @@ onBeforeUnmount(() => observer?.disconnect());
   height: auto;
   margin-right: 0;
 }
+.pe-mhead .pe-col :deep(.el-checkbox__label) {
+  padding-left: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 三段小标 + 32px 密排行 */
 .pe-tier {
-  padding: 8px 14px 2px;
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 12px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--el-color-primary);
-  letter-spacing: 1px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-lighter);
 }
-.pe-label {
+.pe-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--pe-col-w);
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-top: 1px solid var(--el-border-color-extra-light);
+  border-left: 3px solid transparent;
+}
+.with-grant .pe-row {
+  grid-template-columns: minmax(0, 1fr) var(--pe-col-w) var(--pe-col-w);
+}
+.pe-row:hover {
+  background: var(--el-fill-color-lighter);
+}
+.pe-row.changed,
+.pe-row.changed:hover {
+  background: var(--menu-active-bg);
+  border-left-color: var(--el-color-primary);
+}
+.pe-row.locked .pe-label {
+  color: var(--el-text-color-secondary);
+}
+.pe-row.outside {
+  opacity: 0.6;
+}
+.pe-name {
   display: flex;
   gap: 6px;
   align-items: center;
+  min-width: 0;
+}
+.pe-label {
+  display: flex;
+  flex: 0 1 auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
   font-size: 14px;
 }
-.pe-lock {
+.pe-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pe-code {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
   color: var(--el-text-color-placeholder);
+  white-space: nowrap;
+}
+.pe-lock {
+  flex: none;
+  color: var(--el-text-color-placeholder);
+  cursor: help;
+}
+.pe-warn {
+  flex: none;
+  font-size: 14px;
+  color: var(--el-color-warning);
   cursor: help;
 }
 mark {
@@ -687,35 +920,36 @@ mark {
   background: var(--el-color-warning-light-7);
   border-radius: 2px;
 }
+/* tooltip 内容是深色底：高亮块里用主文字色保证对比 */
+.pe-tip mark {
+  color: var(--el-text-color-primary);
+}
 
-/* 窄的时候：目录变成顶部横向滚动标签，两列开关仍然右对齐 */
+/* 窄的时候：两列开关收窄、行内边距减小；更窄时藏 code（说明仍在 tooltip） */
 @container (max-width: 760px) {
-  .pe-body {
-    flex-direction: column;
-    gap: 8px;
-  }
-  .pe-nav {
-    flex: none;
-    flex-direction: row;
-    width: 100%;
-    padding: 4px 0;
-    overflow-x: auto;
-    scrollbar-width: thin;
-    background: var(--el-bg-color);
-  }
-  .pe-nav a {
-    flex: none;
-    border: 1px solid var(--el-border-color-lighter);
-  }
+  .pe-mhead,
   .pe-row {
     grid-template-columns: minmax(0, 1fr) 52px;
-    padding: 7px 10px;
+    padding-right: 10px;
+    padding-left: 10px;
   }
+  .with-grant .pe-mhead,
   .with-grant .pe-row {
     grid-template-columns: minmax(0, 1fr) 52px 52px;
   }
-  .pe-mhead {
-    padding: 10px 10px 6px;
+  .pe-tier {
+    padding: 0 10px;
+  }
+}
+@container (max-width: 560px) {
+  .pe-code {
+    display: none;
+  }
+  .pe-search {
+    width: 100%;
+  }
+  .pe-total {
+    margin-left: 0;
   }
 }
 </style>

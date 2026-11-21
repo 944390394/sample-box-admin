@@ -19,7 +19,7 @@
     <p v-else-if="presetMissing" class="tip" data-test="create-boxes-missing">
       带过来的采样箱有 {{ presetMissing }} 台没取到（不在你的管理范围内或已删除），已跳过。
     </p>
-    <el-empty v-if="!canManage" description="当前角色没有「新建采样任务」权限" />
+    <el-empty v-if="!canManage" description="当前角色没有「新建采样任务 / 新建送检单」权限" />
     <div v-else class="create-layout" :class="{ solo: !showSummary }">
       <el-card shadow="never" class="task-form">
         <el-steps :active="step" finish-status="success" align-center class="steps">
@@ -40,9 +40,29 @@
           @submit.prevent
         >
           <template v-if="current === 'basic'">
-            <el-form-item label="任务类型">
-              <el-tag type="success" effect="plain" size="large">采样（含送检）</el-tag>
-              <p class="tip">{{ MERGED_FLOW_TEXT }}</p>
+            <el-form-item label="任务类型" required>
+              <div class="kind-cards" data-test="create-kind-cards">
+                <button
+                  v-for="meta in KIND_META"
+                  :key="meta.kind"
+                  type="button"
+                  class="kind-card"
+                  :class="{ on: form.kind === meta.kind, disabled: !kindAllowed(meta.kind) }"
+                  :disabled="!kindAllowed(meta.kind)"
+                  :data-test="`create-kind-${meta.kind}`"
+                  @click="pickKind(meta.kind)"
+                >
+                  <span class="kind-head">
+                    <el-tag :type="kindTone(meta.kind)" effect="plain" size="small">
+                      {{ meta.label }}
+                    </el-tag>
+                    <el-icon v-if="form.kind === meta.kind" class="check"><Check /></el-icon>
+                  </span>
+                  <span class="kind-desc">{{ meta.desc }}</span>
+                  <span class="kind-flow">{{ meta.flow }}</span>
+                </button>
+              </div>
+              <p class="tip">{{ kindFlowTip }}</p>
             </el-form-item>
             <el-form-item label="任务名称" required :error="errors.name">
               <el-input
@@ -63,8 +83,11 @@
           </template>
 
           <template v-else-if="current === 'from'">
-            <!-- R22：寄出方＝箱子当前归属，只读带出（双向＝检测站，单向＝分公司/总部） -->
-            <el-form-item label="寄出方" data-test="create-from-readonly">
+            <!-- R22：寄出方＝箱子当前归属，只读带出（双向＝检测站，单向＝分公司/总部）；R23 本地采样＝采样单位 -->
+            <el-form-item
+              :label="form.kind === '采样' ? '采样单位' : '寄出方'"
+              data-test="create-from-readonly"
+            >
               <div v-if="derivedFromText" class="station-fixed">
                 <div class="station-line">
                   <b>{{ derivedFromOrg?.name || "总公司（未分配）" }}</b>
@@ -72,15 +95,31 @@
                 </div>
                 <div v-if="derivedFromOrg" class="text-muted">{{ derivedFromOrg.path }}</div>
               </div>
-              <span v-else class="tip">先在「采样箱」步选箱，寄出方按箱子当前归属自动带出</span>
+              <span v-else class="tip">
+                先在「采样箱」步选箱，{{
+                  form.kind === "采样" ? "采样单位" : "寄出方"
+                }}按箱子当前归属自动带出
+              </span>
+              <p v-if="form.kind === '采样'" class="tip">
+                仅本地采样：封箱后任务结束，箱子留在该采样单位，不寄送检测站。
+              </p>
             </el-form-item>
-            <el-form-item v-if="trip" label="寄送方向" data-test="create-trip-tag-from">
+            <el-form-item
+              v-if="trip && form.kind !== '采样'"
+              label="寄送方向"
+              data-test="create-trip-tag-from"
+            >
               <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
                 {{ trip }}
               </el-tag>
               <p class="tip">{{ tripText }}</p>
             </el-form-item>
-            <el-form-item label="采样单位" required :error="errors.fromOrgId">
+            <el-form-item
+              v-if="form.kind !== '采样'"
+              label="采样单位"
+              required
+              :error="errors.fromOrgId"
+            >
               <el-select
                 v-model="form.fromOrgId"
                 filterable
@@ -100,7 +139,12 @@
                 双向＝检测站把箱子寄到采样单位，采样封箱后寄回检测站。
               </p>
             </el-form-item>
-            <el-form-item label="寄出人" required :error="errors.sender">
+            <el-form-item
+              v-if="form.kind !== '采样'"
+              label="寄出人"
+              required
+              :error="errors.sender"
+            >
               <el-select
                 v-model="senderPick"
                 filterable
@@ -123,13 +167,13 @@
               <p class="tip">寄出人须是寄出方的人员（双向时＝检测站人员）。</p>
             </el-form-item>
             <el-alert
-              v-if="outside.length"
+              v-if="outside.length && form.kind !== '采样'"
               type="warning"
               :closable="false"
               class="indent"
               :title="`${outside.join('、')} 不在寄出方「${derivedFromOrg?.name}」及其上下级里，确认要从这里寄出吗？`"
             />
-            <el-form-item label="寄出地址">
+            <el-form-item v-if="form.kind !== '采样'" label="寄出地址">
               <PlaceField
                 v-if="form.fromOrgId"
                 v-model="form.fromPlace"
@@ -137,6 +181,94 @@
                 :default-radius="arriveRadius"
               />
               <span v-else class="tip">先选采样单位</span>
+            </el-form-item>
+          </template>
+
+          <!-- R23 送检：寄出与接收一步（寄出方＝箱归属只读＋寄出人；接收方固定检测站＋签收人＋收货地址），无采样段 -->
+          <template v-else-if="current === 'send'">
+            <el-form-item label="寄出方" data-test="create-send-from">
+              <div v-if="derivedFromText" class="station-fixed">
+                <div class="station-line">
+                  <b>{{ derivedFromOrg?.name || "总公司（未分配）" }}</b>
+                  <el-tag size="small" type="info" effect="plain">按箱子归属带出 · 只读</el-tag>
+                </div>
+                <div v-if="derivedFromOrg" class="text-muted">{{ derivedFromOrg.path }}</div>
+              </div>
+              <span v-else class="tip">先在「采样箱」步选箱，寄出方按箱子当前归属自动带出</span>
+            </el-form-item>
+            <el-form-item label="寄出人" required :error="errors.sender">
+              <el-select
+                v-model="senderPick"
+                filterable
+                allow-create
+                default-first-option
+                placeholder="选择人员，或直接输入姓名"
+                style="width: 100%"
+                :disabled="!chosenBoxes.length"
+              >
+                <el-option
+                  v-for="u in senderUsers"
+                  :key="u.id"
+                  :value="`u:${u.id}`"
+                  :label="u.name"
+                >
+                  <span>{{ u.name }}</span>
+                  <span class="dept">{{ u.dept }}</span>
+                </el-option>
+              </el-select>
+              <p class="tip">寄出人须是寄出方的人员。箱子应已采样封箱。</p>
+            </el-form-item>
+            <el-form-item label="寄出地址">
+              <PlaceField
+                v-if="derivedFromOrg"
+                v-model="form.fromPlace"
+                :org="derivedFromOrg"
+                :default-radius="arriveRadius"
+              />
+              <span v-else class="tip">先选采样箱</span>
+            </el-form-item>
+            <el-form-item label="接收单位" required :error="errors.toOrgId">
+              <div v-if="station" class="station-fixed" data-test="create-station-fixed-send">
+                <div class="station-line">
+                  <b>{{ station.name }}</b>
+                  <el-tag size="small" type="warning" effect="plain">检测站 · 唯一</el-tag>
+                </div>
+                <div class="text-muted">{{ station.path }}</div>
+              </div>
+              <el-alert
+                v-else
+                type="warning"
+                :closable="false"
+                show-icon
+                title="尚未指定唯一检测站"
+                description="请先在「系统设置 › 采样箱」指定唯一检测站，再回来创建任务单。"
+              />
+            </el-form-item>
+            <el-form-item label="签收人" required :error="errors.signer">
+              <el-select
+                v-model="signerPick"
+                filterable
+                allow-create
+                default-first-option
+                placeholder="选择人员，或直接输入姓名"
+                style="width: 100%"
+                :disabled="!station"
+              >
+                <el-option v-for="u in toUsers" :key="u.id" :value="`u:${u.id}`" :label="u.name">
+                  <span>{{ u.name }}</span>
+                  <span class="dept">{{ u.dept }}</span>
+                </el-option>
+              </el-select>
+              <p class="tip">默认检测站负责人。签收后箱子改归检测站。</p>
+            </el-form-item>
+            <el-form-item label="收货地址">
+              <PlaceField
+                v-if="station"
+                v-model="form.toPlace"
+                :org="stationOrg"
+                :default-radius="arriveRadius"
+              />
+              <span v-else class="tip">指定检测站后带出收货地址</span>
             </el-form-item>
           </template>
 
@@ -293,7 +425,7 @@
                 </header>
                 <dl>
                   <dt>类型</dt>
-                  <dd>采样（含送检）</dd>
+                  <dd>{{ kindLabelText }}</dd>
                   <dt>名称</dt>
                   <dd>{{ form.name }}</dd>
                   <dt>备注</dt>
@@ -302,41 +434,72 @@
               </section>
               <section>
                 <header>
-                  <b>采样单位与寄出方</b>
-                  <el-button link type="primary" @click="goto('from')">修改</el-button>
+                  <b>
+                    {{
+                      form.kind === "采样"
+                        ? "采样单位"
+                        : form.kind === "送检"
+                          ? "寄出与接收"
+                          : "采样单位与寄出方"
+                    }}
+                  </b>
+                  <el-button
+                    link
+                    type="primary"
+                    @click="goto(form.kind === '送检' ? 'send' : 'from')"
+                  >
+                    修改
+                  </el-button>
                 </header>
                 <dl>
-                  <dt>寄出方</dt>
+                  <dt>{{ form.kind === "采样" ? "采样单位" : "寄出方" }}</dt>
                   <dd>
                     {{ derivedFromText || "—" }}
                     <el-tag size="small" type="info" class="tag">按箱归属 · 只读</el-tag>
                   </dd>
-                  <dt>方向</dt>
-                  <dd>
-                    <el-tag
-                      v-if="trip"
-                      size="small"
-                      :type="trip === '双向' ? 'warning' : 'success'"
-                      class="tag"
-                    >
-                      {{ trip }}
-                    </el-tag>
-                    {{ tripText || "选箱后按归属派生" }}
-                  </dd>
-                  <dt>采样单位</dt>
-                  <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
-                  <dt>寄出人</dt>
-                  <dd>
-                    {{ form.sender }}
-                    <el-tag v-if="!form.senderId" size="small" type="info" class="tag">
-                      外部人员
-                    </el-tag>
-                  </dd>
-                  <dt>地址</dt>
-                  <dd>{{ placeText(form.fromPlace) }}</dd>
+                  <template v-if="form.kind === '采样后送检'">
+                    <dt>方向</dt>
+                    <dd>
+                      <el-tag
+                        v-if="trip"
+                        size="small"
+                        :type="trip === '双向' ? 'warning' : 'success'"
+                        class="tag"
+                      >
+                        {{ trip }}
+                      </el-tag>
+                      {{ tripText || "选箱后按归属派生" }}
+                    </dd>
+                    <dt>采样单位</dt>
+                    <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
+                  </template>
+                  <template v-if="form.kind !== '采样'">
+                    <dt>寄出人</dt>
+                    <dd>
+                      {{ form.sender }}
+                      <el-tag v-if="!form.senderId" size="small" type="info" class="tag">
+                        外部人员
+                      </el-tag>
+                    </dd>
+                    <dt>寄出地址</dt>
+                    <dd>{{ placeText(form.fromPlace) }}</dd>
+                  </template>
+                  <template v-if="form.kind === '送检'">
+                    <dt>接收方</dt>
+                    <dd>{{ station?.path || "未指定" }}</dd>
+                    <dt>签收人</dt>
+                    <dd>
+                      {{ form.signer }}
+                      <el-tag v-if="!form.signerId" size="small" type="info" class="tag">
+                        外部人员
+                      </el-tag>
+                    </dd>
+                    <dt>收货地址</dt>
+                    <dd>{{ placeText(form.toPlace) }}</dd>
+                  </template>
                 </dl>
               </section>
-              <section>
+              <section v-if="form.kind !== '送检'">
                 <header>
                   <b>采样安排</b>
                   <el-button link type="primary" @click="goto('sample')">修改</el-button>
@@ -354,7 +517,7 @@
                   <dd>{{ limitOpens ? `每台最多 ${maxOpens} 次` : "不限" }}</dd>
                 </dl>
               </section>
-              <section>
+              <section v-if="form.kind === '采样后送检'">
                 <header>
                   <b>检测站（接收方）</b>
                   <el-button link type="primary" @click="goto('to')">修改</el-button>
@@ -497,6 +660,7 @@
 </template>
 <script setup lang="ts">
 import { ElMessage } from "element-plus";
+import { Check } from "@element-plus/icons-vue";
 import type { Ref } from "vue";
 import API, {
   policyPerm,
@@ -514,7 +678,8 @@ import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
 import { formatDuration } from "@/utils/duration";
-import { MERGED_FLOW_TEXT, MERGED_TRIP_TEXT } from "./status";
+import { KIND_META, MERGED_FLOW_TEXT, MERGED_TRIP_TEXT } from "./status";
+import { kindLabel, kindTone } from "../doc-flow";
 import { useUserStore } from "@/stores/user";
 import SampleBoxAPI from "@/api/sample/box";
 import PageHeader from "@/components/biz/PageHeader.vue";
@@ -522,18 +687,24 @@ import InfoList, { type InfoItem } from "@/components/biz/InfoList.vue";
 import SectionCard from "@/components/biz/SectionCard.vue";
 
 type Person = { id: string; name: string; dept: string };
-type StepKey = "basic" | "boxes" | "from" | "sample" | "to" | "review";
+type StepKey = "basic" | "boxes" | "from" | "sample" | "to" | "send" | "review";
 const router = useRouter(),
   route = useRoute(),
   user = useUserStore();
-// 组织简化（P6/P9）：采样＋送检合并成一张 TK 单，只按「新建采样任务」授权；旧送检/调拨不再新建。
+// R23 三类型：采样/采样后送检按「新建采样任务」授权；送检按「新建送检单」或「新建采样任务」兜底。
 const canSample = computed(() => Boolean(user.userInfo.perms?.includes("task:create:sample")));
+const canInspect = computed(() => Boolean(user.userInfo.perms?.includes("task:create:inspect")));
 const canPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.task)));
 const canReadPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.read)));
-const canManage = computed(() => canSample.value);
+const canManage = computed(() => canSample.value || canInspect.value);
+/** 某类型当前账号能不能建（送检双码兜底，与服务器同口径）。 */
+function kindAllowed(kind: string) {
+  return kind === "送检" ? canInspect.value || canSample.value : canSample.value;
+}
 const previewFailed = ref(false);
 let previewRequest = 0;
 const form = reactive({
+  kind: "采样后送检",
   name: "",
   boxIds: [] as string[],
   overrides: {} as Record<string, Policy>,
@@ -550,6 +721,19 @@ const form = reactive({
   note: "",
   recordVideo: false,
 });
+/** 选类型：重置到基本信息步，清掉与旧类型相关的步骤错误。 */
+function pickKind(kind: string) {
+  if (!kindAllowed(kind) || form.kind === kind) return;
+  form.kind = kind;
+  step.value = 0;
+  for (const name of Object.keys(errors)) delete errors[name];
+}
+const kindLabelText = computed(() => kindLabel(form));
+const kindFlowTip = computed(() =>
+  form.kind === "采样后送检"
+    ? MERGED_FLOW_TEXT
+    : KIND_META.find((m) => m.kind === form.kind)?.desc || ""
+);
 /** 各步骤的字段错误，显示在对应输入框下面。 */
 const errors = reactive<Record<string, string>>({});
 const advancedOpen = ref(false);
@@ -584,6 +768,8 @@ const derivedFromText = computed(() => {
  * 否则单向（本地采样后寄检测站）。选了箱子才可派生；混归属/未指定检测站时为空。
  */
 const trip = computed<"单向" | "双向" | null>(() => {
+  // R23：只有采样后送检（合并流）才有派生方向；本地采样/送检无方向概念
+  if (form.kind !== "采样后送检") return null;
   if (!chosenBoxes.value.length || boxOrgIds.value.length > 1 || !station.value) return null;
   return commonBoxOrgId.value === station.value.id && form.fromOrgId !== station.value.id
     ? "双向"
@@ -691,62 +877,115 @@ watch(isCompany, (on) => {
 });
 
 /**
- * 分步填写（合并流 P6）：基本 → 采样箱 → 采样单位（寄出分公司）→ 采样安排 → 检测站（固定接收方）→ 核对。
- * 先选箱子，寄出单位就能按箱子的归属自动带出。
+ * R23 分步填写按类型动态：
+ * - 采样后送检（合并全流）：基本 → 采样箱 → 采样单位 → 采样安排 → 检测站 → 核对（6 步）；
+ * - 采样（仅本地）：基本 → 采样箱 → 采样单位 → 采样安排 → 核对（5 步，无检测站）；
+ * - 送检（仅寄送）：基本 → 采样箱 → 寄出与接收 → 核对（4 步，无采样安排）。
+ * 先选箱子，寄出方/采样单位就能按箱子归属自动带出。
  */
-const steps = computed<{ key: StepKey; title: string }[]>(() => [
-  { key: "basic", title: "基本信息" },
-  { key: "boxes", title: "采样箱" },
-  { key: "from", title: "采样单位" },
-  { key: "sample", title: "采样安排" },
-  { key: "to", title: "检测站" },
-  { key: "review", title: "核对" },
-]);
+const steps = computed<{ key: StepKey; title: string }[]>(() => {
+  if (form.kind === "送检")
+    return [
+      { key: "basic", title: "基本信息" },
+      { key: "boxes", title: "采样箱" },
+      { key: "send", title: "寄出与接收" },
+      { key: "review", title: "核对" },
+    ];
+  if (form.kind === "采样")
+    return [
+      { key: "basic", title: "基本信息" },
+      { key: "boxes", title: "采样箱" },
+      { key: "from", title: "采样单位" },
+      { key: "sample", title: "采样安排" },
+      { key: "review", title: "核对" },
+    ];
+  return [
+    { key: "basic", title: "基本信息" },
+    { key: "boxes", title: "采样箱" },
+    { key: "from", title: "采样单位" },
+    { key: "sample", title: "采样安排" },
+    { key: "to", title: "检测站" },
+    { key: "review", title: "核对" },
+  ];
+});
 const step = ref(0);
 const current = computed(() => steps.value[step.value]?.key || "basic");
 /** 选箱子和核对这两步要整宽，不显示右边的摘要；核对页本身就是完整摘要。 */
 const showSummary = computed(() => current.value !== "boxes" && current.value !== "review");
-const summaryItems = computed<InfoItem[]>(() => [
-  { label: "类型", value: "采样（含送检）" },
-  { label: "名称", value: form.name.trim() || "—" },
-  {
-    label: "采样箱",
-    value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
-  },
-  { label: "方向", value: trip.value ? `${trip.value}（按箱归属派生）` : "选箱后派生" },
-  {
-    label: "采样单位",
-    value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
-  },
-  { label: "地点", value: form.placeAt ? placeText(form.placeAt) : "—" },
-  {
-    label: "检测站",
-    value: [station.value?.name, form.signer].filter(Boolean).join(" · ") || "—",
-  },
-]);
+const summaryItems = computed<InfoItem[]>(() => {
+  const items: InfoItem[] = [
+    { label: "类型", value: kindLabelText.value },
+    { label: "名称", value: form.name.trim() || "—" },
+    {
+      label: "采样箱",
+      value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
+    },
+  ];
+  if (form.kind === "采样后送检")
+    items.push({
+      label: "方向",
+      value: trip.value ? `${trip.value}（按箱归属派生）` : "选箱后派生",
+    });
+  if (form.kind === "采样") {
+    items.push({ label: "采样单位", value: derivedFromText.value || "选箱后带出" });
+    items.push({ label: "地点", value: form.placeAt ? placeText(form.placeAt) : "—" });
+  } else if (form.kind === "送检") {
+    items.push({ label: "寄出方", value: derivedFromText.value || "选箱后带出" });
+    items.push({
+      label: "检测站",
+      value: [station.value?.name, form.signer].filter(Boolean).join(" · ") || "—",
+    });
+  } else {
+    items.push({
+      label: "采样单位",
+      value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
+    });
+    items.push({ label: "地点", value: form.placeAt ? placeText(form.placeAt) : "—" });
+    items.push({
+      label: "检测站",
+      value: [station.value?.name, form.signer].filter(Boolean).join(" · ") || "—",
+    });
+  }
+  return items;
+});
 function goto(key: StepKey) {
   const index = steps.value.findIndex((s) => s.key === key);
   if (index >= 0) step.value = index;
 }
 
-/** 当前这一步没填完时，在对应输入框下面标出原因，返回 false。 */
+/** 当前这一步没填完时，在对应输入框下面标出原因，返回 false。R23 按类型校验。 */
 function checkStep(key: StepKey) {
   for (const name of Object.keys(errors)) delete errors[name];
   if (key === "basic" && !form.name.trim()) errors.name = "请填写任务名称";
-  if (key === "from" && !form.fromOrgId) errors.fromOrgId = "请选择采样单位（寄出分公司）";
-  if (key === "from" && form.fromOrgId && orgById(form.fromOrgId)?.type !== "公司")
-    errors.fromOrgId = "采样单位必须是分公司（公司类型）";
-  if (key === "from" && !form.sender) errors.sender = "请选择或填写寄出人";
-  if (key === "to" && !station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
-  if (key === "to" && !form.signer) errors.signer = "请选择或填写签收人";
   if (key === "boxes" && !form.boxIds.length) errors.boxIds = "请至少绑定一台采样箱";
   if (key === "boxes" && boxOrgIds.value.length > 1)
     errors.boxIds = "同一任务单的箱子须同归属，请按归属拆分任务单";
+  // 本地采样：采样单位＝箱归属只读带出（选箱后即可），无寄出人
+  if (key === "from" && form.kind === "采样" && !derivedFromOrg.value)
+    errors.fromOrgId = "请先选采样箱，采样单位按箱子归属带出";
+  if (key === "from" && form.kind !== "采样") {
+    if (!form.fromOrgId) errors.fromOrgId = "请选择采样单位（寄出分公司）";
+    else if (orgById(form.fromOrgId)?.type !== "公司")
+      errors.fromOrgId = "采样单位必须是分公司（公司类型）";
+    if (!form.sender) errors.sender = "请选择或填写寄出人";
+  }
+  // 送检：寄出与接收一步（寄出人＋检测站＋签收人）
+  if (key === "send") {
+    if (!form.sender) errors.sender = "请选择或填写寄出人";
+    if (!station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
+    if (!form.signer) errors.signer = "请选择或填写签收人";
+  }
+  if (key === "to" && !station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
+  if (key === "to" && !form.signer) errors.signer = "请选择或填写签收人";
   return !Object.keys(errors).length;
 }
 function next() {
   if (!checkStep(current.value)) return;
-  if (current.value === "boxes" && !form.fromOrgId) form.fromOrgId = suggestedFrom();
+  if (current.value === "boxes") {
+    // 本地采样：采样单位＝箱共同归属；其余类型默认寄出分公司（suggestedFrom）
+    if (form.kind === "采样") form.fromOrgId = commonBoxOrgId.value;
+    else if (!form.fromOrgId) form.fromOrgId = suggestedFrom();
+  }
   step.value = Math.min(step.value + 1, steps.value.length - 1);
 }
 
@@ -943,30 +1182,65 @@ async function submit() {
   for (const item of steps.value) {
     if (!checkStep(item.key)) return goto(item.key);
   }
-  if (!station.value) return goto("to");
-  const data: TaskCreate = {
+  const base = {
     name: form.name.trim(),
-    kind: "采样",
     boxIds: form.boxIds,
     overrides: canPolicy.value ? form.overrides : {},
     policy: canPolicy.value && custom.value ? policy.value : null,
     note: form.note,
     maxOpens: limitOpens.value ? maxOpens.value : null,
-    // 合并单：采样单位＝寄出分公司，接收方固定唯一检测站
-    fromOrgId: form.fromOrgId,
-    toOrgId: station.value.id,
-    sender: form.sender,
-    senderId: form.senderId,
-    signer: form.signer,
-    signerId: form.signerId,
-    fromPlace: form.fromPlace,
-    toPlace: form.toPlace,
-    orgId: form.fromOrgId,
-    placeAt: form.placeAt,
-    people: form.people,
-    sample: form.sample,
-    recordVideo: form.recordVideo,
   };
+  let data: TaskCreate;
+  if (form.kind === "采样") {
+    // 仅本地采样：采样单位＝箱归属（只读），无检测站接收/寄出人/签收人
+    const unit = derivedFromOrg.value?.id || form.fromOrgId;
+    data = {
+      ...base,
+      kind: "采样",
+      localOnly: true,
+      fromOrgId: unit,
+      orgId: unit,
+      placeAt: form.placeAt,
+      people: form.people,
+      sample: form.sample,
+      recordVideo: form.recordVideo,
+    };
+  } else if (form.kind === "送检") {
+    if (!station.value) return goto("send");
+    const from = derivedFromOrg.value?.id || form.fromOrgId;
+    data = {
+      ...base,
+      kind: "送检",
+      fromOrgId: from,
+      orgId: from,
+      toOrgId: station.value.id,
+      sender: form.sender,
+      senderId: form.senderId,
+      signer: form.signer,
+      signerId: form.signerId,
+      fromPlace: form.fromPlace,
+      toPlace: form.toPlace,
+    };
+  } else {
+    if (!station.value) return goto("to");
+    data = {
+      ...base,
+      kind: "采样后送检",
+      fromOrgId: form.fromOrgId,
+      toOrgId: station.value.id,
+      sender: form.sender,
+      senderId: form.senderId,
+      signer: form.signer,
+      signerId: form.signerId,
+      fromPlace: form.fromPlace,
+      toPlace: form.toPlace,
+      orgId: form.fromOrgId,
+      placeAt: form.placeAt,
+      people: form.people,
+      sample: form.sample,
+      recordVideo: form.recordVideo,
+    };
+  }
   saving.value = true;
   try {
     const { id } = await API.createTask(data);
@@ -999,8 +1273,8 @@ async function init() {
       reportOnlyWhenCharging: loaded.defaultReportOnlyWhenCharging,
     };
     if (!custom.value) policy.value = { ...defaultPolicy.value };
-    // 采样单位默认本单位（公司类型），否则范围内第一家分公司
-    if (!form.fromOrgId) form.fromOrgId = suggestedFrom();
+    // 采样单位不在这里预设：选箱后离开「采样箱」步时按箱归属带出（suggestedFrom），
+    // 避免先按本单位预设、选箱后不刷新导致「默认箱归属分公司」口径落空。
     // 从箱子详情、工作台跳过来时带着 ?boxIds=，先选好
     const preset = String(route.query.boxIds || "")
       .split(",")
@@ -1103,6 +1377,61 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
+}
+/* R23 三类型卡片：选中主色描边＋对勾，禁用灰显；流预览小字 */
+.kind-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+.kind-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.kind-card:hover:not(.disabled) {
+  border-color: var(--el-color-primary-light-5);
+}
+.kind-card.on {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary);
+}
+.kind-card.disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.kind-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.kind-head .check {
+  color: var(--el-color-primary);
+}
+.kind-desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-regular);
+}
+.kind-flow {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+@media (max-width: 900px) {
+  .kind-cards {
+    grid-template-columns: 1fr;
+  }
 }
 .station-line {
   display: flex;

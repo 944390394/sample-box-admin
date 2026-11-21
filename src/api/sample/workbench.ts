@@ -19,6 +19,8 @@ export interface TaskBrief {
   id: string;
   name: string;
   kind: string;
+  /** R23 三态类型显示名（服务端 todo 注入）：采样/送检/采样后送检。 */
+  displayKind?: string;
   status: string;
   createdAt: string;
   from: string;

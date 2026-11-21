@@ -549,7 +549,7 @@ test("接收方固定检测站：总部/分公司作接收方拒绝；采样单�
       },
     });
     assert.match(foreignSender.message, /寄出人必须是华南分公司的人员/);
-    // 送检/调拨不再新建
+    // R23：送检恢复新建（仅寄送，接收方固定检测站，IN- 前缀）；调拨仍只读停用
     const inspect = await s.run(s.controller.createTask.bind(s.controller), s.admin, {
       body: {
         name: "x",
@@ -561,7 +561,8 @@ test("接收方固定检测站：总部/分公司作接收方拒绝；采样单�
         signerId: "60",
       },
     });
-    assert.match(inspect.message, /送检已并入采样单/);
+    assert.ok(inspect.ok, `${inspect.code} ${inspect.message}`);
+    assert.match(inspect.data.id, /^IN-/);
     const dispatch = await s.run(s.controller.createTask.bind(s.controller), s.admin, {
       body: {
         name: "x",

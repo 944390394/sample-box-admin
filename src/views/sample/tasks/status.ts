@@ -9,7 +9,10 @@ import {
   ENDED_OK,
   ENDED_VOID,
   isEnded,
+  isEndedFor,
   isLegacySample,
+  isLocalSample,
+  isMergedSample,
   stepsOf as flowStepsOf,
 } from "../../../../shared/taskFlow.js";
 
@@ -35,12 +38,25 @@ export function stepsOf(task: object): string[] {
 /** 已经结束、不用再刷新的单子。 */
 export { isEnded };
 
+/** R23 按 kind＋状态判终态：仅本地采样单已封箱也是终态（合并单同名状态仍中间态）。 */
+export { isEndedFor };
+
 /** 旧采样单（带 trip 或停旧态）只读兼容；新建合并单恒为 false。详情页区分合并流/旧流用。 */
 export { isLegacySample };
+
+/** R23 三类型判别：仅本地采样 / 合并（采样后送检＋旧别名）。 */
+export { isLocalSample, isMergedSample };
 
 /** 结束的单子页头配色：按流程走完是 done，中途作废是 error。 */
 export function endedTone(status?: string) {
   return ENDED_OK.includes(String(status || "")) ? "done" : "error";
+}
+
+/** R23 kind 感知页头配色：仅本地采样单已封箱是终态OK（done），其余按 endedTone。 */
+export function endedToneFor(task?: { status?: string; kind?: string; localOnly?: boolean }) {
+  if (!task) return "error";
+  if (isLocalSample(task) && task.status === "已封箱") return "done";
+  return endedTone(task.status);
 }
 
 /** 旧采样单的手选寄送方式（组织简化后不再手选），仅历史单详情说明用。 */
@@ -61,6 +77,32 @@ export const MERGED_TRIP_TEXT: Record<string, string> = {
   单向: "箱子在采样单位本地：采样封箱后寄唯一检测站，签收后箱子归检测站。",
   双向: "箱子在检测站：检测站先寄到采样分公司（分公司确认到达后箱子交采样单位），采样封箱后寄回检测站。",
 };
+
+/**
+ * R23 三类型建单卡片元数据：label＝类型名，desc＝一句话用途，flow＝流预览小字。
+ * 采样＝仅本地（已封箱终态、箱留采样单位）；送检＝仅寄送（接收方固定检测站）；
+ * 采样后送检＝合并全流（方向按箱归属派生）。
+ */
+export const KIND_META: { kind: string; label: string; desc: string; flow: string }[] = [
+  {
+    kind: "采样",
+    label: "采样",
+    desc: "只在本地采样，封箱后任务结束，箱子留在采样单位，不寄送检测站。",
+    flow: "待采样 → 采样中 → 已封箱（结束）",
+  },
+  {
+    kind: "送检",
+    label: "送检",
+    desc: "箱子已采样封箱，只寄送到唯一检测站检测；寄出方按箱子当前归属带出。",
+    flow: "待寄出 → 运送中 → 待签收 → 待检测 → 已检测",
+  },
+  {
+    kind: "采样后送检",
+    label: "采样后送检",
+    desc: "先本地采样封箱，再寄唯一检测站检测；方向按箱子归属自动派生（只读）。",
+    flow: "待采样 → 采样中 → 已封箱 → 在途 → 待签收 → 待检测 → 已检测",
+  },
+];
 
 /** 推进按钮上的文字，和服务端流转记录的动作名一致。 */
 export const TASK_ACTIONS: Record<string, string> = {

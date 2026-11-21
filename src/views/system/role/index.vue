@@ -1,19 +1,46 @@
 <template>
-  <div class="page-container page-flow">
-    <PageHeader
-      title="角色与权限"
-      subtitle="一个人可以有多个角色，权限取并集，再被所在部门的权限上限封顶。系统管理员固定拥有全部权限。"
-    >
-      <template #actions>
-        <el-button v-if="canCreate" type="primary" :icon="Plus" @click="openForm()">
-          新增角色
-        </el-button>
-      </template>
-    </PageHeader>
+  <div class="page-container page-flow role-page">
+    <div class="role-head">
+      <PageHeader
+        title="角色与权限"
+        subtitle="给角色配功能权限与数据范围：多角色取并集、被所在部门权限上限封顶，系统管理员固定拥有全部权限。"
+      >
+        <template #actions>
+          <el-button v-if="canCreate" type="primary" :icon="Plus" @click="openForm()">
+            新增角色
+          </el-button>
+        </template>
+      </PageHeader>
+    </div>
+
+    <!-- <900px：左角色列收成顶部下拉选择（拖拽排序在宽屏列表里） -->
+    <div v-if="narrow" class="role-switch">
+      <span class="role-switch-label">当前角色</span>
+      <el-select
+        :model-value="currentId"
+        filterable
+        placeholder="选择角色"
+        class="role-switch-select"
+        data-test="role-switch"
+        @change="onSwitch"
+      >
+        <el-option v-for="role in roles" :key="role.id" :label="role.name" :value="role.id!">
+          <span class="opt-name">{{ role.name }}</span>
+          <span class="opt-code">{{ role.code }}</span>
+          <el-tag v-if="role.status !== 1" size="small" type="info">停用</el-tag>
+        </el-option>
+      </el-select>
+    </div>
 
     <div class="layout">
-      <aside class="roles">
-        <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索角色" clearable />
+      <aside v-if="!narrow" class="roles">
+        <div class="roles-head">
+          <b>角色列表</b>
+          <span class="roles-count">{{ shownRoles.length }}</span>
+        </div>
+        <div class="roles-search">
+          <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索角色" clearable />
+        </div>
         <p v-if="canUpdate && keyword" class="text-muted sort-hint" data-test="sort-hint">
           清空搜索后排序
         </p>
@@ -53,20 +80,24 @@
               </button>
               <b>{{ role.name }}</b>
               <el-tag v-if="role.status !== 1" size="small" type="info">停用</el-tag>
+              <span class="role-users">{{ role.userCount || 0 }} 人</span>
             </div>
-            <div class="text-muted">
-              {{ scopeLabel(role.dataScope) }} · {{ role.userCount || 0 }} 人
+            <div class="role-meta">
+              <span class="role-code">{{ role.code }}</span>
+              <el-tag size="small" type="info" effect="plain">
+                {{ scopeShort(role.dataScope) }}
+              </el-tag>
             </div>
           </li>
         </ul>
       </aside>
 
-      <el-card v-if="current" shadow="never" class="panel">
+      <section v-if="current" class="panel">
         <div class="panel-head">
-          <div>
+          <div class="panel-title">
             <h3>
               {{ current.name }}
-              <el-tag size="small" type="info">{{ current.code }}</el-tag>
+              <span class="code-tag">{{ current.code }}</span>
             </h3>
             <p class="text-muted">
               数据范围：{{ scopeLabel(current.dataScope) }}（{{
@@ -75,24 +106,34 @@
               <template v-if="fixed">· 固定拥有全部权限</template>
             </p>
           </div>
-          <div v-if="canUpdate || canScope || canDelete || canAudit" class="ops">
-            <el-button v-if="canAudit" data-test="role-audit-open" @click="openAudit">
-              授权审计
-            </el-button>
+          <div class="panel-ops">
             <el-button
-              v-if="(canUpdate || canScope) && (!fixed || isAdmin)"
-              @click="openForm(current.id)"
+              v-if="previewDrawerMode"
+              :icon="View"
+              data-test="preview-open"
+              @click="previewOpen = true"
             >
-              {{ canUpdate ? "编辑" : "改数据范围" }}
+              预览
             </el-button>
-            <el-button
-              v-if="canDelete && !fixed && current.code !== 'HOME_SWITCH'"
-              type="danger"
-              plain
-              @click="remove"
-            >
-              删除
-            </el-button>
+            <div v-if="canUpdate || canScope || canDelete || canAudit" class="ops">
+              <el-button v-if="canAudit" data-test="role-audit-open" @click="openAudit">
+                授权审计
+              </el-button>
+              <el-button
+                v-if="(canUpdate || canScope) && (!fixed || isAdmin)"
+                @click="openForm(current.id)"
+              >
+                {{ canUpdate ? "编辑" : "改数据范围" }}
+              </el-button>
+              <el-button
+                v-if="canDelete && !fixed && current.code !== 'HOME_SWITCH'"
+                type="danger"
+                plain
+                @click="remove"
+              >
+                删除
+              </el-button>
+            </div>
           </div>
         </div>
 
@@ -189,52 +230,6 @@
             :original-grant="originalPassedSet"
             :all-fixed="fixed"
           />
-
-          <aside class="preview" data-test="perm-preview">
-            <div v-loading="previewLoading" class="pv">
-              <h4>能看到的菜单</h4>
-              <ul>
-                <li v-for="menu in menuPreview" :key="menu.title" :class="{ off: !menu.on }">
-                  <el-icon><component :is="menu.on ? Check : Close" /></el-icon>
-                  {{ menu.title }}
-                </li>
-              </ul>
-              <p v-if="!menuPreview.length && !previewLoading" class="text-muted small">
-                菜单预览暂不可用（服务端菜单接口未就绪）
-              </p>
-            </div>
-            <div class="pv">
-              <h4>工作台卡片</h4>
-              <ul v-if="cardPreview.length">
-                <li v-for="card in cardPreview" :key="card.title" :class="{ off: !card.on }">
-                  <el-icon><component :is="card.on ? Check : Close" /></el-icon>
-                  {{ card.title }}
-                  <small v-if="!card.on">（缺看内容的权限）</small>
-                </li>
-              </ul>
-              <p v-else class="text-muted small">一张卡片都没勾</p>
-            </div>
-            <div class="pv">
-              <h4>采样箱详情</h4>
-              <ul v-if="has('device:box:detail')">
-                <li v-for="tab in boxTabs" :key="tab.title" :class="{ off: !tab.on }">
-                  <el-icon><component :is="tab.on ? Check : Close" /></el-icon>
-                  {{ tab.title }}
-                </li>
-              </ul>
-              <p v-else class="text-muted small">没有「打开采样箱详情」，进不了详情页</p>
-            </div>
-            <div class="pv">
-              <h4>任务详情</h4>
-              <ul v-if="has('device:box:task')">
-                <li v-for="part in taskParts" :key="part.title" :class="{ off: !part.on }">
-                  <el-icon><component :is="part.on ? Check : Close" /></el-icon>
-                  {{ part.title }}
-                </li>
-              </ul>
-              <p v-else class="text-muted small">没有「查看任务单」，看不到任务单</p>
-            </div>
-          </aside>
         </div>
 
         <div v-if="editable || canScope" class="save-bar" data-test="save-bar">
@@ -260,9 +255,44 @@
             保存授权
           </el-button>
         </div>
-      </el-card>
+      </section>
       <el-empty v-else class="panel" description="选一个角色查看权限" />
+
+      <!-- 右栏独立预览卡（第三栏）：与角色卡/编辑器卡平级，sticky 吸顶 -->
+      <aside v-if="current && !previewDrawerMode" class="preview" data-test="perm-preview">
+        <RolePreviewPanel
+          :menus="menuPreview"
+          :loading="previewLoading"
+          :cards="cardPreview"
+          :box-tabs="boxTabs"
+          :task-parts="taskParts"
+          :can-detail="has('device:box:detail')"
+          :can-task="has('device:box:task')"
+        />
+      </aside>
     </div>
+
+    <!-- <1200px：右预览栏改抽屉，同一预览组件、同一份数据 -->
+    <el-drawer
+      v-if="previewDrawerMode"
+      v-model="previewOpen"
+      title="权限预览"
+      size="340px"
+      append-to-body
+      class="role-preview-drawer"
+    >
+      <div data-test="perm-preview">
+        <RolePreviewPanel
+          :menus="menuPreview"
+          :loading="previewLoading"
+          :cards="cardPreview"
+          :box-tabs="boxTabs"
+          :task-parts="taskParts"
+          :can-detail="has('device:box:detail')"
+          :can-task="has('device:box:task')"
+        />
+      </div>
+    </el-drawer>
 
     <!-- 保存前确认：按模块列出这次的增减，收回的标红；数据范围变化单列 -->
     <el-dialog
@@ -396,7 +426,7 @@
 defineOptions({ name: "Role" });
 
 import type { FormInstance, FormRules } from "element-plus";
-import { ArrowDown, Check, Close, Plus, Rank, Search } from "@element-plus/icons-vue";
+import { ArrowDown, Plus, Rank, Search, View } from "@element-plus/icons-vue";
 import { onBeforeRouteLeave } from "vue-router";
 import RoleAPI, {
   type PermGroup,
@@ -410,16 +440,19 @@ import PageHeader from "@/components/biz/PageHeader.vue";
 import PermEditor from "@/components/biz/PermEditor.vue";
 import RoleScopePicker from "./components/RoleScopePicker.vue";
 import RoleAuditDrawer from "./components/RoleAuditDrawer.vue";
+import RolePreviewPanel from "./components/RolePreviewPanel.vue";
 import { usePerm } from "@/composables/usePerm";
 import { useUserStore } from "@/stores/user";
 import { buildIndex, fillNeeds, needsMet } from "@/utils/permDeps";
 
 /**
- * 角色与权限：左边角色列表，右边用授权编辑器勾权限（按页面分模块、每模块 能进这页 → 能看到什么 → 能做什么），
- * 左列表可拖拽排序（把手 hover 显形，Alt+↑/↓ 键盘兜底；PUT /roles/reorder 持久化，
- * 角色下拉、人员表单角色选择同序；搜索过滤态禁拖）。
- * 右侧实时预览这个角色能看到的菜单（#26 B4：预览走服务端 menusFor 同一实现，不再前端自抄菜单表）、
- * 工作台卡片、采样箱详情标签和任务详情内容。
+ * 角色与权限（企业级三栏，阿里云 RAM 基线）：左 260px 角色列表卡（搜索＋滚动列表＋
+ * 拖拽排序把手 hover 显形，Alt+↑/↓ 键盘兜底；PUT /roles/reorder 持久化，角色下拉、
+ * 人员表单角色选择同序；搜索过滤态禁拖），中 flex 权限编辑器卡（按页面分模块、
+ * 每模块 能进这页 → 能看到什么 → 能做什么，sticky 组头＋双 checkbox 密排），
+ * 右 300px 只读预览 sticky 卡（菜单/工作台卡片/采样箱详情/任务详情四页签；
+ * 菜单走服务端 menusFor 同一实现，不再前端自抄菜单表）。
+ * 响应式：<1200px 预览改「预览」按钮抽屉；<900px 角色列改顶部下拉。
  * 数据范围（1–4 预设 + 5 自定义部门多选树）和权限一起草稿、一起 diff 确认保存；
  * 套用模板时一键带入 suggestedScope；「授权审计」抽屉只读回看谁在何时授了什么。
  * 底部保存栏显示这次改了几项，保存前弹确认框按模块列出增减，收回的标红并写明影响几个人。
@@ -435,6 +468,14 @@ const SCOPES: Record<number, string> = {
   3: "本单位",
   4: "仅本人",
   5: "自定义部门数据",
+};
+/** 左列表 scope tag 用的短标签（呈现层，完整口径仍在面板头/选择器）。 */
+const SCOPES_SHORT: Record<number, string> = {
+  1: "全部",
+  2: "本单位及下级",
+  3: "本单位",
+  4: "仅本人",
+  5: "自定义",
 };
 const SCOPE_HINTS: Record<number, string> = {
   1: "所有单位的箱子、任务和人员",
@@ -483,6 +524,11 @@ const reasons = ref<Record<string, string>>({});
 const saving = ref(false);
 const confirmOpen = ref(false);
 const formulaClosed = ref(readFlag());
+
+/* ---- 响应式呈现：<1200 预览抽屉；<900 角色下拉（逻辑不变，只换载体） ---- */
+const previewDrawerMode = useMediaQuery("(max-width: 1199px)");
+const narrow = useMediaQuery("(max-width: 899px)");
+const previewOpen = ref(false);
 
 /* ---- #26 B4：数据范围草稿 + 菜单预览单源 + 授权审计 ---- */
 /** 自己最宽的数据范围（permCatalog.myScope）：D3 前端预校验用。 */
@@ -609,6 +655,7 @@ const diffByModule = computed(() =>
 );
 
 const scopeLabel = (value?: number) => SCOPES[Number(value)] || "—";
+const scopeShort = (value?: number) => SCOPES_SHORT[Number(value)] || "—";
 const has = (code: string) => fixed.value || codes.value.has(code);
 const any = (...list: string[]) => list.some(has);
 /**
@@ -929,6 +976,10 @@ async function pick(id: string) {
   menuPreview.value = [];
   await loadSavedPreview(id);
 }
+/** <900px 顶部下拉选角色：和点列表行同一条 pick 路径（含未保存守卫）。 */
+function onSwitch(id: string | number) {
+  void pick(String(id));
+}
 async function save() {
   if (!current.value) return;
   // D3 前端预校验（服务端兜底）：范围不能比自己宽、自定义部门 ⊆ 自己 manage
@@ -1070,47 +1121,105 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 页头下 1px divider（面包屑在布局层，沿用） */
+.role-head {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--card-divider);
+}
+
+/* <900px 顶部角色下拉 */
+.role-switch {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.role-switch-label {
+  flex: none;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.role-switch-select {
+  flex: 1;
+  max-width: 420px;
+}
+.opt-name {
+  margin-right: 8px;
+}
+.opt-code {
+  margin-right: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+}
+
+/* 三栏：左 260 角色卡 / 中 flex 编辑器卡 / 右 300 预览卡（在 perm-layout 里） */
 .layout {
   display: flex;
-  gap: 12px;
+  gap: 16px;
   align-items: flex-start;
 }
 .roles {
   position: sticky;
   top: 0;
   display: flex;
-  flex: 0 0 220px;
+  flex: 0 0 260px;
   flex-direction: column;
-  gap: 8px;
   max-height: calc(100vh - 140px);
-  padding: 12px;
-  overflow: auto;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  overflow: hidden;
+  background: var(--content-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgb(29 33 41 / 4%);
+}
+.roles-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 12px 8px;
+}
+.roles-head b {
+  font-size: 14px;
+}
+.roles-count {
+  padding: 0 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-radius: 9px;
+}
+.roles-search {
+  padding: 0 12px 8px;
 }
 .roles ul {
-  padding: 0;
+  flex: 1;
+  min-height: 0;
+  padding: 0 4px 8px;
   margin: 0;
+  overflow-y: auto;
   list-style: none;
 }
 .roles li {
   padding: 8px 10px;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 4px;
 }
 .roles li:hover {
   background: var(--el-fill-color-lighter);
 }
 .roles li.on {
-  background: var(--el-color-primary-light-9);
+  /* 选中浅蓝底：用暗色感知的.primary tint（--menu-active-bg），暗色不再翻白 */
+  background: var(--menu-active-bg);
+  box-shadow: inset 2px 0 0 var(--el-color-primary);
 }
 .roles li.off b {
   color: var(--el-text-color-secondary);
 }
 /* 拖拽把手：hover/聚焦才显形；指示线画在目标行上/下沿 */
 .sort-hint {
-  margin: 0;
+  padding: 0 12px;
+  margin: 0 0 4px;
   font-size: 12px;
 }
 .drag-handle {
@@ -1146,33 +1255,104 @@ onMounted(async () => {
 .roles li.drop-after {
   box-shadow: 0 2px 0 0 var(--el-color-primary);
 }
+.roles li.on.drop-before {
+  box-shadow:
+    inset 2px 0 0 var(--el-color-primary),
+    0 -2px 0 0 var(--el-color-primary);
+}
+.roles li.on.drop-after {
+  box-shadow:
+    inset 2px 0 0 var(--el-color-primary),
+    0 2px 0 0 var(--el-color-primary);
+}
 .role-line {
   display: flex;
   gap: 6px;
   align-items: center;
 }
-/* el-card 和卡片体的 overflow 不是 visible 时，里面的模块目录、保存栏 sticky 会失效 */
+.role-line b {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.role-users {
+  flex: none;
+  margin-left: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--el-text-color-secondary);
+}
+.role-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+.role-code {
+  max-width: 130px;
+  padding: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
+}
+
+/* 中栏编辑器卡：overflow 必须 visible，里面的目录/组头/保存栏 sticky 才生效 */
 .panel {
   flex: 1;
   min-width: 0;
+  padding: 16px;
   overflow: visible;
-}
-.panel :deep(.el-card__body) {
-  overflow: visible;
+  background: var(--content-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgb(29 33 41 / 4%);
 }
 .panel-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px 16px;
   align-items: flex-start;
   justify-content: space-between;
   margin-bottom: 12px;
 }
+.panel-title {
+  min-width: 0;
+}
 .panel-head h3 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
   margin: 0;
+  font-size: 16px;
+}
+.code-tag {
+  padding: 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 20px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
 }
 .panel-head p {
   margin: 4px 0 0;
+}
+.panel-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 .ops {
   display: flex;
@@ -1180,6 +1360,14 @@ onMounted(async () => {
 }
 .notice {
   margin-bottom: 12px;
+}
+/* 暗色：EP info alert 的 info-light-9 在项目里仍偏浅（存量），本页用暗色感知变量收回 */
+html.dark .role-page :deep(.el-alert--info) {
+  --el-alert-bg-color: var(--el-fill-color-light);
+}
+html.dark .role-page :deep(.el-alert--info .el-alert__title),
+html.dark .role-page :deep(.el-alert--info .el-alert__description) {
+  color: var(--el-text-color-regular);
 }
 .formula {
   padding-left: 18px;
@@ -1214,6 +1402,64 @@ onMounted(async () => {
   min-width: 260px;
   max-width: 560px;
 }
+.perm-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.editor {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 右栏预览 sticky 卡 */
+.preview {
+  position: sticky;
+  top: 0;
+  flex: 0 0 300px;
+  max-height: calc(100vh - 140px);
+  padding: 8px 12px 12px;
+  overflow-y: auto;
+  background: var(--content-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgb(29 33 41 / 4%);
+}
+
+/* 底部保存栏：sticky 吸底，负边距贴满卡片宽 */
+.save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  margin: 12px -16px -16px;
+  background: var(--content-bg);
+  border-top: 1px solid var(--card-divider);
+  border-radius: 0 0 6px 6px;
+}
+.diff {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-right: auto;
+  font-size: 13px;
+}
+.add {
+  color: var(--el-color-success);
+}
+.del {
+  color: var(--el-color-danger);
+}
+.pass {
+  color: var(--el-color-primary);
+}
+
+/* 保存确认 / 角色表单（沿用） */
 .confirm-scope {
   margin-bottom: 10px;
 }
@@ -1243,82 +1489,6 @@ onMounted(async () => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   white-space: normal;
-}
-.perm-layout {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-}
-.editor {
-  flex: 1;
-  min-width: 0;
-}
-.preview {
-  position: sticky;
-  top: 0;
-  flex: 0 0 220px;
-  padding: 12px;
-  background: var(--el-fill-color-lighter);
-  border-radius: 8px;
-}
-.preview h4 {
-  margin: 0 0 6px;
-}
-.pv {
-  margin-bottom: 14px;
-}
-.pv small {
-  font-size: 11px;
-}
-.preview ul {
-  padding: 0;
-  margin: 0;
-  list-style: none;
-}
-.preview li {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  padding: 3px 0;
-  font-size: 13px;
-  color: var(--el-color-success);
-}
-.preview li.off {
-  color: var(--el-text-color-placeholder);
-}
-.small {
-  margin: 4px 0 0;
-  font-size: 12px;
-}
-.save-bar {
-  position: sticky;
-  bottom: 0;
-  z-index: 3;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 12px 0 4px;
-  margin-top: 12px;
-  background: var(--el-bg-color);
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-.diff {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  margin-right: auto;
-  font-size: 13px;
-}
-.add {
-  color: var(--el-color-success);
-}
-.del {
-  color: var(--el-color-danger);
-}
-.pass {
-  color: var(--el-color-primary);
 }
 .confirm-lead {
   margin: 0 0 10px;
@@ -1361,37 +1531,26 @@ onMounted(async () => {
   font-style: normal;
   color: var(--el-text-color-secondary);
 }
-@media (max-width: 1440px) {
-  .perm-layout {
-    flex-direction: column;
-  }
-  .preview {
-    position: static;
-    display: grid;
-    flex: none;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 0 16px;
-    width: 100%;
-  }
+.small {
+  margin: 4px 0 0;
+  font-size: 12px;
 }
-@media (max-width: 1000px) {
+
+/* <900px：单栏堆叠，卡片内边距收紧 */
+@media (max-width: 899px) {
   .layout {
     flex-direction: column;
   }
-  .roles {
-    position: static;
-    flex: none;
+  .panel {
     width: 100%;
-    max-height: none;
+    padding: 12px;
   }
-  .roles ul {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
+  .save-bar {
+    padding: 12px;
+    margin: 12px -12px -12px;
   }
-  .roles li {
-    flex: none;
-    border: 1px solid var(--el-border-color-lighter);
+  .scope-picker {
+    min-width: 200px;
   }
 }
 </style>

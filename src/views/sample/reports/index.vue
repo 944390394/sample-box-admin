@@ -1,6 +1,6 @@
 <template>
   <div class="page-container uplink-records">
-    <el-card shadow="never" class="records-card">
+    <el-card shadow="never" class="records-card" @pointerdown.capture="bumpInteract">
       <template v-if="serverMode">
         <!-- 概览条：当前筛选范围一次聚合（总数/定时占比/事件次数/电压区间/最近上报） -->
         <div v-loading="summaryLoading" class="overview">
@@ -38,6 +38,19 @@
             <span class="stat__label">最近上报</span>
             <b class="stat__value"><TimeText :value="summary?.latest" /></b>
           </div>
+          <!-- 实时刷新：不打断时的新上报 badge（点击回第 1 页刷新）＋最近一次静默更新时间 -->
+          <span class="overview__live">
+            <button
+              v-if="newCount > 0"
+              type="button"
+              class="live-badge"
+              title="回到第 1 页并刷新"
+              @click="search"
+            >
+              {{ newCount }} 条新上报
+            </button>
+            <span v-if="lastLiveAt" class="live-chip">已更新 · {{ lastLiveAt }}</span>
+          </span>
           <span class="overview__note">
             {{ rangeNote }}
             <template v-if="summaryError">
@@ -112,7 +125,7 @@
         </div>
 
         <!-- 列表：加载骨架 / 错误重试 / 空态 / 语义行；表头吸顶、表体内滚，分页器常驻可见 -->
-        <div class="table-area">
+        <div ref="tableArea" class="table-area" @scroll.capture="onTableScroll">
           <div v-if="error" class="state">
             <el-empty :image-size="60" :description="error">
               <el-button type="primary" @click="retry">重试</el-button>
@@ -132,6 +145,7 @@
             height="100%"
             :data="displayRows"
             :row-key="(row: DisplayRow) => row.id || row.time"
+            :row-class-name="rowClass"
             class="records"
           >
             <el-table-column label="时间" min-width="120">
@@ -287,6 +301,7 @@ import SampleBoxAPI, { type BoxLogItem, type UplinkSummary } from "@/api/sample/
 import FreshTag from "@/components/biz/FreshTag.vue";
 import TimeText from "@/components/biz/TimeText.vue";
 import { usePerm } from "@/composables/usePerm";
+import { useSampleStream, type SampleStreamMessage } from "@/composables/useSampleStream";
 import { presetRange } from "@/utils/batteryChart";
 import { boxFileName, boxTitle } from "@/utils/boxLabel";
 import { kindLabel } from "@/utils/labels";
@@ -304,11 +319,20 @@ import { reports } from "../data";
  * 概览条＋类型/时间/异常筛选＋语义表格＋服务端分页（keyset 顺序翻、页码跳转走 OFFSET）。
  * 列表不取原文 blob，查看才按主键解压；导出复用 export-logs（device:box:logExport，5 万行截断标明）。
  * 旧服务端没有概览端点时降级：概览给「—」、分页退回上一页/下一页，列表照常。
+ * 实时刷新（R24）：优先订阅 /api/v1/sample/stream 的 uplink 推送，连不上退 15s summary 轮询
+ * （total|latest 指纹，隐藏暂停、恢复即查）；第 1 页近顶部静默重拉＋新行微高亮＋「已更新」chip，
+ * 翻页/滚动/导出等交互中不打断，只累积「N 条新上报」badge 点击回第 1 页刷新。
  */
 type DisplayRow = BoxLogItem & { facts: UplinkFacts };
 type Preset = "1h" | "6h" | "24h" | "7d" | "custom";
 
 const PAGE_SIZE = 50;
+/** 实时刷新：兜底轮询间隔／表体「近顶部」阈值／交互保护窗／新行高亮时长／stream 事件合批 debounce。 */
+const LIVE_POLL_MS = 15000;
+const LIVE_TOP_PX = 32;
+const LIVE_HOLD_MS = 1500;
+const FRESH_FADE_MS = 1200;
+const LIVE_DEBOUNCE_MS = 600;
 const serverMode = import.meta.env.VITE_MOCK_DEV_SERVER !== "true";
 const can = usePerm();
 const router = useRouter();
@@ -334,6 +358,11 @@ const detailOpen = ref(false);
 const detailRow = ref<BoxLogItem | null>(null);
 const detailRaw = ref("");
 const rawLoading = ref(false);
+/** 实时刷新 UI：badge 条数（未插行的新上报）／最近静默更新时刻／新行高亮键集（1.2s 后清空）。 */
+const newCount = ref(0);
+const lastLiveAt = ref("");
+const freshKeys = ref<Set<string>>(new Set());
+const tableArea = ref<HTMLElement | null>(null);
 
 const kindChips = [
   { value: "", label: "全部" },
@@ -401,12 +430,15 @@ async function loadBoxes() {
 }
 
 let seq = 0;
-async function load(opts: { cursor?: { time: string; id: string } | null; page?: number } = {}) {
-  if (!boxId.value) return;
+/** silent＝实时刷新静默重拉：不亮 loading、失败不清空已有行；返回是否落地（竞态丢弃＝false）。 */
+async function load(
+  opts: { cursor?: { time: string; id: string } | null; page?: number; silent?: boolean } = {}
+): Promise<boolean> {
+  if (!boxId.value) return false;
   const [from, to] = effectiveRange();
-  if (!from || !to) return;
+  if (!from || !to) return false;
   const mine = ++seq;
-  loading.value = true;
+  if (!opts.silent) loading.value = true;
   error.value = "";
   try {
     const cursor = opts.cursor ?? null;
@@ -420,28 +452,33 @@ async function load(opts: { cursor?: { time: string; id: string } | null; page?:
       cursorId: cursor?.id,
       page: cursor ? undefined : opts.page,
     });
-    if (mine !== seq) return;
+    if (mine !== seq) return false;
     rows.value = result.list;
     nextCursor.value = result.nextCursor;
     // 记下「下一页」的游标供回翻走 keyset；更深的旧游标作废截掉
     const index = page.value;
     cursors.value = cursors.value.slice(0, index);
     if (result.nextCursor) cursors.value[index] = result.nextCursor;
+    return true;
   } catch (e) {
-    if (mine !== seq) return;
-    rows.value = [];
-    nextCursor.value = null;
-    error.value = e instanceof Error ? e.message : "加载失败";
+    if (mine !== seq) return false;
+    if (!opts.silent) {
+      rows.value = [];
+      nextCursor.value = null;
+      error.value = e instanceof Error ? e.message : "加载失败";
+    }
+    return false;
   } finally {
-    if (mine === seq) loading.value = false;
+    if (mine === seq && !opts.silent) loading.value = false;
   }
 }
 
 let sumSeq = 0;
-async function loadSummary() {
-  if (!boxId.value) return;
+/** 返回落地的概览（竞态丢弃/失败＝null），调用方用它重置实时刷新基线。 */
+async function loadSummary(): Promise<UplinkSummary | null> {
+  if (!boxId.value) return null;
   const [from, to] = effectiveRange();
-  if (!from || !to) return;
+  if (!from || !to) return null;
   const mine = ++sumSeq;
   summaryLoading.value = true;
   try {
@@ -451,14 +488,16 @@ async function loadSummary() {
       kind: kind.value || undefined,
       anomaly: anomaly.value ? "1" : undefined,
     });
-    if (mine !== sumSeq) return;
+    if (mine !== sumSeq) return null;
     summary.value = result;
     summaryError.value = false;
+    return result;
   } catch {
-    if (mine !== sumSeq) return;
+    if (mine !== sumSeq) return null;
     // 旧服务端没有概览端点：降级为「—」＋上一页/下一页，列表不受影响
     summary.value = null;
     summaryError.value = true;
+    return null;
   } finally {
     if (mine === sumSeq) summaryLoading.value = false;
   }
@@ -467,12 +506,22 @@ async function loadSummary() {
 function search() {
   page.value = 1;
   cursors.value = [null];
+  resetLiveCounters();
+  scrollTableTop();
   void load({ cursor: null });
-  void loadSummary();
+  void loadSummary().then((result) => {
+    if (result) setLiveBaseline(result);
+  });
 }
 
 function goPage(target: number) {
   if (target < 1 || loading.value) return;
+  bumpInteract();
+  // 回第 1 页＝用户主动看最新：与 badge 点击同路径，重置计数并同步概览
+  if (target === 1) {
+    search();
+    return;
+  }
   const cursor = cursors.value[target - 1];
   page.value = target;
   void load(cursor !== undefined ? { cursor } : { page: target });
@@ -541,20 +590,254 @@ async function exportCsv() {
   }
 }
 
+/* ---- 实时刷新（R24）：stream 优先＋15s summary 轮询兜底 ---- */
+/** 用户基线（查询/切筛选/回第 1 页）时的概览 total；badge＝未插行的新上报＝不匹配事件＋基线后增量。 */
+let baseTotal = 0;
+/** 静默检查最近一次看到的 total（badge 模式下不上屏，只用来计数）。 */
+let seenTotal = 0;
+/** stream 事件里确定不匹配 kind/时间筛选的条数（anomaly 口径在服务端，交给 summary 复核）。 */
+let mismatchCount = 0;
+let lastFingerprint = "";
+let liveTimer = 0;
+let checkTimer = 0;
+let freshTimer = 0;
+/** 交互保护窗：滚动/点击后短暂暂停自动插入，防抖动。 */
+let interactUntil = 0;
+let tableScrolled = false;
+let checking = false;
+let liveStopped = false;
+
+const { live: streamLive } = useSampleStream({
+  enabled: serverMode,
+  onMessage: onStreamMessage,
+  onLive: () => {
+    stopLivePoll();
+    // 连上之前漏掉的报文补一次（与箱详情页同策略）
+    void checkLive();
+  },
+  onDown: () => startLivePoll(),
+});
+
+const rowKey = (row: BoxLogItem) => row.id || row.time;
+
+function rowClass({ row }: { row: DisplayRow }) {
+  return freshKeys.value.has(rowKey(row)) ? "row-fresh" : "";
+}
+
+function clockNow() {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function updateBadge() {
+  newCount.value = mismatchCount + Math.max(0, seenTotal - baseTotal);
+}
+
+function resetLiveCounters() {
+  mismatchCount = 0;
+  newCount.value = 0;
+}
+
+function setLiveBaseline(result: UplinkSummary) {
+  baseTotal = result.total;
+  seenTotal = result.total;
+  lastFingerprint = `${result.total}|${result.latest}`;
+}
+
+function bumpInteract() {
+  interactUntil = Date.now() + LIVE_HOLD_MS;
+}
+
+function scrollTableTop() {
+  const wrap = tableArea.value?.querySelector<HTMLElement>(".el-scrollbar__wrap");
+  if (wrap) wrap.scrollTop = 0;
+  tableScrolled = false;
+}
+
+/** 表体内滚（EP2 el-scrollbar）：离开顶部即视为「正在看旧数据」，自动插入改走 badge。 */
+function onTableScroll(event: Event) {
+  const target = event.target as HTMLElement | null;
+  if (!target || !target.closest(".el-table__body-wrapper")) return;
+  tableScrolled = target.scrollTop > LIVE_TOP_PX;
+  bumpInteract();
+}
+
+/** 第 1 页＋近顶部＋无交互/导出/详情阅读中才允许静默插行；其余一律 badge 不打断。 */
+function canAutoInsert() {
+  return (
+    page.value === 1 &&
+    !tableScrolled &&
+    !loading.value &&
+    !summaryLoading.value &&
+    !exporting.value &&
+    !detailOpen.value &&
+    !error.value &&
+    Date.now() >= interactUntil &&
+    !document.hidden
+  );
+}
+
+/** kind/时间按秒级对齐服务端窗口；anomaly 客户端不可靠复算，视为可能匹配交给 summary 判定。 */
+function matchesFilter(uplink: BoxLogItem) {
+  if (kind.value && (uplink.kind || "unknown") !== kind.value) return false;
+  const [from, to] = effectiveRange();
+  const time = uplink.time.slice(0, 19);
+  if (from && time < from) return false;
+  if (to && time > to) return false;
+  return true;
+}
+
+function onStreamMessage(message: SampleStreamMessage) {
+  if (message.type !== "box" || !message.box || !message.uplink) return;
+  if (message.box.id !== boxId.value) return;
+  if (!matchesFilter(message.uplink)) {
+    // 筛选不匹配：只计 badge 不插行（隐藏时也计数，恢复后统一补查）
+    mismatchCount += 1;
+    updateBadge();
+    return;
+  }
+  if (document.hidden) return;
+  // 多包合批：短暂 debounce 后一次 summary 复核，避免密集上报逐包重拉
+  window.clearTimeout(checkTimer);
+  checkTimer = window.setTimeout(() => void checkLive(), LIVE_DEBOUNCE_MS);
+}
+
+/** 静默重拉第 1 页＋概览：新行 prepend 微高亮 1.2s 淡出，右上角 chip 记更新时间。 */
+async function silentRefresh(result: UplinkSummary) {
+  const oldKeys = new Set(rows.value.map(rowKey));
+  const ok = await load({ cursor: null, silent: true });
+  if (!ok) return;
+  summary.value = result;
+  summaryError.value = false;
+  const fresh = new Set<string>();
+  for (const row of rows.value) {
+    const key = rowKey(row);
+    if (!oldKeys.has(key)) fresh.add(key);
+  }
+  window.clearTimeout(freshTimer);
+  freshKeys.value = fresh;
+  if (fresh.size) {
+    freshTimer = window.setTimeout(() => {
+      freshKeys.value = new Set();
+    }, FRESH_FADE_MS);
+  }
+  setLiveBaseline(result);
+  lastLiveAt.value = clockNow();
+}
+
+/** summary 指纹（total|latest）变了才动页面：能插则静默插行，不能插只累积 badge。 */
+async function checkLive() {
+  if (!serverMode || liveStopped || checking || !boxId.value) return;
+  if (document.hidden) return;
+  if (loading.value || summaryLoading.value) {
+    // 用户查询在飞：基线即将重置，稍后再查而不是丢事件
+    window.clearTimeout(checkTimer);
+    checkTimer = window.setTimeout(() => void checkLive(), LIVE_DEBOUNCE_MS);
+    return;
+  }
+  const [from, to] = effectiveRange();
+  if (!from || !to) return;
+  const box = boxId.value;
+  const kindNow = kind.value;
+  const anomalyNow = anomaly.value;
+  const presetNow = preset.value;
+  const customNow = customRange.value;
+  checking = true;
+  try {
+    const result = await SampleBoxAPI.uplinkSummary(box, {
+      from,
+      to,
+      kind: kindNow || undefined,
+      anomaly: anomalyNow ? "1" : undefined,
+    });
+    // 请求期间切了箱/筛选：丢弃本次结果（新查询自己重置基线）
+    if (
+      box !== boxId.value ||
+      kindNow !== kind.value ||
+      anomalyNow !== anomaly.value ||
+      presetNow !== preset.value ||
+      customNow !== customRange.value
+    )
+      return;
+    seenTotal = result.total;
+    const fingerprint = `${result.total}|${result.latest}`;
+    if (fingerprint === lastFingerprint) {
+      updateBadge();
+      return;
+    }
+    lastFingerprint = fingerprint;
+    if (canAutoInsert()) await silentRefresh(result);
+    updateBadge();
+  } catch {
+    /* 静默检查失败不打扰页面：保留旧数据，等下一轮事件/轮询 */
+  } finally {
+    checking = false;
+  }
+}
+
+function startLivePoll() {
+  if (liveTimer || liveStopped || !serverMode || streamLive.value) return;
+  liveTimer = window.setInterval(() => {
+    if (!document.hidden) void checkLive();
+  }, LIVE_POLL_MS);
+}
+
+function stopLivePoll() {
+  window.clearInterval(liveTimer);
+  liveTimer = 0;
+}
+
+/** 隐藏暂停（停轮询、stream 事件不触发重拉）；恢复即查一次补上漏掉的。 */
+function onVisibilityChange() {
+  if (document.hidden) {
+    stopLivePoll();
+    return;
+  }
+  void checkLive();
+  startLivePoll();
+}
+
 const debouncedSearch = useDebounceFn(search, 300);
-watch([kind, boxId, preset, anomaly], () => debouncedSearch());
+watch([kind, boxId, preset, anomaly], () => {
+  bumpInteract();
+  debouncedSearch();
+});
 watch(customRange, () => {
-  if (preset.value === "custom") debouncedSearch();
+  if (preset.value === "custom") {
+    bumpInteract();
+    debouncedSearch();
+  }
 });
 
 onMounted(async () => {
   if (!serverMode) return;
+  document.addEventListener("visibilitychange", onVisibilityChange);
   try {
     await loadBoxes();
     search();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "加载失败";
   }
+});
+
+onActivated(() => {
+  if (!serverMode || document.hidden) return;
+  void checkLive();
+  startLivePoll();
+});
+
+onDeactivated(() => {
+  stopLivePoll();
+  window.clearTimeout(checkTimer);
+});
+
+onBeforeUnmount(() => {
+  liveStopped = true;
+  stopLivePoll();
+  window.clearTimeout(checkTimer);
+  window.clearTimeout(freshTimer);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
 });
 </script>
 
@@ -617,6 +900,37 @@ onMounted(async () => {
   color: var(--el-text-color-secondary);
 }
 
+.overview__live {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.live-badge {
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--el-color-white);
+  cursor: pointer;
+  background: var(--el-color-primary);
+  border: none;
+  border-radius: 999px;
+  transition: background 0.15s;
+}
+
+.live-badge:hover {
+  background: var(--el-color-primary-light-3);
+}
+
+.live-chip {
+  padding: 2px 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  border-radius: 999px;
+}
+
 .filters {
   margin-bottom: 12px;
 }
@@ -677,6 +991,21 @@ onMounted(async () => {
 .empty-hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+/* 实时新行：prepend 后微高亮 1.2s 淡出（键集合同时清空，动画不残留） */
+.records :deep(.row-fresh > td.el-table__cell) {
+  animation: row-fresh-fade 1.2s ease-out;
+}
+
+@keyframes row-fresh-fade {
+  from {
+    background-color: var(--el-color-primary-light-8);
+  }
+
+  to {
+    background-color: var(--el-table-tr-bg-color);
+  }
 }
 
 .facts {

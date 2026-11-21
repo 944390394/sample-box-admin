@@ -26,7 +26,7 @@ import { resolveTimeRange } from "../log/timeRange.js";
 import { currentBoxSettings, firmwareSupportsRemote } from "../settings/boxConfig.js";
 import { boxReserve, companyLimits, withCompanyBattery } from "../settings/companyPolicy.js";
 import { readBoxName } from "../domain/boxName.js";
-import { ENDED_SQL } from "../settings/taskFlow.js";
+import { activeTaskSql } from "../settings/taskFlow.js";
 import { openCounts, overOpenLimit } from "../settings/taskPlaces.js";
 import { taskTrack } from "../settings/taskTrack.js";
 
@@ -482,7 +482,7 @@ export class SampleController {
     if (!db) return false;
     const rows = await db.all(
       `SELECT t.id, t.body FROM sample_task t JOIN sample_task_box m ON m.task_id = t.id
-       WHERE m.box_id = ? AND t.status NOT IN (${ENDED_SQL})`,
+       WHERE m.box_id = ? AND ${activeTaskSql()}`,
       [boxId]
     );
     for (const row of rows) {

@@ -44,8 +44,15 @@ export function deriveTrip(boxOrgId, stationOrgId, samplerOrgId) {
     : "单向";
 }
 
-/** 新建单据的 kind 枚举；旧存储值「送检」「调拨」只读保留，不在其中。 */
-export const DOC_KINDS = ["采样", "划拨"];
+/**
+ * 新建单据的 kind 枚举（R23 三类型反转合并）：
+ * - 采样＝仅本地采样（待采样→采样中→已封箱终态OK，箱留采样单位，无寄送/检测站步）；
+ * - 送检＝仅寄送（箱已采样封箱在寄出方，待寄出→运送中→待签收→待检测→已检测＋拒收/退回/取消）；
+ * - 采样后送检＝采样＋送检合并全流（原 P6 合并单，R22 方向派生沿用）；
+ * - 划拨＝归属立即转移（走 createTransfer）。
+ * 旧存储值「调拨」只读保留，不在其中。旧「送检」只读形态与新送检同流（INSPECT_*）。
+ */
+export const DOC_KINDS = ["采样", "送检", "采样后送检", "划拨"];
 
 /** 走完流程结束的：老任务完成、旧调拨签收完、检测站全部开始检测、划拨提交即生效。 */
 export const ENDED_OK = ["已完成", "已签收", "已检测", "已划拨"];
@@ -75,6 +82,11 @@ export const INSPECT_RETURN_FLOW = ["待寄出", "运送中", "待签收", "退�
 
 /** 合并采样单主路径 7 步（P6，含首末态）：分公司自采→封箱→寄检测站→签收→逐台检测。 */
 export const SAMPLE_FLOW = ["待采样", "采样中", "已封箱", "在途", "待签收", "待检测", "已检测"];
+/**
+ * 仅本地采样单主路径 3 步（R23）：待采样→采样中→已封箱（终态OK，箱留采样单位）。
+ * 无寄送腿、无检测站步；已封箱即结束（不进全局 ENDED——合并单的同名状态仍是中间态）。
+ */
+export const SAMPLE_LOCAL_FLOW = ["待采样", "采样中", "已封箱"];
 /**
  * 合并采样单退回路径：待检测/已检测可发起退回，回寄出方 fromOrg（单向＝原寄出分公司，双向＝检测站）。
  * 进度条把检测段换成返程（已检测后退回的，检测事实在流转记录里）。
@@ -113,9 +125,56 @@ export const SAMPLE_ROUND_RETURN_FLOW = [...SAMPLE_OUTBOUND_STEPS, ...SAMPLE_RET
  */
 export function isLegacySample(task) {
   if (task.kind !== "采样") return false;
+  // R23 仅本地采样单（localOnly 标记）走新本地流，不是旧单
+  if (task.localOnly === true) return false;
   if (task.tripDerived === true) return false;
   if (TRIPS.includes(task.trip)) return true;
   return !task.inspect;
+}
+
+/**
+ * R23 三类型判别（kind 权威，localOnly/inspect 区分采样子形态）：
+ * - 仅本地采样：kind=采样 且 localOnly=true（建单/060 回填写入）；
+ * - 合并（采样后送检）：kind=采样后送检；兼容旧合并别名 kind=采样＋inspect=true（无 localOnly、非 legacy）——
+ *   旧客户端/存量测试以 kind=采样 建合并单，060 后存量归一为 采样后送检，别名仅读兼容；
+ * - 仅送检：kind=送检（新送检与旧送检只读形态同流）。
+ */
+export function isLocalSample(task) {
+  return task.kind === "采样" && task.localOnly === true;
+}
+export function isMergedSample(task) {
+  if (task.kind === "采样后送检") return true;
+  return (
+    task.kind === "采样" &&
+    task.localOnly !== true &&
+    !isLegacySample(task) &&
+    (task.inspect === true || task.tripDerived === true)
+  );
+}
+export function isInspectKind(task) {
+  return task.kind === "送检";
+}
+
+/**
+ * 这张单（按 kind＋状态）是不是结束了。全局 ENDED 之外，仅本地采样单的「已封箱」是终态OK
+ * （合并单的同名状态仍是中间态，不能进全局 ENDED，否则占用 SQL 会提前释放合并单的箱子）。
+ */
+export function isEndedFor(task) {
+  const status = String(task?.status || "");
+  if (ENDED.includes(status)) return true;
+  return isLocalSample(task) && status === "已封箱";
+}
+
+/**
+ * 占用/进行中判定的 SQL 条件（别名默认 t）：全局 ENDED 之外，排除仅本地采样单已封箱终态。
+ * localOnly 标记走 body LIKE（与 isLocalSample 同口径，SQLite/MySQL 通用），合并别名（inspect=true、
+ * 无 localOnly）不受影响。所有「箱子是否被未结束单占用」「进行中任务」查询统一用它。
+ */
+export function activeTaskSql(alias = "t") {
+  return (
+    `(${alias}.status NOT IN (${ENDED_SQL}) AND NOT (` +
+    `${alias}.kind = '采样' AND ${alias}.status = '已封箱' AND ${alias}.body LIKE '%"localOnly":true%'))`
+  );
 }
 
 /** 单号前缀（显示用，kind 才是类型权威来源）。送检 IN- 只读保留。 */
@@ -127,7 +186,7 @@ export function prefixOf(kind) {
 
 export function stepsOf(task) {
   if (task.kind === "划拨") return TRANSFER_STEPS;
-  // 旧送检（只读）
+  // 送检（R23 新建＋旧只读同流）：仅寄送，无采样段
   if (task.kind === "送检")
     return RETURN_STEPS.includes(task.status) ? INSPECT_RETURN_FLOW : INSPECT_FLOW;
   // 旧调拨（只读）
@@ -137,6 +196,8 @@ export function stepsOf(task) {
     if (RETURN_STEPS.includes(task.status)) return [...head, ...RETURN_STEPS];
     return [...head, ...tail];
   }
+  // R23 仅本地采样单：3 步，已封箱终态
+  if (isLocalSample(task)) return SAMPLE_LOCAL_FLOW;
   // 旧采样单（inspect 恒 falsy 或带 trip）：按旧流渲染
   if (isLegacySample(task)) {
     if (["待执行", "执行中"].includes(task.status)) return ["待执行", "执行中", "已完成"];
@@ -150,14 +211,14 @@ export function stepsOf(task) {
     if (INSPECT_STEPS.includes(task.status)) return SAMPLE_FLOW;
     return [...sampling, ...back];
   }
-  // 合并采样单（新建一律走这里）：R22 双向带首腿（待寄出→运送中），单向 7 步不变
+  // 合并采样单（采样后送检；旧合并别名 kind=采样＋inspect 也走这里）：R22 双向带首腿，单向 7 步
   const base = RETURN_STEPS.includes(task.status) ? SAMPLE_RETURN_FLOW : SAMPLE_FLOW;
   return task.trip === "双向" ? [...SAMPLE_OUTBOUND_STEPS, ...base] : base;
 }
 
 /** 签收推进到哪一步：合并采样单/送检/送检测站的到「待检测」，旧调拨/旧采样到「已签收」。 */
 export function signTargetOf(task) {
-  if (task.kind === "采样" && !isLegacySample(task)) return "待检测";
+  if (isMergedSample(task)) return "待检测";
   return task.kind === "送检" || task.inspect ? "待检测" : "已签收";
 }
 
@@ -203,13 +264,25 @@ const SAMPLE_ROUND_NEXT = {
 };
 
 /**
+ * 仅本地采样单（R23）：待采样→采样中→已封箱（终态OK）。已封箱之前可取消；
+ * 已封箱即结束（无寄送/检测站步），不再推进。
+ */
+const SAMPLE_LOCAL_NEXT = {
+  待采样: ["采样中", "已取消"],
+  采样中: ["已封箱", "已取消"],
+  已封箱: [],
+};
+
+/**
  * 从 status 能推进到哪些状态。划拨恒为 []（只能走撤销端点）。
  * 合并采样单按 SAMPLE_NEXT（双向带首腿 SAMPLE_ROUND_NEXT）；旧送检/调拨/采样按各自旧流（读兼容）。
  */
 export function nextOf(task, status) {
   if (task.kind === "划拨") return [];
   if (task.kind === "送检") return ENDED.includes(status) ? [] : INSPECT_NEXT[status] || [];
-  if (task.kind === "采样" && !isLegacySample({ ...task, status }))
+  // R23 仅本地采样单：已封箱终态，之前可取消
+  if (isLocalSample(task)) return SAMPLE_LOCAL_NEXT[status] || [];
+  if (isMergedSample(task))
     return (task.trip === "双向" ? SAMPLE_ROUND_NEXT : SAMPLE_NEXT)[status] || [];
   if (ENDED.includes(status)) return [];
   // 056 映射后的旧无 trip 采样单（待核验→待检测，M2）：收尾按旧核验语义——

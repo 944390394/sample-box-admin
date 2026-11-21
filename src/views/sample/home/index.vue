@@ -645,9 +645,11 @@ const feedGroups = computed<FeedGroup[]>(() => {
 });
 
 function routeOf(task: TaskBrief) {
-  return task.kind === "调拨"
-    ? `${task.from || "—"} → ${task.to || "—"}`
-    : `采样 · ${task.to || "—"}`;
+  if (task.kind === "调拨" || task.kind === "划拨")
+    return `${task.from || "—"} → ${task.to || "—"}`;
+  const label = task.displayKind || (task.kind === "采样" ? "采样后送检" : task.kind || "采样");
+  if (label === "采样") return `本地采样 · ${task.to || task.from || "—"}`;
+  return `${label} · ${task.to || "—"}`;
 }
 function boxLine(box: BoxBrief, key: string) {
   if (key === "alert") return box.alert;

@@ -1,7 +1,7 @@
 import { boxPosition, distanceM } from "../geo/place.js";
 import { currentBoxSettings } from "./boxConfig.js";
 import { companyJudgmentFor, companyOrgOfTask } from "./companyPolicy.js";
-import { ENDED, isLegacySample } from "./taskFlow.js";
+import { ENDED, isLocalSample, isMergedSample } from "./taskFlow.js";
 
 /** 这些状态下箱子正朝某个地点去，列表要算「到达附近」。 */
 export const MOVING = [
@@ -27,10 +27,20 @@ export function targetOf(body, status) {
       return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
     return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
   }
+  // R23 送检：仅寄送，寄出前/退回看寄出地址，其余看检测站收货地址（无采样段）
+  if (body.kind === "送检") {
+    if (status === "待寄出" || status === "退回中")
+      return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
+    return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
+  }
   const plan = body.placeAt ? { ...body.placeAt, role: "计划地点" } : null;
-  // 合并采样单（组织简化 P6）：采样段看计划地点；在途/待签收/待检测看检测站收货地址；退回看寄出地址。
+  // R23 仅本地采样：采样段看计划地点；已封箱终态不再朝哪里去
+  if (isLocalSample({ ...body, status })) {
+    return ["待采样", "采样中"].includes(status) ? plan : null;
+  }
+  // 合并采样单（采样后送检＋旧合并别名）：采样段看计划地点；在途/待签收/待检测看检测站收货地址；退回看寄出地址。
   // R22 双向首腿：待寄出看寄出地址（检测站），运送中朝采样分公司的计划地点去。
-  if (body.kind === "采样" && !isLegacySample({ ...body, status })) {
+  if (isMergedSample({ ...body, status })) {
     if (["待采样", "采样中", "已封箱", "运送中"].includes(status)) return plan;
     if (status === "待寄出") return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
     if (["在途", "待签收", "待检测"].includes(status))

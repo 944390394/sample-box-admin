@@ -41,12 +41,34 @@ export const INSPECT_ACTIVE: string[] = INSPECT_STATUS.filter((s) => !isEnded(s)
 /** 送检终态 4 态。 */
 export const INSPECT_ENDED: string[] = INSPECT_STATUS.filter((s) => isEnded(s));
 
-/** 单据类型标签色：采样 success / 送检 info（warn 用于退回）/ 划拨 primary。 */
+/** 单据类型标签色（R23 三态）：采样 success / 送检 warning / 采样后送检 primary / 划拨 primary。 */
 export function kindTone(kind?: string): "success" | "primary" | "warning" | "info" {
   if (kind === "采样") return "success";
-  if (kind === "划拨") return "primary";
   if (kind === "送检") return "warning";
+  if (kind === "采样后送检") return "primary";
+  if (kind === "划拨") return "primary";
   return "info";
+}
+
+/**
+ * R23 三态类型显示名：服务端 displayKind 优先；裸对象按 kind＋localOnly/inspect 推断——
+ * 采样＋localOnly＝采样（仅本地）；采样＋inspect/合并别名＝采样后送检；其余按 kind。
+ */
+export function kindLabel(task?: {
+  kind?: string;
+  displayKind?: string;
+  localOnly?: boolean;
+  inspect?: boolean;
+  tripDerived?: boolean;
+}): string {
+  if (!task) return "";
+  if (task.displayKind) return task.displayKind;
+  if (task.kind === "采样") {
+    if (task.localOnly === true) return "采样";
+    if (task.inspect === true || task.tripDerived === true) return "采样后送检";
+    return "采样";
+  }
+  return task.kind || "";
 }
 
 /** 送检行首方向标签：退回中/已退回 是「退回」（warn），其余「送检」（info）。 */

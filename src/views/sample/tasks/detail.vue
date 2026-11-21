@@ -2,8 +2,8 @@
   <div class="page-container page-flow">
     <PageHeader :title="task?.name || '任务详情'" :back="'/task/tasks'">
       <template v-if="task" #tags>
-        <el-tag :type="kindTone(task.kind)" effect="plain">
-          {{ task.kind }}
+        <el-tag :type="kindTone(kindLabel(task))" effect="plain">
+          {{ kindLabel(task) }}
         </el-tag>
         <el-tag :type="taskStatusType(task.status)">{{ task.status }}</el-tag>
         <el-tag
@@ -339,7 +339,7 @@
             <CameraWall :cameras="detail.cameras" />
           </el-tab-pane>
           <el-tab-pane
-            v-if="task.kind === '采样' || videos.length"
+            v-if="task.kind === '采样' || task.kind === '采样后送检' || videos.length"
             :label="`开箱录像 ${videos.length}`"
             name="videos"
           >
@@ -477,15 +477,16 @@ import {
   NEEDS_REASON,
   TASK_ACTIONS,
   TRIP_TEXT,
-  endedTone,
-  isEnded,
-  isLegacySample,
+  endedToneFor,
+  isEndedFor,
+  isLocalSample,
+  isMergedSample,
   stepsOf,
   taskStatusType,
 } from "./status";
 import { ago, fullTime, shortTime, span, trackColor } from "@/utils/time";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
-import { kindTone } from "../doc-flow";
+import { kindLabel, kindTone } from "../doc-flow";
 
 const routeInfo = useRoute();
 /** 地图图标和图例共用的颜色。 */
@@ -505,10 +506,10 @@ const detail = ref<TaskDetail | null>(null),
 const task = computed(() => detail.value?.task || null);
 /** 旧调拨/送检（只读）共用物流形详情（寄出方→接收方/检测站、收货地址、签收交接）。 */
 const logistics = computed(() => task.value?.kind === "调拨" || task.value?.kind === "送检");
-/** 合并采样单（P6）：分公司自采＋直寄检测站，既有采样安排又有寄出方→检测站物流段。 */
-const merged = computed(
-  () => task.value?.kind === "采样" && !isLegacySample(task.value as Record<string, unknown>)
-);
+/** 合并采样单（R23 采样后送检＋旧合并别名）：分公司自采＋直寄检测站，既有采样安排又有寄出方→检测站物流段。 */
+const merged = computed(() => isMergedSample(task.value as Record<string, unknown>));
+/** R23 仅本地采样单：无物流段，已封箱终态、箱留采样单位。 */
+const localOnly = computed(() => isLocalSample(task.value as Record<string, unknown>));
 /** R22 双向合并单：寄出方（检测站）→采样单位（分公司）→检测站三段路线，步条含首腿。 */
 const roundTrip = computed(() => merged.value && task.value?.trip === "双向");
 /** 寄出方→接收方路线：旧物流单、合并单、带寄送的旧采样单都画。 */
@@ -516,9 +517,8 @@ const showRoute = computed(() => logistics.value || merged.value || Boolean(task
 /** 接收方是检测站：旧送检与合并单固定寄检测站。 */
 const toStation = computed(() => logistics.value || merged.value);
 const steps = computed(() => (task.value ? stepsOf(task.value) : []));
-// 结束口径和流程校验同一份（shared/taskFlow.js）：以前这里只认「已取消/已拒收」，
-// 已签收、已完成、已检测、已退回的单子被当成没结束，15 秒轮询一直不停。
-const ended = computed(() => isEnded(task.value?.status));
+// 结束口径和流程校验同一份（shared/taskFlow.js，R23 含本地采样已封箱终态）
+const ended = computed(() => isEndedFor(task.value as Record<string, unknown>));
 // 走完最后一步结束的：进度条全绿。已取消/已拒收不在步骤里，另按流转记录停在最后一步。
 const finished = computed(() => ended.value && steps.value.includes(task.value?.status || ""));
 const stepIndex = computed(() => {
@@ -559,7 +559,9 @@ const stepView = computed(() => {
     });
   return list;
 });
-const headTone = computed(() => (ended.value ? endedTone(task.value?.status) : "current"));
+const headTone = computed(() =>
+  ended.value ? endedToneFor(task.value as Record<string, unknown>) : "current"
+);
 const summary = computed(() => {
   const t = task.value,
     d = detail.value;
@@ -924,7 +926,9 @@ const actionText = computed(() => {
   if (action.to === "采样中")
     return `开始采样：${n} 台箱子进入采样阶段${t.recordVideo ? "，在计划地点开箱会自动请求录像" : ""}。`;
   if (action.to === "已封箱")
-    return `确认样品已装好、${n} 台箱子已封箱。封箱后再开箱会记入开箱次数。`;
+    return localOnly.value
+      ? `确认样品已装好、${n} 台箱子已封箱。仅本地采样：封箱后任务结束，箱子留在 ${t.org || "采样单位"}。`
+      : `确认样品已装好、${n} 台箱子已封箱。封箱后再开箱会记入开箱次数。`;
   if (action.to === "在途")
     return merged.value
       ? `确认 ${n} 台箱子已封箱寄出，寄往 ${t.toOrg || "检测站"}，等待检测站签收。`

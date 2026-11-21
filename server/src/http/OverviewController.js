@@ -35,6 +35,7 @@ import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
  */
 const INBOUND = {
   采样: ["在途", "待签收", "待核验"],
+  采样后送检: ["在途", "待签收"],
   调拨: ["运送中", "待签收"],
   送检: ["运送中", "待签收"],
 };
@@ -285,7 +286,8 @@ export class OverviewController {
    * 旧采样单（带 trip 或停旧态）寄回段看寄出单位 from_org_id（只读兼容）。
    */
   #receiver(row, body) {
-    if (row.kind === "调拨" || row.kind === "送检") return String(row.to_org_id ?? "");
+    if (row.kind === "调拨" || row.kind === "送检" || row.kind === "采样后送检")
+      return String(row.to_org_id ?? "");
     if (row.kind === "采样" && !isLegacySample({ ...body, kind: row.kind, status: row.status }))
       return String(row.to_org_id ?? "");
     return String(row.from_org_id ?? "");

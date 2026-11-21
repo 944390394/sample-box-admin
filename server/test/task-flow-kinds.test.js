@@ -22,7 +22,8 @@ import {
 } from "../../shared/taskFlow.js";
 
 test("B1a 合并状态机：采样单主路径 7 步、前缀 TK-、签收落待检测", () => {
-  assert.deepEqual(DOC_KINDS, ["采样", "划拨"]);
+  // R23 三类型反转合并：采样（本地）/送检（仅寄送）/采样后送检（合并全流）/划拨
+  assert.deepEqual(DOC_KINDS, ["采样", "送检", "采样后送检", "划拨"]);
   assert.deepEqual(SAMPLE_FLOW, [
     "待采样",
     "采样中",

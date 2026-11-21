@@ -39,12 +39,8 @@
           <span class="tl-body">
             <span class="tl-head">
               <b class="tl-name">{{ task.name }}</b>
-              <el-tag
-                size="small"
-                :type="task.kind === '调拨' ? 'warning' : 'primary'"
-                effect="plain"
-              >
-                {{ task.kind }}
+              <el-tag size="small" :type="kindTone(kindLabel(task))" effect="plain">
+                {{ kindLabel(task) }}
               </el-tag>
               <el-tag size="small" :type="taskTone(task.status)">{{ task.status }}</el-tag>
               <span class="tl-boxes">{{ task.boxes }} 台</span>
@@ -78,19 +74,22 @@ import EmptyState from "@/components/ov/EmptyState.vue";
 import TimeText from "@/components/biz/TimeText.vue";
 import { fullTime } from "@/utils/time";
 import { taskTone } from "@/utils/tone";
+import { kindLabel, kindTone } from "../../doc-flow";
 
 /** 选中那天进行过的任务：小结 chips + 竖向时间线，点一条进任务详情。 */
 const props = defineProps<{ tasks: DayTask[]; dayText: string }>();
 const router = useRouter();
 
-const sampling = computed(() => props.tasks.filter((task) => task.kind === "采样").length);
+const sampling = computed(
+  () => props.tasks.filter((task) => task.kind === "采样" || task.kind === "采样后送检").length
+);
 const transfer = computed(() => props.tasks.filter((task) => task.kind === "调拨").length);
 const boxSum = computed(() => props.tasks.reduce((n, task) => n + task.boxes, 0));
 
 function routeText(task: DayTask) {
-  return task.kind === "调拨"
-    ? `${task.from || "—"} → ${task.to || "—"}`
-    : `采样 · ${task.to || "—"}`;
+  if (task.kind === "调拨" || task.kind === "送检")
+    return `${task.from || "—"} → ${task.to || "—"}`;
+  return `${kindLabel(task)} · ${task.to || task.from || "—"}`;
 }
 function timeTitle(task: DayTask) {
   const start = `创建 ${fullTime(task.createdAt)}`;

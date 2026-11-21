@@ -1,8 +1,8 @@
 <template>
   <div class="page-container page-flow">
     <PageHeader
-      title="任务单（采样）"
-      subtitle="方向按箱子归属派生（只读）：箱在分公司＝单向（本地采样后寄检测站）；箱在检测站＝双向（检测站寄出→分公司采样→寄回检测站）。签收后逐台扫码开始检测；待检测/已检测可退回寄出方。批量划拨见「调拨单」。"
+      title="任务单"
+      subtitle="三类任务：采样（仅本地，封箱结束箱留采样单位）／送检（仅寄送，接收方固定唯一检测站）／采样后送检（先采样再寄检测站，方向按箱归属派生）。签收后逐台扫码开始检测；待检测/已检测可退回寄出方。批量划拨见「调拨单」。"
     >
       <template #actions>
         <el-button
@@ -79,9 +79,11 @@
         <el-table-column label="任务" min-width="220">
           <template #default="{ row }">
             <div class="name">
-              <el-tag size="small" type="success" effect="plain">采样</el-tag>
+              <el-tag size="small" :type="kindTone(kindLabel(row))" effect="plain">
+                {{ kindLabel(row) }}
+              </el-tag>
               <el-tag
-                v-if="row.trip"
+                v-if="row.trip && kindLabel(row) === '采样后送检'"
                 size="small"
                 :type="row.trip === '双向' ? 'warning' : 'info'"
                 effect="plain"
@@ -180,7 +182,8 @@ import TimeText from "@/components/biz/TimeText.vue";
 import { usePerm } from "@/composables/usePerm";
 import { useUrlQuery } from "@/composables/useUrlQuery";
 import { taskTone } from "@/utils/tone";
-import { TASK_ACTIONS, isEnded, stepsOf } from "./status";
+import { TASK_ACTIONS, isEndedFor, stepsOf } from "./status";
+import { kindLabel, kindTone } from "../doc-flow";
 
 /**
  * 任务单列表：上面按状态分标签并带数量，「待我处理」是我现在能推进的；
@@ -237,8 +240,7 @@ async function load() {
       pageSize: query.pageSize,
       mine: query.mine === "1" ? "1" : undefined,
       status: query.mine === "1" || query.status === "全部" ? undefined : query.status || undefined,
-      // 任务单页只放合并采样单（kind 固定）；划拨有独立页，旧送检/调拨只读保留不混进来
-      kind: "采样",
+      // R23：任务单页放三类（采样/送检/采样后送检），服务端默认口径；划拨有独立页，旧调拨只读不混入
       orgId: query.orgId || undefined,
       from: query.from || undefined,
       to: query.to || undefined,
@@ -289,8 +291,8 @@ watch(
 
 // 表格行在模板里是 DefaultRow，按普通对象收
 type TaskRow = Record<string, unknown> & { kind?: string; status?: string };
-// 结束口径和服务端流程校验同一份：以前这里只认已取消/已拒收，已检测、已退回的单子进度条是空的
-const ended = (row: TaskRow) => isEnded(String(row.status));
+// 结束口径和服务端流程校验同一份（R23 含本地采样已封箱终态）
+const ended = (row: TaskRow) => isEndedFor(row as Record<string, unknown>);
 function stepOf(row: TaskRow) {
   const steps = stepsOf(row);
   return { index: steps.indexOf(String(row.status)), total: steps.length };

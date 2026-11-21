@@ -732,7 +732,7 @@ test("candidate-boxes：服务端下发可选箱集，与提交守卫同一结�
   }
 });
 
-test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒可用；合并采样单不受影响，调拨/送检不再新建", async () => {
+test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒可用；合并采样单不受影响，调拨不再新建、送检恢复（R23）", async () => {
   const s = await setup({ enabled: false });
   try {
     // 常开契约：off 配置不改读取/守卫；旧客户端写 off 被 merge 忽略；两边都没设过仍不写键、读取恒 true
@@ -810,7 +810,7 @@ test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒
     });
     assert.equal(all.data.total, 2);
     assert.deepEqual(new Set(all.data.list.map((t) => t.kind)), new Set(["采样", "调拨"]));
-    // 送检建单被拒（已并入采样单）
+    // R23：送检恢复新建（类型闸门不再拒「送检已并入」）；b1 已在未结束采样单里 → 占用拒绝
     const inspect = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
@@ -826,8 +826,8 @@ test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒
         },
       }
     );
-    assert.equal(inspect.code, "A0400");
-    assert.match(inspect.message, /送检已并入采样单/);
+    assert.equal(inspect.code, "A0409");
+    assert.match(inspect.message, /已在任务单/);
     // 新端点恒可用（off 配置不再报未开通）：提交/列表/候选/详情/撤销走一张真实划拨单
     const created = await s.run(
       s.controller.createTransfer.bind(s.controller),

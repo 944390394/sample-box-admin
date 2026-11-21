@@ -77,6 +77,10 @@ export interface PolicyTask {
   maxOpens?: number | null;
   /** 送检测站的单：签收后「待检测」，检测站逐台扫码开始检测，全部检测完「已检测」。 */
   inspect?: boolean;
+  /** R23 仅本地采样单标记：已封箱终态、箱留采样单位，无寄送/检测站步。 */
+  localOnly?: boolean;
+  /** R23 三态类型显示名（服务端注入）：采样/送检/采样后送检；裸对象按 kindLabel 推断。 */
+  displayKind?: string;
   /** 创建人姓名，旧任务没有。 */
   createdBy?: string;
   /** 列表用：开箱次数超过上限的箱子台数。 */

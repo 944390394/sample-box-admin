@@ -13,11 +13,17 @@
           <div class="text-muted">{{ row.id }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="类型" width="80" prop="kind" />
+      <el-table-column label="类型" width="110">
+        <template #default="{ row }">
+          <el-tag size="small" :type="kindTone(kindLabel(row))" effect="plain">
+            {{ kindLabel(row) }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="路线 / 地点" min-width="200">
         <template #default="{ row }">
           {{
-            row.kind === "调拨"
+            row.kind === "调拨" || row.kind === "送检" || kindLabel(row) === "采样后送检"
               ? `${row.fromOrg || "—"} → ${row.toOrg || "—"}`
               : row.org || row.place || "—"
           }}
@@ -44,6 +50,7 @@ import PolicyAPI, { type PolicyTask } from "@/api/sample/report-policy";
 import DataPager from "@/components/biz/DataPager.vue";
 import TimeText from "@/components/biz/TimeText.vue";
 import { taskTone } from "@/utils/tone";
+import { kindLabel, kindTone } from "../doc-flow";
 
 /** 采样箱详情 · 任务：这台箱子参与过的全部任务，点开看任务详情。 */
 const props = defineProps<{ boxId: string }>();
