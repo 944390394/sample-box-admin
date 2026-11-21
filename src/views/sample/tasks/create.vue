@@ -461,6 +461,7 @@ import PlaceField from "./PlaceField.vue";
 import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
+import { formatDuration } from "@/utils/duration";
 import { MERGED_FLOW_TEXT } from "./status";
 import { useUserStore } from "@/stores/user";
 import SampleBoxAPI from "@/api/sample/box";
@@ -694,7 +695,7 @@ function placeText(place: Place | null) {
 }
 const policyText = computed(() => {
   const base = custom.value
-    ? `本任务统一 ${policy.value.reportPeriodSec} 秒 · ${policy.value.reportOnlyWhenCharging ? "仅充电时" : "持续定时"}`
+    ? `本任务统一 ${formatDuration(policy.value.reportPeriodSec)}（${policy.value.reportPeriodSec} 秒）· ${policy.value.reportOnlyWhenCharging ? "仅充电时" : "持续定时"}`
     : "继承现有配置";
   const count = Object.keys(form.overrides).length;
   return count ? `${base}；${count} 台单箱例外` : base;
@@ -845,7 +846,7 @@ function effective(id: string) {
         : s?.batch
           ? "批量设置"
           : "系统默认";
-  return `${p.reportPeriodSec} 秒 · ${p.reportOnlyWhenCharging ? "仅充电时" : "持续定时"} · ${p.periodicGps === false ? "关闭卫星定位" : "随定时上报定位"} · ${source}`;
+  return `${formatDuration(p.reportPeriodSec)}（${p.reportPeriodSec} 秒）· ${p.reportOnlyWhenCharging ? "仅充电时" : "持续定时"} · ${p.periodicGps === false ? "关闭卫星定位" : "随定时上报定位"} · ${source}`;
 }
 
 async function submit() {

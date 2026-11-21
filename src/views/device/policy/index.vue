@@ -71,7 +71,10 @@
             <el-radio :value="true">单独设置</el-radio>
           </el-radio-group>
           <p v-if="!idleCustom" class="inherit-line">
-            当前系统默认：{{ company.system.reportPeriodSec }} 秒 ·
+            当前系统默认：{{ formatDuration(company.system.reportPeriodSec) }}（{{
+              company.system.reportPeriodSec
+            }}
+            秒）·
             {{ company.system.reportOnlyWhenCharging ? "仅充电时定时上报" : "持续定时上报" }} ·
             指示灯日常亮 · 卫星定位随任务默认（有任务定位、空闲关）
           </p>
@@ -95,7 +98,10 @@
             <el-radio :value="true">单独设置</el-radio>
           </el-radio-group>
           <p v-if="!taskCustom" class="inherit-line">
-            建单初始值用系统默认：{{ company.system.reportPeriodSec }} 秒 ·
+            建单初始值用系统默认：{{ formatDuration(company.system.reportPeriodSec) }}（{{
+              company.system.reportPeriodSec
+            }}
+            秒）·
             {{ company.system.reportOnlyWhenCharging ? "仅充电时定时上报" : "持续定时上报" }}
           </p>
           <PolicyFields v-else v-model="taskForm" :disabled="!canWrite" task />
@@ -222,6 +228,7 @@ import PageHeader from "@/components/biz/PageHeader.vue";
 import SectionCard from "@/components/biz/SectionCard.vue";
 import PolicyFields from "@/views/sample/boxes/PolicyFields.vue";
 import { refreshBoxFeatures } from "@/composables/useBoxFeatures";
+import { formatDuration } from "@/utils/duration";
 
 /**
  * 采样箱 › 默认策略 → 公司策略中心（R13，任务 #46）。

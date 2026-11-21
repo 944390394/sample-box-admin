@@ -3,14 +3,7 @@
     <el-form label-width="140px">
       <div class="form-pair">
         <el-form-item label="上报周期">
-          <el-input-number
-            v-model="form.reportPeriodSec"
-            :min="5"
-            :max="3600"
-            :step="5"
-            :disabled="!can.box"
-          />
-          <span class="unit">秒</span>
+          <DurationInput v-model="form.reportPeriodSec" :min="5" :max="3600" :disabled="!can.box" />
         </el-form-item>
         <el-form-item label="定时上报">
           <el-switch v-model="form.reportOnlyWhenCharging" :disabled="!can.box" />
@@ -103,6 +96,7 @@ import { QuestionFilled } from "@element-plus/icons-vue";
 import SettingsAPI, { type BoxSettings } from "@/api/system/settings";
 import DeptAPI, { type DeptItem } from "@/api/system/dept";
 import SectionCard from "@/components/biz/SectionCard.vue";
+import DurationInput from "@/components/biz/DurationInput.vue";
 
 /**
  * 采样箱默认策略与任务表单（IA 迁移：原系统设置 sec-box 分区整体迁入，现挂采样箱 › 默认策略页）。

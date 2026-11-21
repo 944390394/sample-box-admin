@@ -1,26 +1,8 @@
 <template>
   <div class="policy-fields">
     <div class="period">
-      <span>上报周期</span>
-      <el-input-number
-        v-model="model.reportPeriodSec"
-        :min="5"
-        :max="3600"
-        :precision="0"
-        :disabled="disabled"
-      />
-      <span>秒</span>
-    </div>
-    <div class="shortcuts">
-      <el-button
-        v-for="n in [5, 30, 60, 300, 600, 900]"
-        :key="n"
-        size="small"
-        :disabled="disabled"
-        @click="model.reportPeriodSec = n"
-      >
-        {{ n < 60 ? `${n} 秒` : `${n / 60} 分钟` }}
-      </el-button>
+      <span class="period-label">上报周期</span>
+      <DurationInput v-model="model.reportPeriodSec" :min="5" :max="3600" :disabled="disabled" />
     </div>
     <div class="module">
       <span>卫星定位</span>
@@ -92,6 +74,7 @@
 <script setup lang="ts">
 import { labels } from "@/utils/labels";
 import type { Policy } from "@/api/sample/report-policy";
+import DurationInput from "@/components/biz/DurationInput.vue";
 const model = defineModel<Policy>({ required: true });
 withDefaults(defineProps<{ disabled?: boolean; task?: boolean }>(), { task: false });
 </script>
@@ -103,13 +86,15 @@ withDefaults(defineProps<{ disabled?: boolean; task?: boolean }>(), { task: fals
   align-items: center;
   margin-top: 6px;
 }
-.period,
-.shortcuts {
+.period {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 14px;
+}
+.period-label {
+  line-height: 32px;
 }
 p {
   font-size: 12px;

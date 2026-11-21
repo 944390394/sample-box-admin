@@ -11,7 +11,10 @@
       <template v-else-if="loaded">
         <el-descriptions v-if="state" :column="1" border class="summary">
           <el-descriptions-item label="有效策略">
-            {{ state.effective.reportPeriodSec }} 秒 ·
+            {{ formatDuration(state.effective.reportPeriodSec) }}（{{
+              state.effective.reportPeriodSec
+            }}
+            秒）·
             {{ state.effective.reportOnlyWhenCharging ? "仅充电时" : "持续定时" }} · 指示灯{{
               state.effective.indicators === false ? "日常灭" : "日常亮"
             }}{{
@@ -110,6 +113,7 @@
 import { ElMessage } from "element-plus";
 import API, { policyPerm, type Policy, type PolicyState } from "@/api/sample/report-policy";
 import { useUserStore } from "@/stores/user";
+import { formatDuration } from "@/utils/duration";
 import PolicyFields from "./PolicyFields.vue";
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{
