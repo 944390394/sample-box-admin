@@ -5,6 +5,8 @@
  * snapOf/snapshotAll/markSaved/dirtySections/saveAllDirty，钉死两个缺陷不再复现：
  * 1. 集成区 dirty 快照互相覆盖：存 smtp 不得吞掉 video/wechat 的未保存改动（静默丢改）；
  * 2. scrollspy 漏挂后渲染分区：settings 异步加载后出现的分区必须被补 observe。
+ * IA 迁移：原 sec-box（采样箱默认策略与任务）分区已迁出设置页（采样箱 › 默认策略独立页，
+ * src/views/device/policy/index.vue + components/biz/BoxPolicySettings.vue），harness 随迁去掉 sec-box。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -21,7 +23,6 @@ import {
 function harness() {
   const forms = {
     map: { tk: "", sk: "" },
-    box: { reportPeriodSec: 60, enableTransferInspect: false },
     labels: { task: "任务单" },
     security: { minLength: 8 },
     smtp: { enabled: false, host: "", password: "" },
@@ -31,14 +32,12 @@ function harness() {
   };
   const saved = {};
   let brandingDirty = false;
-  // settings 异步加载前只有这四个分区渲染（index.vue sections computed 的初始形态）
-  let sectionIds = ["sec-access", "sec-map", "sec-box", "sec-labels"];
+  // settings 异步加载前只有这三个分区渲染（index.vue sections computed 的初始形态，sec-box 已迁出）
+  let sectionIds = ["sec-access", "sec-map", "sec-labels"];
   const snapOf = (id) => {
     switch (id) {
       case "sec-map":
         return JSON.stringify(forms.map);
-      case "sec-box":
-        return JSON.stringify(forms.box);
       case "sec-labels":
         return JSON.stringify(forms.labels);
       case "sec-security":
@@ -89,7 +88,6 @@ function harness() {
 const ALL_SECTIONS = [
   "sec-access",
   "sec-map",
-  "sec-box",
   "sec-branding",
   "sec-labels",
   "sec-security",
@@ -150,10 +148,10 @@ test("m-04 其余分区与 branding 的脏判定不受集成区拆分影响", as
   h.snapshotAll();
   // 普通分区整区快照照旧
   h.forms.map.tk = "tk-1";
-  h.forms.box.reportPeriodSec = 120;
-  assert.deepEqual(h.dirtySections(), ["sec-map", "sec-box"]);
+  h.forms.security.minLength = 10;
+  assert.deepEqual(h.dirtySections(), ["sec-map", "sec-security"]);
   h.markSaved("sec-map");
-  assert.deepEqual(h.dirtySections(), ["sec-box"]);
+  assert.deepEqual(h.dirtySections(), ["sec-security"]);
   // branding 走子组件 emit，不走快照
   h.setBrandingDirty(true);
   assert.ok(h.dirtySections().includes("sec-branding"));
@@ -197,23 +195,23 @@ function spyHarness() {
 
 test("m-04 scrollspy 补挂：异步加载后渲染的分区被 observe，消失的 unobserve，重建的换绑", async () => {
   const s = spyHarness();
-  // onMounted 时刻：只有先渲染的四区在 DOM 里（settings 还没加载）
-  const early = ["sec-access", "sec-map", "sec-box", "sec-labels"];
+  // onMounted 时刻：只有先渲染的三区在 DOM 里（settings 还没加载）
+  const early = ["sec-access", "sec-map", "sec-labels"];
   for (const id of early) s.mount(id);
   s.setSections(early);
   s.sync();
-  assert.equal(s.calls.observe.length, 4);
+  assert.equal(s.calls.observe.length, 3);
 
   // load 完成：branding/security/integration/db 渲染出来，分区列表变化后补挂
   const late = ["sec-branding", "sec-security", "sec-integration", "sec-db"];
   for (const id of late) s.mount(id);
   s.setSections([...early, ...late]);
   s.sync();
-  assert.equal(s.calls.observe.length, 8);
+  assert.equal(s.calls.observe.length, 7);
   for (const id of late) assert.ok(s.observed.has(id), `${id} 应被补 observe`);
   // 已挂的同一元素不重复 observe
   s.sync();
-  assert.equal(s.calls.observe.length, 8);
+  assert.equal(s.calls.observe.length, 7);
   assert.equal(s.calls.unobserve.length, 0);
 
   // 分区消失（如 settings.database 没了）：unobserve 掉

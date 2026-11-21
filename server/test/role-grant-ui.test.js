@@ -108,6 +108,8 @@ test("菜单预览单源：已保存/草稿预览都与 menusFor 一致；ADMIN 
     assert.equal(byTitle.get("系统管理 · 操作日志"), true);
     assert.equal(byTitle.get("总览"), false); // 缺 monitor:overview
     assert.equal(byTitle.get("组织管理 · 部门"), false);
+    // IA 迁移：采样箱组新增「默认策略」项，缺三码时 off（预览单源自动含新项）
+    assert.equal(byTitle.get("采样箱 · 默认策略"), false);
 
     // ADMIN 固定全部权限 → 全部菜单亮
     const adminPreview = await call(org.roleMenuPreview, { ...admin, params: { id: "2" } });
@@ -124,6 +126,17 @@ test("菜单预览单源：已保存/草稿预览都与 menusFor 一致；ADMIN 
     const draftByTitle = new Map(draft.data.menus.map((m) => [m.title, m.on]));
     assert.equal(draftByTitle.get("总览"), true);
     assert.equal(draftByTitle.get("采样箱"), false);
+
+    // 三码 some：只授电量预留一项，「默认策略」也亮（组内其余可见项仍按各自权限 off）
+    const policyDraft = await call(org.draftMenuPreview, {
+      ...admin,
+      body: { codes: ["sys:settings:battery-reserve"] },
+    });
+    assert.equal(policyDraft.ok, true, policyDraft.error);
+    const policyByTitle = new Map(policyDraft.data.menus.map((m) => [m.title, m.on]));
+    assert.equal(policyByTitle.get("采样箱 · 默认策略"), true);
+    assert.equal(policyByTitle.get("采样箱"), false); // 缺 device:box:list
+    assert.equal(policyByTitle.get("采样箱 · 上报记录"), false);
 
     // 不存在的角色 → A0404
     const missing = await call(org.roleMenuPreview, { ...admin, params: { id: "999" } });

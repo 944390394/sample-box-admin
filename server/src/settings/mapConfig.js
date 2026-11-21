@@ -6,10 +6,10 @@ import { badRequest } from "../domain/AppError.js";
 
 export function publicMap(config) {
   const map = config?.tianditu && typeof config.tianditu === "object" ? config.tianditu : {};
-  return {
-    tk: String(map.tk || ""),
-    sk: String(map.sk || ""),
-  };
+  const tk = String(map.tk || "");
+  const sk = String(map.sk || "");
+  // hasKey/hasSecret 只是布尔标识，不含密钥本体：没有改密钥权限的人也能知道配没配过
+  return { tk, sk, hasKey: tk.length > 0, hasSecret: sk.length > 0 };
 }
 
 export function mergeMapSettings(current, input) {

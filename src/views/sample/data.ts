@@ -34,6 +34,9 @@ export interface SampleBox {
   masked?: string[];
   /** 设备固件支不支持远程抹除、读本机日志。不受「查看固件版本」影响。 */
   remote?: boolean;
+  /** 服务端查询时刻算好的在线（与离线筛选同口径）。地图/抽屉直接显示，
+   * 避免拿过期本地快照重算出假离线；字段缺失时页面回落本地 telemetryState。 */
+  online?: boolean;
   life: BoxLife;
   /** 与 life 同步，供仍读取 status 的页面使用 */
   status: BoxLife;

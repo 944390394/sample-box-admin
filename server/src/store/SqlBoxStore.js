@@ -105,9 +105,9 @@ export class SqlBoxStore extends BoxStore {
   }
 
   async list() {
-    const rows = await this.executor.all(
-      `SELECT ${BOX_COLUMNS.join(", ")} FROM sample_box ORDER BY last_report_at DESC`
-    );
+    // SELECT * 与 page() 同口径：策略周期/仅充电/占用锚点列也要进 BoxState，
+    // 不然非分页路径的 online/宽限/自身周期判定拿不到这些字段（BOX_COLUMNS 是写入列清单，不能扩）
+    const rows = await this.executor.all(`SELECT * FROM sample_box ORDER BY last_report_at DESC`);
     return rows.map((row) => BoxState.fromRow(row));
   }
 
@@ -117,7 +117,7 @@ export class SqlBoxStore extends BoxStore {
     filter.where.push("last_report_at <> ''");
     const size = Math.min(100, Math.max(1, Number(limit) || 50));
     const rows = await this.executor.all(
-      `SELECT ${BOX_COLUMNS.join(", ")} FROM sample_box WHERE ${filter.where.join(" AND ")}
+      `SELECT * FROM sample_box WHERE ${filter.where.join(" AND ")}
        ORDER BY last_report_at DESC LIMIT ?`,
       [...filter.params, size]
     );

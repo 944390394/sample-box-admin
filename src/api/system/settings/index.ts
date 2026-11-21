@@ -6,6 +6,8 @@ export interface DatabaseSettings {
   database: string;
   user: string;
   passwordSet: boolean;
+  /** 已配置标识（布尔，不含密码本体）；老服务端没有此键时回落 passwordSet。 */
+  hasDbPassword?: boolean;
 }
 
 export interface DatabaseInput {
@@ -19,6 +21,9 @@ export interface DatabaseInput {
 export interface MapSettings {
   tk: string;
   sk: string;
+  /** 已配置标识（布尔，不含密钥本体）；老服务端没有此键时回落 tk/sk 是否有值。 */
+  hasKey?: boolean;
+  hasSecret?: boolean;
 }
 
 export interface MapInput {
@@ -89,6 +94,8 @@ export interface SmtpSettings {
   secure: "none" | "ssl" | "starttls";
   user: string;
   passwordSet?: boolean;
+  /** 已配置标识（布尔，不含密码本体）；老服务端没有此键时回落 passwordSet。 */
+  hasPassword?: boolean;
   password?: string;
   fromName: string;
   fromAddress: string;
@@ -99,6 +106,8 @@ export interface VideoSettings {
   url: string;
   token?: string;
   tokenSet?: boolean;
+  /** 已配置标识（布尔，不含令牌本体）；老服务端没有此键时回落 tokenSet。 */
+  hasToken?: boolean;
   timeoutMs: number;
 }
 
@@ -109,11 +118,13 @@ export interface BrandingSettings {
   logo: string;
 }
 
-/** 微信小程序：AppSecret 只写不读，appSecretSet 表示已设置。 */
+/** 微信小程序：AppSecret 只写不读，appSecretSet/hasAppSecret 表示已设置。 */
 export interface WechatSettings {
   appId: string;
   appSecret?: string;
   appSecretSet?: boolean;
+  /** 已配置标识（布尔，不含秘密本体）；老服务端没有此键时回落 appSecretSet。 */
+  hasAppSecret?: boolean;
 }
 
 const SettingsAPI = {

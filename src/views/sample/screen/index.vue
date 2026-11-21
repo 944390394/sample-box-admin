@@ -165,8 +165,17 @@ const updatedText = computed(() =>
 const hasPlace = (box: SampleBox) =>
   (box.gpsLng != null && box.gpsLat != null) || (box.lbsLng != null && box.lbsLat != null);
 const onlineOf = (box: SampleBox) =>
-  telemetryState(box.last, box.reportPeriodSec, now.value, box.charge, box.reportOnlyWhenCharging)
-    .online;
+  // 在线以服务端查询时刻算好的为准：本地快照最多旧一个轮询间隔（30s），
+  // 短周期箱子的 3×周期阈值比轮询间隔还短，拿快照重算会周期性假离线。
+  typeof box.online === "boolean"
+    ? box.online
+    : telemetryState(
+        box.last,
+        box.reportPeriodSec,
+        now.value,
+        box.charge,
+        box.reportOnlyWhenCharging
+      ).online;
 const shown = computed(() => {
   const text = keyword.value.trim().toLowerCase();
   return boxes.value.filter((box) => {
@@ -276,6 +285,13 @@ async function load(silent = false) {
     }
     if (mine !== seq) return;
     boxes.value = all;
+    // 抽屉拿的是点击那一刻的对象，轮询换列表后按 id 同步成新对象，
+    // 不然抽屉的「最近上报」停在旧值，短周期阈值下打开十几秒就永远假离线。
+    if (drawerBox.value) {
+      const current = drawerBox.value;
+      const fresh = all.find((item) => item.id === current.id);
+      if (fresh) drawerBox.value = fresh;
+    }
     feed.value = wall.value ? items.slice(0, 8) : [];
     updatedAt.value = new Date();
     error.value = "";

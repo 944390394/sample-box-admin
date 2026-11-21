@@ -21,7 +21,14 @@ export function configuredMysql(config) {
 export function publicDatabase(config) {
   const mysql = configuredMysql(config);
   if (!mysql) {
-    return { host: "", port: 3306, database: "", user: "", passwordSet: false };
+    return {
+      host: "",
+      port: 3306,
+      database: "",
+      user: "",
+      passwordSet: false,
+      hasDbPassword: false,
+    };
   }
   return {
     host: mysql.host,
@@ -29,6 +36,7 @@ export function publicDatabase(config) {
     database: mysql.database,
     user: mysql.user,
     passwordSet: mysql.password.length > 0,
+    hasDbPassword: mysql.password.length > 0,
   };
 }
 

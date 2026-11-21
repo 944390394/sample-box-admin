@@ -486,9 +486,14 @@ export function usableMv(usable, reserve) {
   return 4200;
 }
 
-export function flagMatch(box, flag, limits) {
+/**
+ * 在线判定单一实现（与 SqlBoxStore.onlineSql 同口径）：仅充电且未充电豁免；有自身周期用
+ * 3×周期，否则用 onlineSince；占用且从未上报走建单宽限（B3/#18）。
+ * flagMatch 与列表 JSON 的 online 字段共用这一份——后者在查询时刻算好随箱下发，
+ * 页面直接显示，不再拿可能过期的本地快照重算（快照比轮询间隔旧时会假离线）。
+ */
+export function boxOnline(box, limits) {
   const last = String(box.last || "");
-  // 与 SqlBoxStore.onlineSql 同口径：仅充电且未充电豁免；有自身周期用 3×周期，否则用 onlineSince（R-4 收敛）
   const reportedAt = last ? Date.parse(last.replace(" ", "T")) : NaN;
   const seconds = Number(box.reportPeriodSec);
   const period = Number.isInteger(seconds) && seconds >= 5 ? seconds : null;
@@ -503,7 +508,11 @@ export function flagMatch(box, flag, limits) {
     !last &&
     Boolean(boundAt) &&
     Date.now() - Date.parse(boundAt.replace(" ", "T")) <= offlineGraceSec() * 1000;
-  const online = (Boolean(last) && (exempt || within)) || boundPending;
+  return (Boolean(last) && (exempt || within)) || boundPending;
+}
+
+export function flagMatch(box, flag, limits) {
+  const online = boxOnline(box, limits);
   const mv = Number(box.batteryMv);
   if (flag === "alert") return Boolean(box.alert);
   if (flag === "offline") return !online;

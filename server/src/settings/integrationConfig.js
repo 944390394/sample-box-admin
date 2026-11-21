@@ -22,7 +22,7 @@ export function readSmtp(config) {
 
 export function publicSmtp(config) {
   const { password, ...rest } = readSmtp(config);
-  return { ...rest, passwordSet: Boolean(password) };
+  return { ...rest, passwordSet: Boolean(password), hasPassword: Boolean(password) };
 }
 
 export function mergeSmtpSettings(current, input) {
@@ -70,7 +70,7 @@ export function readVideo(config) {
 
 export function publicVideo(config) {
   const { token, ...rest } = readVideo(config);
-  return { ...rest, tokenSet: Boolean(token) };
+  return { ...rest, tokenSet: Boolean(token), hasToken: Boolean(token) };
 }
 
 export function mergeVideoSettings(current, input) {
@@ -95,7 +95,7 @@ export function readWechat(config) {
 
 export function publicWechat(config) {
   const { appSecret, ...rest } = readWechat(config);
-  return { ...rest, appSecretSet: Boolean(appSecret) };
+  return { ...rest, appSecretSet: Boolean(appSecret), hasAppSecret: Boolean(appSecret) };
 }
 
 export function mergeWechatSettings(current, input) {

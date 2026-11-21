@@ -1290,8 +1290,9 @@ async function systemSettings(ctx) {
         })
       : {}),
     database: view || can.db ? publicDatabase(state.config) : null,
-    // 天地图 tk 是浏览器端密钥，看地图的人都要用；sk 是服务端密钥，只给能改地图密钥的人
-    map: { tk: map.tk, sk: can.map ? map.sk : "" },
+    // 天地图 tk 是浏览器端密钥，看地图的人都要用；sk 是服务端密钥，只给能改地图密钥的人。
+    // hasKey/hasSecret 是布尔标识不泄露秘密本体，谁都能看「配没配过」
+    map: { tk: map.tk, sk: can.map ? map.sk : "", hasKey: map.hasKey, hasSecret: map.hasSecret },
     box: publicBox(state.config),
     labels: publicLabels(state.config),
     security: view || can.password || can.lockout ? publicSecurity(state.config) : null,

@@ -42,6 +42,7 @@ test("数据库密码只写入配置，读出来的设置里没有密码", () =>
     database: "",
     user: "",
     passwordSet: false,
+    hasDbPassword: false,
   });
   assert.throws(() =>
     mergeDatabaseSettings(

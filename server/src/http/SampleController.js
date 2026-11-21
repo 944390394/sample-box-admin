@@ -1,6 +1,7 @@
 import {
   BOX,
   boxNameCell,
+  boxOnline,
   canSee,
   EVENT_KINDS,
   EVENT_PERMS,
@@ -850,7 +851,11 @@ function allowedTo(ctx, perm) {
 }
 
 function view(ctx, box) {
-  return maskBox(box.toJSON(), ctx.access?.perms);
+  const json = box.toJSON();
+  // 在线在查询时刻算好随箱下发：地图/抽屉直接显示这个值，
+  // 不再拿点击时的本地快照重算（快照旧于轮询间隔、周期又短时会被判假离线）。
+  json.online = boxOnline(json, limits());
+  return maskBox(json, ctx.access?.perms);
 }
 
 /**

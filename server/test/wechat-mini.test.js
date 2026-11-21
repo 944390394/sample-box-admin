@@ -72,7 +72,11 @@ test("小程序 code 换 openid：没配置先提示，微信报错原样给出�
     mergeWechatSettings(saved, { appId: "wx76dc414b9199c3bf", appSecret: "" }).wechat.appSecret,
     SECRET
   );
-  assert.deepEqual(publicWechat(saved), { appId: "wx76dc414b9199c3bf", appSecretSet: true });
+  assert.deepEqual(publicWechat(saved), {
+    appId: "wx76dc414b9199c3bf",
+    appSecretSet: true,
+    hasAppSecret: true,
+  });
 });
 
 test("小程序绑定：没绑先要账号密码，绑定后静默登录；换微信会顶掉旧绑定；停用、锁定不发令牌；本人或管理员可解绑", async () => {

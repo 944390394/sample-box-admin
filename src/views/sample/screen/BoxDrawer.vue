@@ -96,17 +96,15 @@ const can = usePerm();
 const tasks = ref<PolicyTask[]>([]);
 const events = ref<BoxLogItem[]>([]);
 const title = computed(() => (props.box ? boxTitle(props.box) : "采样箱"));
-const online = computed(() =>
-  props.box
-    ? telemetryState(
-        props.box.last,
-        props.box.reportPeriodSec,
-        clock.value,
-        props.box.charge,
-        props.box.reportOnlyWhenCharging
-      ).online
-    : false
-);
+const online = computed(() => {
+  const b = props.box;
+  if (!b) return false;
+  // 在线以服务端查询时刻算好的为准（随轮询同步），本地快照重算仅作字段缺失时的兜底
+  return typeof b.online === "boolean"
+    ? b.online
+    : telemetryState(b.last, b.reportPeriodSec, clock.value, b.charge, b.reportOnlyWhenCharging)
+        .online;
+});
 const current = computed(
   // 结束口径和服务端流程校验同一份，别在这儿抄一份状态清单
   () => tasks.value.find((t) => !isEnded(t.status)) || null
