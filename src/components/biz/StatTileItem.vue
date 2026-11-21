@@ -2,8 +2,12 @@
   <component
     :is="item.clickable === false ? 'div' : 'button'"
     :type="item.clickable === false ? undefined : 'button'"
+    :title="item.title || undefined"
     class="tile"
-    :class="[`tone-${item.tone || 'default'}`, { active, plain: item.clickable === false }]"
+    :class="[
+      `tone-${item.tone || 'default'}`,
+      { active, plain: item.clickable === false, 'is-zero': mutedZero && item.value === 0 },
+    ]"
     @click="item.clickable !== false && emit('select')"
   >
     <span class="head">
@@ -33,9 +37,11 @@ export interface StatTile {
   tone?: "default" | "primary" | "success" | "warning" | "danger" | "info";
   clickable?: boolean;
   icon?: Component;
+  /** 悬停提示（原生 title），如「点击查看对应的筛选列表」。 */
+  title?: string;
 }
 
-const props = defineProps<{ item: StatTile; active?: boolean }>();
+const props = defineProps<{ item: StatTile; active?: boolean; mutedZero?: boolean }>();
 const emit = defineEmits<{ select: [] }>();
 
 // 长标签按「 · 」断行，避免换行把词截断
@@ -150,6 +156,12 @@ const display = computed(() =>
 }
 .tone-info .value {
   color: var(--el-text-color-secondary);
+}
+/* mutedZero：零值数字降权（灰色小号），非零保持语义色；只影响数字，标签/图标不动 */
+.tile.is-zero .value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--el-text-color-placeholder);
 }
 @media (max-width: 640px) {
   .tile {

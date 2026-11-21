@@ -2,7 +2,7 @@
  * #26 review-26 minor 修复的行为断言（m-01/m-03/m-06/m-07）：
  * - m-01：isAdmin fail-closed——ctx 缺 access 不再恒真当管理员（直调 handler 也被拒）；
  * - m-03：deleteDepts 同步清 sys_role_dept，自定义范围不留悬空部门引用；
- * - m-06：menuPreviewFor 镜像前端 local-menus 注入——功能常开（无开关）+ device:box:task 时预览含调拨单
+ * - m-06：menuPreviewFor 镜像前端 local-menus 注入——功能常开（无开关）+ R12 some(新建划拨, 撤销划拨) 时预览含调拨单
  *   （组织简化 B4a/P9：送检单退役不镜像），预览可见项 = 真实侧栏（menusFor + local 注入）；旧 off 配置写入被忽略、恒列出；
  * - m-07：saveDeptLimit 成功审计写 detail（limited/maxScope 前后 + perms diff），无变化不写空明细。
  * 一次性临时库（mkdtemp），不碰开发库/线上库，不占任何服务端口。
@@ -195,12 +195,13 @@ test("m-03 删除部门同步清 sys_role_dept：自定义范围不留悬空引�
 });
 
 /** 用 menusFor 的裁剪结果独立重算每个菜单项的 on/off（同 role-grant-ui.test.js 口径）。
- * 功能常开：local-menus 调拨单组恒镜像（on 按 device:box:task），插在任务单组之后。 */
+ * 功能常开：local-menus 调拨单组恒镜像（R12 on 按 some(新建划拨, 撤销划拨)），插在任务单组之后。 */
 function expectedPreview(perms) {
   const visible = new Set(menusFor(perms).flatMap((g) => g.children.map((c) => c.name)));
+  const canTransfer = perms.has("task:create:transfer") || perms.has("task:transfer:revoke");
   const local = [
-    { title: "调拨单", on: perms.has("device:box:task"), hidden: false },
-    { title: "调拨单 · 划拨单详情", on: perms.has("device:box:task"), hidden: true },
+    { title: "调拨单", on: canTransfer, hidden: false },
+    { title: "调拨单 · 划拨单详情", on: canTransfer, hidden: true },
   ];
   return menuRoutes.flatMap((group) => {
     const items = group.children.map((item) => ({
@@ -220,20 +221,21 @@ const visibleTitles = (menus) => menus.filter((m) => m.on && !m.hidden).map((m) 
 
 /**
  * 真实侧栏 = menusFor 裁剪 + local-menus 注入。
- * 镜像 src/router/local-menus.ts：功能常开（无开关），gate = device:box:task，
+ * 镜像 src/router/local-menus.ts：功能常开（无开关），R12 gate = some(新建划拨, 撤销划拨)，
  * 调拨单组插在「任务单」组之后（mergeLocalMenus），隐藏详情不进侧栏。
  * 组织简化（B4a/P9）：送检单独立页退役——local-menus 不再注入送检单组，
  * 旧链接 /sample/inspections 只是隐藏重定向（不是侧栏项），预览也不列。
  */
 function expectedSidebar(perms) {
   const out = [];
+  const canTransfer = perms.has("task:create:transfer") || perms.has("task:transfer:revoke");
   for (const g of menusFor(perms)) {
     for (const c of g.children)
       if (!c.meta.hidden)
         out.push(
           c.meta.title === g.meta.title ? c.meta.title : `${g.meta.title} · ${c.meta.title}`
         );
-    if (g.path === "/task" && perms.has("device:box:task")) out.push("调拨单");
+    if (g.path === "/task" && canTransfer) out.push("调拨单");
   }
   return out;
 }
@@ -248,16 +250,16 @@ const setFlag = (enabled) =>
     },
   });
 
-test("m-06 菜单预览镜像 local-menus：常开+task 权限含调拨单（送检单退役不列），预览=真实侧栏；旧 off 配置忽略、缺 task 权限列出但 off", async () => {
+test("m-06 菜单预览镜像 local-menus：常开+划拨两码任一含调拨单（送检单退役不列），预览=真实侧栏；旧 off 配置忽略、无两码（含仅 box:task）列出但 off", async () => {
   const env = await fresh();
   const { db } = env;
   try {
     const admin = await ctxOf(db, "admin");
-    const codes = ["device:box:list", "device:box:task"];
+    const codes = ["device:box:list", "device:box:task", "task:create:transfer"];
     await role(db, "80", "CUSTOM", 4, codes);
     const perms = new Set(codes);
 
-    // 旧 off 配置（写入被忽略）：功能常开，预览恒含调拨单组（on 按 device:box:task 判）
+    // 旧 off 配置（写入被忽略）：功能常开，预览恒含调拨单组（R12 on 按 some(两码) 判）
     setFlag(false);
     assert.equal(transferInspectEnabled(), true, "常开：off 配置不改守卫");
     const off = await call(org.roleMenuPreview, { ...admin, params: { id: "80" } });
@@ -289,7 +291,7 @@ test("m-06 菜单预览镜像 local-menus：常开+task 权限含调拨单（送
     assert.equal(draft.ok, true, draft.error);
     assert.deepEqual(draft.data.menus, on.data.menus);
 
-    // 常开但缺 device:box:task：列出但全 off（侧栏确实不注入）
+    // 常开但无两码：列出但全 off（侧栏确实不注入）
     const noTask = await call(org.draftMenuPreview, {
       ...admin,
       body: { codes: ["device:box:list"] },
@@ -301,6 +303,24 @@ test("m-06 菜单预览镜像 local-menus：常开+task 权限含调拨单（送
       visibleTitles(noTask.data.menus),
       expectedSidebar(new Set(["device:box:list"]))
     );
+
+    // R12 收紧：仅 device:box:task（值守/核验/只读领导模板）无两码 → 调拨单 off
+    const dutyLike = await call(org.draftMenuPreview, {
+      ...admin,
+      body: { codes: ["device:box:list", "device:box:task"] },
+    });
+    assert.equal(dutyLike.ok, true, dutyLike.error);
+    assert.equal(dutyLike.data.menus.find((m) => m.title === "调拨单").on, false);
+    assert.equal(dutyLike.data.menus.find((m) => m.title === "调拨单 · 划拨单详情").on, false);
+    assert.ok(!visibleTitles(dutyLike.data.menus).includes("调拨单"));
+
+    // 仅撤销码（无新建码）也可见：some 口径
+    const revokeOnly = await call(org.draftMenuPreview, {
+      ...admin,
+      body: { codes: ["device:box:list", "task:transfer:revoke"] },
+    });
+    assert.equal(revokeOnly.ok, true, revokeOnly.error);
+    assert.equal(revokeOnly.data.menus.find((m) => m.title === "调拨单").on, true);
 
     // 再写 off：仍常开列出（写入被忽略，不是标 off、也不是不列）
     setFlag(false);

@@ -4,10 +4,14 @@ import { Layout } from "@/router";
 /**
  * 划拨独立页的前端本地菜单＋送检旧链接重定向。
  *
- * 侧栏菜单 normally 由 server/menus.js 经 GET /menus/routes 下发；本批不改 server/**，
- * 所以划拨页的菜单与路由在前端注入（permission store 生成动态路由时合并进去），
- * 按功能开关 enableTransferInspect + 权限 gating，插在「任务单」组之后，对齐批准基准的
- * NAV 顺序：工作台 → 任务单 → 调拨单 → 采样箱。
+ * 侧栏菜单 normally 由 server/menus.js 经 GET /menus/routes 下发；划拨页的菜单与路由
+ * 在前端注入（permission store 生成动态路由时合并进去），插在「任务单」组之后，
+ * 对齐批准基准的 NAV 顺序：工作台 → 任务单 → 调拨单 → 采样箱。
+ *
+ * R12 门禁：调拨单只有有划拨权限的人才能看到——gate = some(task:create:transfer,
+ * task:transfer:revoke)，与服务端 transfers/transferDetail handler 及 menus.js
+ * 预览镜像同一口径。功能常开（组织简化后无开关），不再看 enableTransferInspect；
+ * 旧 gate device:box:task 太宽（值守/核验/只读领导都有），已收紧。
  *
  * 组织简化（P9）：采样＋送检合并成一张 TK 单，送检独立页退役。旧链接 /sample/inspections
  * 保留一条隐藏重定向到 /task/tasks（防旧书签/深链 404），不再注入侧栏菜单。
@@ -17,16 +21,17 @@ import { Layout } from "@/router";
 const TransferList = () => import("@/views/sample/transfer/index.vue");
 const TransferDetail = () => import("@/views/sample/transfer/detail.vue");
 
+/** 调拨单可见权限：新建划拨或撤销划拨任一即可（与服务端 handler、菜单预览镜像同口径）。 */
+export const TRANSFER_VIEW_PERMS = ["task:create:transfer", "task:transfer:revoke"];
+
 export interface LocalMenuGate {
-  /** 功能开关（服务端 box.enableTransferInspect）。 */
-  enabled: boolean;
   /** 当前用户权限码集合。 */
   perms: string[];
 }
 
 export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
   const groups: RouteRecordRaw[] = [
-    // 送检单退役重定向：恒存在（不受开关/权限影响），隐藏不进侧栏，旧链接落到任务单页。
+    // 送检单退役重定向：恒存在（不受权限影响），隐藏不进侧栏，旧链接落到任务单页。
     {
       path: "/sample/inspections",
       redirect: "/task/tasks",
@@ -34,7 +39,7 @@ export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
       meta: { title: "送检单", hidden: true },
     } as RouteRecordRaw,
   ];
-  const canView = gate.enabled && gate.perms.includes("device:box:task");
+  const canView = TRANSFER_VIEW_PERMS.some((code) => gate.perms.includes(code));
   if (canView) {
     groups.push({
       path: "/transfer",
@@ -46,6 +51,7 @@ export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
         icon: "el-icon-Sort",
         hidden: false,
         alwaysShow: false,
+        perm: TRANSFER_VIEW_PERMS,
         params: undefined,
       },
       children: [
@@ -59,6 +65,7 @@ export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
             hidden: false,
             keepAlive: true,
             alwaysShow: false,
+            perm: TRANSFER_VIEW_PERMS,
             params: undefined,
           },
         },
@@ -72,6 +79,7 @@ export function buildLocalMenus(gate: LocalMenuGate): RouteRecordRaw[] {
             hidden: true,
             keepAlive: false,
             activeMenu: "/sample/transfers",
+            perm: TRANSFER_VIEW_PERMS,
             params: undefined,
           },
         },

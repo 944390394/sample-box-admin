@@ -1132,6 +1132,8 @@ const LEGACY_DEFAULTS = {
     // 组织简化（B4a，B3 遗留②）：分公司内部调度岗建合并采样单是主路径，显式钉死建单码
     //（policyTask 经 045 拆分已含此码，这里显式列出防拆链变动；存量库由 056 幂等补码）。
     "task:create:sample",
+    // R12 门禁裁决：调度员可撤自己建的划拨单（存量库由 057 幂等补码）。
+    "task:transfer:revoke",
     "task:sign",
     "task:cancel",
     "task:video",
@@ -1148,6 +1150,10 @@ const LEGACY_DEFAULTS = {
     // 组织简化（B4a/P11，B3 遗留②）：分公司自采建单是主路径——BRANCH_ADMIN 默认补
     // task:create:sample（存量库由 056 幂等补码步补齐，角色页保存过的以保存为准）。
     "task:create:sample",
+    // R12 门禁裁决：调拨单仅划拨权限者可见；分公司管理员是划拨主责角色，补两码
+    //（存量库由 057 幂等补码；角色页保存过的以保存为准）。
+    "task:create:transfer",
+    "task:transfer:revoke",
     "task:sign",
     "task:video",
     "sys:dept:view",

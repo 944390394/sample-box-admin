@@ -14,15 +14,43 @@
     <div class="layout">
       <aside class="roles">
         <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索角色" clearable />
+        <p v-if="canUpdate && keyword" class="text-muted sort-hint" data-test="sort-hint">
+          清空搜索后排序
+        </p>
         <ul v-loading="loading">
           <li
             v-for="role in shownRoles"
             :key="role.id"
-            :class="{ on: role.id === currentId, off: role.status !== 1 }"
+            :class="{
+              on: role.id === currentId,
+              off: role.status !== 1,
+              dragging: dragId === role.id,
+              'drop-before': dropId === role.id && !dropAfter,
+              'drop-after': dropId === role.id && dropAfter,
+            }"
+            :draggable="canDrag"
             :data-test="`role-${role.code}`"
             @click="pick(role.id!)"
+            @dragstart="onDragStart(role, $event)"
+            @dragover="onDragOver(role, $event)"
+            @dragleave="onDragLeave(role, $event)"
+            @drop="onDrop(role, $event)"
+            @dragend="resetDrag"
           >
             <div class="role-line">
+              <button
+                v-if="canUpdate"
+                type="button"
+                class="drag-handle"
+                :data-test="`role-drag-${role.code}`"
+                :aria-label="`调整「${role.name}」的顺序：拖动，或聚焦后按 Alt+上/下方向键移动一位`"
+                :disabled="!canDrag"
+                @click.stop
+                @keydown.alt.up.prevent="moveByKeyboard(role, -1)"
+                @keydown.alt.down.prevent="moveByKeyboard(role, 1)"
+              >
+                <el-icon><Rank /></el-icon>
+              </button>
               <b>{{ role.name }}</b>
               <el-tag v-if="role.status !== 1" size="small" type="info">停用</el-tag>
             </div>
@@ -368,7 +396,7 @@
 defineOptions({ name: "Role" });
 
 import type { FormInstance, FormRules } from "element-plus";
-import { ArrowDown, Check, Close, Plus, Search } from "@element-plus/icons-vue";
+import { ArrowDown, Check, Close, Plus, Rank, Search } from "@element-plus/icons-vue";
 import { onBeforeRouteLeave } from "vue-router";
 import RoleAPI, {
   type PermGroup,
@@ -388,6 +416,8 @@ import { buildIndex, fillNeeds, needsMet } from "@/utils/permDeps";
 
 /**
  * 角色与权限：左边角色列表，右边用授权编辑器勾权限（按页面分模块、每模块 能进这页 → 能看到什么 → 能做什么），
+ * 左列表可拖拽排序（把手 hover 显形，Alt+↑/↓ 键盘兜底；PUT /roles/reorder 持久化，
+ * 角色下拉、人员表单角色选择同序；搜索过滤态禁拖）。
  * 右侧实时预览这个角色能看到的菜单（#26 B4：预览走服务端 menusFor 同一实现，不再前端自抄菜单表）、
  * 工作台卡片、采样箱详情标签和任务详情内容。
  * 数据范围（1–4 预设 + 5 自定义部门多选树）和权限一起草稿、一起 diff 确认保存；
@@ -432,6 +462,11 @@ const canAudit = computed(
 const roles = ref<RoleItem[]>([]);
 const loading = ref(false);
 const keyword = ref("");
+/* ---- 左列表拖拽排序（sys:role:update）：乐观更新＋失败回滚；键盘 Alt+↑/↓ 兜底 ---- */
+const dragId = ref("");
+const dropId = ref("");
+const dropAfter = ref(false);
+const orderSaving = ref(false);
 const currentId = ref("");
 const catalog = ref<PermGroup[]>([]);
 const tiers = ref<Record<string, string>>({});
@@ -468,6 +503,8 @@ const index = computed(() => buildIndex(catalog.value));
 const shownRoles = computed(() =>
   roles.value.filter((r) => !keyword.value || `${r.name}${r.code}`.includes(keyword.value))
 );
+/** 有「编辑角色」、不在搜索过滤态、也没有正在保存的顺序，才允许拖拽/键盘排序。 */
+const canDrag = computed(() => canUpdate.value && !keyword.value && !orderSaving.value);
 const current = computed(() => roles.value.find((r) => r.id === currentId.value) || null);
 const editable = computed(() => canGrant.value && !fixed.value);
 const originalSet = computed(() => new Set(original.value));
@@ -786,6 +823,83 @@ async function loadRoles() {
     loading.value = false;
   }
 }
+
+/* ---- 拖拽排序：dragstart/dragover/drop＋插入位指示线；保存调 reorder，失败回滚本地顺序 ---- */
+function resetDrag() {
+  dragId.value = "";
+  dropId.value = "";
+  dropAfter.value = false;
+}
+function onDragStart(role: RoleItem, event: DragEvent) {
+  if (!canDrag.value || !role.id) {
+    event.preventDefault();
+    return;
+  }
+  dragId.value = role.id;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", role.id);
+  }
+}
+function onDragOver(role: RoleItem, event: DragEvent) {
+  if (!dragId.value || role.id === dragId.value) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  // 指示线画在目标行的上/下沿：指针过半算「插到它后面」
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  dropId.value = role.id!;
+  dropAfter.value = event.clientY > rect.top + rect.height / 2;
+}
+function onDragLeave(role: RoleItem, event: DragEvent) {
+  const next = event.relatedTarget as Node | null;
+  const self = event.currentTarget as HTMLElement;
+  if (dropId.value === role.id && !(next && self.contains(next))) dropId.value = "";
+}
+async function onDrop(role: RoleItem, event: DragEvent) {
+  event.preventDefault();
+  const from = roles.value.findIndex((r) => r.id === dragId.value);
+  const target = roles.value.findIndex((r) => r.id === role.id);
+  const after = dropAfter.value;
+  resetDrag();
+  if (from < 0 || target < 0 || from === target) return;
+  let to = target + (after ? 1 : 0);
+  if (from < to) to -= 1;
+  if (to === from) return;
+  const next = [...roles.value];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  await saveOrder(next);
+}
+/** 键盘兜底：把手聚焦后 Alt+↑/↓ 移动一位并保存；移动后焦点跟到那一行的把手。 */
+async function moveByKeyboard(role: RoleItem, delta: number) {
+  if (!canDrag.value) return;
+  const from = roles.value.findIndex((r) => r.id === role.id);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= roles.value.length) return;
+  const next = [...roles.value];
+  [next[from], next[to]] = [next[to], next[from]];
+  await saveOrder(next);
+  await nextTick();
+  document.querySelector<HTMLElement>(`[data-test="role-drag-${role.code}"]`)?.focus();
+}
+/** 乐观更新 → PUT reorder；成功按服务端权威顺序对齐，失败回滚（错误提示由请求拦截器统一弹）。 */
+async function saveOrder(next: RoleItem[]) {
+  const prev = roles.value;
+  const ids = next.map((r) => r.id!);
+  if (ids.join(",") === prev.map((r) => r.id).join(",")) return;
+  roles.value = next;
+  orderSaving.value = true;
+  try {
+    const result = await RoleAPI.reorder(ids);
+    const byId = new Map(next.map((r) => [r.id, r]));
+    roles.value = result.ids.map((id) => byId.get(id)).filter((r): r is RoleItem => Boolean(r));
+    ElMessage.success("角色顺序已保存");
+  } catch {
+    roles.value = prev;
+  } finally {
+    orderSaving.value = false;
+  }
+}
 async function confirmDiscard(title: string) {
   if (!dirty.value || !(editable.value || canScope.value)) return true;
   try {
@@ -903,7 +1017,8 @@ async function openForm(id = "") {
         code: "",
         dataScope: canScope.value ? 3 : 4,
         deptIds: [],
-        sort: roles.value.length + 1,
+        // 拖拽排序按 10 步长写 sort：新角色默认＝现有最大 sort＋10，保持「排末尾」
+        sort: Math.max(0, ...roles.value.map((r) => Number(r.sort) || 0)) + 10,
         status: 1,
       };
   // 自定义范围（5）：回显已勾选的部门（不再把 5 折成 3）
@@ -992,6 +1107,44 @@ onMounted(async () => {
 }
 .roles li.off b {
   color: var(--el-text-color-secondary);
+}
+/* 拖拽把手：hover/聚焦才显形；指示线画在目标行上/下沿 */
+.sort-hint {
+  margin: 0;
+  font-size: 12px;
+}
+.drag-handle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--el-text-color-secondary);
+  cursor: grab;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.roles li:hover .drag-handle,
+.roles li:focus-within .drag-handle,
+.drag-handle:focus-visible {
+  opacity: 1;
+}
+.drag-handle:disabled {
+  cursor: not-allowed;
+}
+.roles li.dragging {
+  opacity: 0.45;
+}
+.roles li.drop-before {
+  box-shadow: 0 -2px 0 0 var(--el-color-primary);
+}
+.roles li.drop-after {
+  box-shadow: 0 2px 0 0 var(--el-color-primary);
 }
 .role-line {
   display: flex;

@@ -17,5 +17,7 @@ declare module "vue-router" {
     params?: Record<string, unknown>;
     externalUrl?: string;
     roles?: string[];
+    /** 可见权限码（任一即可）：服务端菜单裁剪与本地注入菜单同口径声明。 */
+    perm?: string[];
   }
 }

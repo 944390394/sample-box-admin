@@ -863,14 +863,15 @@ export async function listRoles(ctx) {
       (row) => [String(row.role_id), Number(row.n)]
     )
   );
-  const rows = (await ctx.db.all("SELECT * FROM sys_role")).map((row) => ({
+  // 排序下推到 SQL：ORDER BY sort, id（sort 平手按 id，和 roleOptions/reorder 同一口径）
+  const rows = (await ctx.db.all("SELECT * FROM sys_role ORDER BY sort, id")).map((row) => ({
     ...toRole(row),
     userCount: counts.get(String(row.id)) || 0,
   }));
   const keywords = String(ctx.query.keywords || "").trim();
-  const matched = rows
-    .filter((item) => !keywords || item.name.includes(keywords) || item.code.includes(keywords))
-    .sort((a, b) => a.sort - b.sort);
+  const matched = rows.filter(
+    (item) => !keywords || item.name.includes(keywords) || item.code.includes(keywords)
+  );
   ctx.ok(paginate(matched, ctx.query));
 }
 
@@ -880,7 +881,9 @@ export async function roleOptions(ctx) {
   // 给哪个部门的人分配：部门有上限时，角色里超出的项不会生效（可以分配，只提示）
   const deptId = typeof ctx.query?.deptId === "string" ? ctx.query.deptId : "";
   const limit = deptId ? await resolveDeptLimit(ctx.db, deptId) : null;
-  for (const row of await ctx.db.all("SELECT id, name, code, sort FROM sys_role ORDER BY sort")) {
+  for (const row of await ctx.db.all(
+    "SELECT id, name, code, sort FROM sys_role ORDER BY sort, id"
+  )) {
     const reason = await cannotAssign(ctx, row.id);
     let cut = 0;
     if (limit?.perms && row.code !== "ADMIN")
@@ -895,6 +898,48 @@ export async function roleOptions(ctx) {
     });
   }
   ctx.ok(out);
+}
+
+/**
+ * 角色列表拖拽排序（左列表/角色下拉/人员表单同序的单一写入口）。
+ * ids 必须是当前全部角色（启用＋停用）的一个排列：不缺、不重、不外来，否则整体拒绝不落库。
+ * 事务内按序写 sort=10,20,…（留间隔，单角色编辑排序不必整表重排）；审计记前后 id 顺序。
+ * 返回保存后的新顺序（与 listRoles/roleOptions 同一 ORDER BY sort, id）。
+ */
+export async function reorderRoles(ctx) {
+  const fail = async (message, code, status, targetId = "") => {
+    await record(ctx, "调整角色顺序", "role", targetId, "失败");
+    return ctx.fail(message, code, status);
+  };
+  // 路由已按 sys:role:update 把关，这里再兜底一层（直调 handler/未来漏挂 perm 时 fail-closed）
+  if (!hasPerm(ctx, "sys:role:update"))
+    return fail("没有「编辑角色」权限，不能调整角色顺序", "A0301", 403);
+  const raw = ctx.body?.ids;
+  if (!Array.isArray(raw)) return fail("ids 必须是角色 id 数组", "A0400", 400);
+  const ids = raw.map(String);
+  const rows = await ctx.db.all("SELECT id FROM sys_role ORDER BY sort, id");
+  const known = new Set(rows.map((row) => String(row.id)));
+  const seen = new Set();
+  for (const id of ids) {
+    if (!known.has(id)) return fail("角色顺序里有不存在的角色", "A0400", 400, ids.join(","));
+    if (seen.has(id)) return fail("角色顺序里有重复的角色", "A0400", 400, ids.join(","));
+    seen.add(id);
+  }
+  if (ids.length !== known.size)
+    return fail("角色顺序要包含全部角色（含停用的），不能缺", "A0400", 400, ids.join(","));
+  const before = rows.map((row) => String(row.id));
+  const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+  await inTransaction(ctx.db, async (db) => {
+    for (const [index, id] of ids.entries())
+      await db.run("UPDATE sys_role SET sort = ?, update_time = ? WHERE id = ?", [
+        (index + 1) * 10,
+        now,
+        id,
+      ]);
+  });
+  await record(ctx, "调整角色顺序", "role", ids.join(","), "成功", { before, after: ids });
+  const ordered = await ctx.db.all("SELECT id FROM sys_role ORDER BY sort, id");
+  ctx.ok({ ids: ordered.map((row) => String(row.id)) }, "角色顺序已保存");
 }
 
 export async function roleForm(ctx) {

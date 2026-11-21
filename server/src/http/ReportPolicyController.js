@@ -758,10 +758,12 @@ export class ReportPolicyController {
   /**
    * 划拨列表（GET /sample/transfers，kind=划拨）：counts 与列表同口径（同一 WHERE 去掉 status），
    * boxCountTotal 是箱次累计口径（同一箱子出现在多单计多次，§6.2）。
+   * R12 门禁：调拨单页仅划拨权限者可见——some(task:create:transfer, task:transfer:revoke)，
+   * 与前端 local-menus 注入 gate、menus.js 预览镜像同口径；无两码 403 A0301（旧 device:box:task 太宽）。
    */
   async transfers(ctx) {
     this.#requireTransferFeature();
-    this.require(ctx, BOX.task);
+    if (!ctx.access?.perms?.has(T.createTransfer)) this.require(ctx, T.transferRevoke);
     const visible = this.#visible(ctx);
     const clauses = ["t.kind='划拨'", ...(visible.sql ? [visible.sql] : [])];
     const params = [...visible.params];
@@ -883,10 +885,11 @@ export class ReportPolicyController {
     });
   }
 
-  /** 划拨详情（GET /sample/transfers/:id）：逐台快照 + 实时撤销守卫结论 + 审计线。 */
+  /** 划拨详情（GET /sample/transfers/:id）：逐台快照 + 实时撤销守卫结论 + 审计线。
+   * R12 门禁同 transfers 列表：some(新建划拨, 撤销划拨)，无两码 403 A0301。 */
   async transferDetail(ctx) {
     this.#requireTransferFeature();
-    this.require(ctx, BOX.task);
+    if (!ctx.access?.perms?.has(T.createTransfer)) this.require(ctx, T.transferRevoke);
     const row = await this.#visibleTask(ctx);
     if (row.kind !== "划拨") throw notVisible("划拨单不存在或不在你的管理范围内");
     const data = await this.policies.transferView(row.id);

@@ -75,12 +75,13 @@ async function role(db, id, code, scope, perms = []) {
 }
 
 /** 用 menusFor 的裁剪结果独立重算每个菜单项的 on/off，钉死「预览=menusFor」。
- * 功能常开（无开关）：local-menus 调拨单组恒镜像（on 按 device:box:task），插在任务单组之后。 */
+ * 功能常开（无开关）：local-menus 调拨单组恒镜像（R12 on 按 some(新建划拨, 撤销划拨)），插在任务单组之后。 */
 function expectedPreview(perms) {
   const visible = new Set(menusFor(perms).flatMap((g) => g.children.map((c) => c.name)));
+  const canTransfer = perms.has("task:create:transfer") || perms.has("task:transfer:revoke");
   const local = [
-    { title: "调拨单", on: perms.has("device:box:task"), hidden: false },
-    { title: "调拨单 · 划拨单详情", on: perms.has("device:box:task"), hidden: true },
+    { title: "调拨单", on: canTransfer, hidden: false },
+    { title: "调拨单 · 划拨单详情", on: canTransfer, hidden: true },
   ];
   return menuRoutes.flatMap((group) => {
     const items = group.children.map((item) => ({

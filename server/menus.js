@@ -5,7 +5,6 @@
  */
 
 import { boxPermTree, viewPermTree, LOG_PERMS } from "./src/auth/permCatalog.js";
-import { transferInspectEnabled } from "./src/settings/boxConfig.js";
 
 function menu(path, component, name, title, icon, hidden = false, extra = {}) {
   return {
@@ -271,10 +270,10 @@ export function menusFor(perms) {
 }
 
 /**
- * #26 m-06：调拨单目前由前端 local-menus 注入（src/router/local-menus.ts，
- * gate = box.enableTransferInspect 开关 + device:box:task 权限，插在「任务单」组之后），
+ * #26 m-06：调拨单由前端 local-menus 注入（src/router/local-menus.ts，
+ * R12 gate = some(task:create:transfer, task:transfer:revoke)，插在「任务单」组之后），
  * server menuRoutes 不含这一组。预览在这里镜像同一口径，保证「预览 = 真实侧栏」：
- * 开关开时列出这一组（on 按 device:box:task 判），开关关时功能不存在、预览不列。
+ * 功能常开（组织简化后无开关）恒列出这一组，on 按两码任一判；无两码列出但 off。
  * 组名/子项标题/hidden 与 local-menus.ts 保持一致；那边改菜单时这里要同步。
  * 组织简化（B4a/P9）：送检单独立页退役——local-menus 只剩调拨单组，送检旧链接
  * /sample/inspections 是一条隐藏重定向（不是侧栏菜单项），预览不镜像它。
@@ -294,20 +293,20 @@ const LOCAL_TRANSFER_INSPECT = [
  * 前端不再自抄一份菜单+权限表。列出全部菜单项（含隐藏的详情/创建页），on=侧栏实际可见。
  * 分组被 menusFor 整组裁掉时，组内隐藏项也标 off（侧栏确实进不去）。
  * #26 m-06：另镜像前端 local-menus 的调拨单注入（见 LOCAL_TRANSFER_INSPECT；送检单已退役，P9）。
+ * R12：on 与 local-menus 注入 gate 同口径＝some(新建划拨, 撤销划拨)，不再看开关/device:box:task。
  */
 export function menuPreviewFor(perms) {
   const visible = new Set(
     menusFor(perms).flatMap((group) => group.children.map((item) => item.name))
   );
-  const local = transferInspectEnabled()
-    ? LOCAL_TRANSFER_INSPECT.flatMap((g) =>
-        g.items.map((item) => ({
-          title: item.title === g.group ? item.title : `${g.group} · ${item.title}`,
-          on: perms.has("device:box:task"),
-          hidden: item.hidden,
-        }))
-      )
-    : [];
+  const canTransfer = perms.has("task:create:transfer") || perms.has("task:transfer:revoke");
+  const local = LOCAL_TRANSFER_INSPECT.flatMap((g) =>
+    g.items.map((item) => ({
+      title: item.title === g.group ? item.title : `${g.group} · ${item.title}`,
+      on: canTransfer,
+      hidden: item.hidden,
+    }))
+  );
   return menuRoutes.flatMap((group) => {
     const items = group.children.map((item) => ({
       title:

@@ -498,6 +498,15 @@ const routes = [
     perm: ["sys:role:view", "sys:role:update", "sys:role:scope", "sys:role:grant"],
     handler: org.roleGrantAudit,
   },
+  // 角色列表拖拽排序。必须排在 PUT /roles/:id 前面（matchRoute 首个命中即返回，
+  // 否则 "reorder" 会被当成 :id 吞进 updateRole）。
+  {
+    method: "PUT",
+    path: "/api/v1/roles/reorder",
+    auth: true,
+    perm: "sys:role:update",
+    handler: org.reorderRoles,
+  },
   {
     method: "PUT",
     path: "/api/v1/roles/:id",

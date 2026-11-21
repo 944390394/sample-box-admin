@@ -146,6 +146,14 @@ const RoleAPI = {
       params: deptId ? { deptId } : undefined,
     });
   },
+  /** 角色列表拖拽排序：ids 是全部角色（含停用）的排列，服务端按序写 sort 并回新顺序。 */
+  reorder(ids: string[]) {
+    return request<unknown, { ids: string[] }>({
+      url: `${ROLE_BASE_URL}/reorder`,
+      method: "put",
+      data: { ids },
+    });
+  },
   /** 获取角色表单数据 */
   getFormData(id: string) {
     return request<unknown, RoleForm>({ url: `${ROLE_BASE_URL}/${id}/form`, method: "get" });
