@@ -320,6 +320,7 @@ async function readLeader(db, input, policy = SECURITY_DEFAULTS) {
 
 /**
  * 部门表单里每块字段要各自的权限：基本信息、类型、地址和联系人、监控通道、负责人。
+ * 启停单独授权（R26/061）：改成启用要「启用部门」、改成停用要「停用部门」，不再并入基本信息。
  * 顺手新建负责人账号等于新增人员：还要「新增人员」，给角色还要「给人员分配角色」并过可转授检查。
  * current 为空表示新建。返回失败原因或空串。
  */
@@ -333,10 +334,16 @@ async function checkDeptFields(ctx, body, current, { place, leader, cameras }) {
       changed("name", body.name, current.name) ||
       changed("code", body.code, current.code) ||
       changed("parentId", body.parentId, current.parent_id) ||
-      changed("sort", body.sort, current.sort) ||
-      changed("status", body.status, current.status);
+      changed("sort", body.sort, current.sort);
     if (basic) {
       const why = need("sys:dept:update");
+      if (why) return why;
+    }
+    // R26（061）：启停从 basic 桶拆出，按目标状态各查各的码（对齐人员 updateUser 口径）；
+    // 状态没变不查码——只改资料的角色不带启停码也能保存
+    if (changed("status", body.status, current.status)) {
+      const perm = Number(body.status) === 1 ? "sys:dept:enable" : "sys:dept:disable";
+      const why = need(perm);
       if (why) return why;
     }
   }
@@ -738,9 +745,13 @@ export async function updateDept(ctx) {
     await record(ctx, "修改部门", "dept", ctx.params.id, "失败");
     return denyScope(ctx, "部门不存在");
   }
+  // R26（061）：启停审计 action 区分启用/停用（对齐人员「激活/停用」口径）；状态没变仍是「修改部门」。
+  // 失败留痕用同一 action：试停用被拒也记「停用部门:失败」，日志里看得出意图。
+  const statusChanged = body.status !== undefined && String(body.status) !== String(current.status);
+  const action = statusChanged ? (Number(body.status) === 1 ? "启用部门" : "停用部门") : "修改部门";
   const parentId = String(body.parentId ?? current.parent_id);
   if (parentId === current.id) {
-    await record(ctx, "修改部门", "dept", current.id, "失败");
+    await record(ctx, action, "dept", current.id, "失败");
     return ctx.fail("上级部门不能是自己");
   }
   if (
@@ -748,7 +759,7 @@ export async function updateDept(ctx) {
     (parentId !== String(current.parent_id) &&
       !(parentId === "0" ? isAdmin(ctx) || ctx.access?.scope?.all : deptInManage(ctx, parentId)))
   ) {
-    await record(ctx, "修改部门", "dept", current.id, "失败");
+    await record(ctx, action, "dept", current.id, "失败");
     return denyScope(ctx, "只能修改自己管理范围内的部门");
   }
   let place, leader, cameras;
@@ -758,12 +769,12 @@ export async function updateDept(ctx) {
     // 不带 cameras 的旧表单不动原来的通道
     cameras = body.cameras === undefined ? null : validateCameras(body.cameras);
   } catch (error) {
-    await record(ctx, "修改部门", "dept", current.id, "失败");
+    await record(ctx, action, "dept", current.id, "失败");
     return ctx.fail(error.message);
   }
   const denied = await checkDeptFields(ctx, body, current, { place, leader, cameras });
   if (denied) {
-    await record(ctx, "修改部门", "dept", current.id, "失败");
+    await record(ctx, action, "dept", current.id, "失败");
     return denyPerm(ctx, denied);
   }
   // 组织简化（B1b）：改类型为检测站同样过唯一＋总公司子树校验；
@@ -771,12 +782,12 @@ export async function updateDept(ctx) {
   const type = DEPT_TYPES.includes(body.type) ? body.type : current.type || "公司";
   const stationWhy = await checkStationType(ctx, type, parentId, current.id);
   if (stationWhy) {
-    await record(ctx, "修改部门", "dept", current.id, "失败");
+    await record(ctx, action, "dept", current.id, "失败");
     return ctx.fail(stationWhy);
   }
   if (!camerasAllowed(type)) {
     if (cameras && cameras.length) {
-      await record(ctx, "修改部门", "dept", current.id, "失败");
+      await record(ctx, action, "dept", current.id, "失败");
       return ctx.fail("检测站不设监控通道：摄像头请配在分公司（公司类型）采样现场");
     }
     cameras = [];
@@ -814,7 +825,7 @@ export async function updateDept(ctx) {
       ]);
     return leaderId;
   });
-  await record(ctx, "修改部门", "dept", current.id, "成功");
+  await record(ctx, action, "dept", current.id, "成功");
   if (leader.create) await record(ctx, "新增用户（部门负责人）", "user", leaderId, "成功");
   ctx.ok(leaderResult(leader, leaderId), `修改部门${body.name || current.name}成功`);
 }
@@ -1192,20 +1203,27 @@ export async function updateRole(ctx) {
     await record(ctx, "修改角色", "role", ctx.params.id, "失败");
     return denyScope(ctx, "角色不存在");
   }
-  const fail = async (message, code, status) => {
-    await record(ctx, "修改角色", "role", current.id, "失败");
-    return ctx.fail(message, code, status);
+  // R26（061）：启停审计 action 区分启用/停用（对齐人员「激活/停用」口径）；状态没变仍是「修改角色」。
+  // 失败留痕用同一 action：试停用被拒也记「停用角色:失败」，日志里看得出意图。
+  const status = Number(body.status ?? current.status);
+  const statusChanged = status !== Number(current.status);
+  const action = statusChanged ? (status === 1 ? "启用角色" : "停用角色") : "修改角色";
+  const fail = async (message, code, httpStatus) => {
+    await record(ctx, action, "role", current.id, "失败");
+    return ctx.fail(message, code, httpStatus);
   };
   const admin = current.code === "ADMIN";
   if (admin && !isAdmin(ctx)) return fail("只有系统管理员可以修改系统管理员角色", "A0301", 403);
-  const status = Number(body.status ?? current.status);
   if (admin && status !== 1) return fail("系统管理员角色不能停用");
-  // 没有「编辑角色」：名称、排序、启停都不能改
-  if (!hasPerm(ctx, "sys:role:update")) {
-    const renamed = body.name != null && body.name !== current.name;
-    const moved = body.sort != null && Number(body.sort) !== Number(current.sort);
-    if (renamed || moved || status !== Number(current.status))
-      return fail("没有「编辑角色」权限，只能改数据范围", "A0301", 403);
+  // 改名/排序要「编辑角色」；启停各要「启用角色」/「停用角色」（061 拆分，与人员模块同口径）。
+  // 旧客户端只持 update 调启停 → 403（升级映射后存量角色已获新码，不破坏）；状态没变不查启停码。
+  const renamed = body.name != null && body.name !== current.name;
+  const moved = body.sort != null && Number(body.sort) !== Number(current.sort);
+  if ((renamed || moved) && !hasPerm(ctx, "sys:role:update"))
+    return fail("没有「编辑角色」权限，不能改名称或排序", "A0301", 403);
+  if (statusChanged) {
+    const perm = status === 1 ? "sys:role:enable" : "sys:role:disable";
+    if (!hasPerm(ctx, perm)) return fail(`没有「${permLabelOf(perm)}」权限`, "A0301", 403);
   }
   // 数据范围单独授权：要有「设置角色数据范围」，不能比自己宽；系统管理员固定全部数据。
   // #26 B1：rawScope 保留自定义 5（scopeRank 会把 5 折成 3，写库会丢自定义语义）
@@ -1279,7 +1297,7 @@ export async function updateRole(ctx) {
   }
   await record(
     ctx,
-    "修改角色",
+    action,
     "role",
     current.id,
     "成功",

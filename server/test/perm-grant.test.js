@@ -98,6 +98,9 @@ test("权限目录：每项都在某一组里（两个不起作用的工作台�
       "sys:role:view",
       "sys:role:create",
       "sys:role:update",
+      // R26（061）：角色启停从 update 拆出，紧跟 update（对齐人员 disable/enable 排位）
+      "sys:role:disable",
+      "sys:role:enable",
       "sys:role:delete",
       "sys:role:grant",
       "sys:role:scope",

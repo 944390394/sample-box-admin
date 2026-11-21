@@ -589,15 +589,22 @@ export const OVERVIEW_PERMS = [
 export const ORG_PERMS = [
   item(9501, "sys:dept:view", "查看部门", "进「部门」看组织结构和各部门资料", "dept", "enter"),
   item(9510, "sys:dept:create", "新增部门", "在部门树里加新部门", "dept", "do", ["sys:dept:view"]),
+  item(9511, "sys:dept:update", "编辑部门基本信息", "改名称、编码、上级部门、排序", "dept", "do", [
+    "sys:dept:view",
+  ]),
+  // R26（061）：启停从 update 拆出，对齐人员 disable/enable 先例——停用影响建单/总览，与改资料分开授予
   item(
-    9511,
-    "sys:dept:update",
-    "编辑部门基本信息",
-    "改名称、编码、上级部门、排序，启用或停用",
+    9532,
+    "sys:dept:disable",
+    "停用部门",
+    "停用后这个单位的箱子不能再建任务单，总览里不再列出这个单位",
     "dept",
     "do",
     ["sys:dept:view"]
   ),
+  item(9533, "sys:dept:enable", "启用部门", "把停用的部门重新启用", "dept", "do", [
+    "sys:dept:view",
+  ]),
   item(
     9525,
     "sys:dept:type",
@@ -707,7 +714,18 @@ export const ORG_PERMS = [
     "do",
     ["sys:role:view"]
   ),
-  item(9523, "sys:role:update", "编辑角色", "改名称、排序，启用或停用", "grant", "do", [
+  item(9523, "sys:role:update", "编辑角色", "改名称、排序", "grant", "do", ["sys:role:view"]),
+  // R26（061）：启停从 update 拆出——停用角色＝持有者随即失权（高影响），与改名/排序（展示口径）分开授予
+  item(
+    9534,
+    "sys:role:disable",
+    "停用角色",
+    "停用后拥有它的人随即失去这个角色的权限",
+    "grant",
+    "do",
+    ["sys:role:view"]
+  ),
+  item(9535, "sys:role:enable", "启用角色", "把停用的角色重新启用", "grant", "do", [
     "sys:role:view",
   ]),
   item(9524, "sys:role:delete", "删除角色", "删除角色，拥有它的人随即失去这些权限", "grant", "do", [
@@ -1056,6 +1074,16 @@ export function cardsFor(codes) {
 }
 
 /**
+ * 迁移 061（R26 / 任务 #60）：部门/角色启停从各自的 update 拆出（P0 两项各拆两码，用户拍板）。
+ * 老码保留（parts 含 old）：持 update 者自动获 disable+enable 并集，存量角色不丢能力；
+ * 之后管理员可在角色页单独收回启停而保留资料编辑。对齐人员 sys:user:disable/enable（043/045）先例。
+ */
+export const SPLIT_061 = {
+  "sys:dept:update": ["sys:dept:update", "sys:dept:disable", "sys:dept:enable"],
+  "sys:role:update": ["sys:role:update", "sys:role:disable", "sys:role:enable"],
+};
+
+/**
  * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
  * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
  */
@@ -1071,10 +1099,10 @@ export function grant055(current) {
   return [...add];
 }
 
-/** 老码列表升级成现在的码：043、045 拆分，去掉卡片组，补逐张卡片，055 补导出码。新库默认值、模板都走这里。 */
+/** 老码列表升级成现在的码：043、045、061 拆分，去掉卡片组，补逐张卡片，055 补导出码。新库默认值、模板都走这里。 */
 export function upgradeCodes(codes) {
   let current = [...new Set(codes)];
-  for (const table of [SPLIT_043, SPLIT_045]) {
+  for (const table of [SPLIT_043, SPLIT_045, SPLIT_061]) {
     const { add, remove } = applySplits(current, table);
     current = current.filter((code) => !remove.includes(code)).concat(add);
   }

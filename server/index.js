@@ -333,6 +333,8 @@ const routes = [
       "sys:dept:view",
       "sys:dept:create",
       "sys:dept:update",
+      "sys:dept:disable",
+      "sys:dept:enable",
       "sys:dept:type",
       "sys:dept:address",
       "sys:dept:camera",
@@ -356,6 +358,8 @@ const routes = [
     perm: [
       "sys:dept:view",
       "sys:dept:update",
+      "sys:dept:disable",
+      "sys:dept:enable",
       "sys:dept:type",
       "sys:dept:address",
       "sys:dept:camera",
@@ -363,13 +367,15 @@ const routes = [
     ],
     handler: org.deptForm,
   },
-  // 基本信息、类型、地址、监控、负责人各自授权，具体改了哪样在 updateDept 里再查
+  // 基本信息、类型、地址、监控、负责人各自授权，启停按目标状态查 disable/enable（061），具体改了哪样在 updateDept 里再查
   {
     method: "PUT",
     path: "/api/v1/depts/:id",
     auth: true,
     perm: [
       "sys:dept:update",
+      "sys:dept:disable",
+      "sys:dept:enable",
       "sys:dept:type",
       "sys:dept:address",
       "sys:dept:camera",
@@ -431,6 +437,8 @@ const routes = [
       "sys:role:view",
       "sys:role:create",
       "sys:role:update",
+      "sys:role:disable",
+      "sys:role:enable",
       "sys:role:delete",
       "sys:role:grant",
       "sys:user:role",
@@ -476,7 +484,14 @@ const routes = [
     method: "GET",
     path: "/api/v1/roles/:id/form",
     auth: true,
-    perm: ["sys:role:view", "sys:role:update", "sys:role:scope", "sys:role:grant"],
+    perm: [
+      "sys:role:view",
+      "sys:role:update",
+      "sys:role:disable",
+      "sys:role:enable",
+      "sys:role:scope",
+      "sys:role:grant",
+    ],
     handler: org.roleForm,
   },
   {
@@ -528,7 +543,8 @@ const routes = [
     method: "PUT",
     path: "/api/v1/roles/:id",
     auth: true,
-    perm: ["sys:role:update", "sys:role:scope"],
+    // 改名/排序＝update，数据范围＝scope，启停＝disable/enable（061 按目标状态在 updateRole 里再查）
+    perm: ["sys:role:update", "sys:role:disable", "sys:role:enable", "sys:role:scope"],
     handler: org.updateRole,
   },
   {

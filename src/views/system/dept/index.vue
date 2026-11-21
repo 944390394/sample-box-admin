@@ -438,9 +438,27 @@
             </el-col>
             <el-col :span="12" :xs="24">
               <el-form-item label="状态">
-                <el-radio-group v-model="formData.status" :disabled="basicLocked">
-                  <el-radio :value="CommonStatus.ENABLED">正常</el-radio>
-                  <el-radio :value="CommonStatus.DISABLED">禁用</el-radio>
+                <!-- R26（061）：启停各查各码——切到「正常」要启用部门、切到「禁用」要停用部门；
+                     选回原状态是 no-op 不锁。无码 disabled＋tooltip 说明原因 -->
+                <el-radio-group v-model="formData.status">
+                  <el-tooltip content="需要启用权限" placement="top" :disabled="!enableLocked">
+                    <el-radio
+                      :value="CommonStatus.ENABLED"
+                      :disabled="enableLocked"
+                      data-test="dept-status-enable"
+                    >
+                      正常
+                    </el-radio>
+                  </el-tooltip>
+                  <el-tooltip content="需要停用权限" placement="top" :disabled="!disableLocked">
+                    <el-radio
+                      :value="CommonStatus.DISABLED"
+                      :disabled="disableLocked"
+                      data-test="dept-status-disable"
+                    >
+                      禁用
+                    </el-radio>
+                  </el-tooltip>
                 </el-radio-group>
               </el-form-item>
             </el-col>
@@ -681,18 +699,31 @@ const can = usePerm();
 const me = useUserStore();
 /** #26 B3：只有全部数据范围能建顶级部门；scoped（本单位子树+祖先壳）不给「顶级部门」选项。 */
 const scopeAll = computed(() => me.userInfo.dataScope !== "scoped");
-/** 编辑部门拆成五项：名称和上级、类型、地址和联系人、监控通道、负责人，有任意一项就能打开编辑。 */
+/** 编辑部门拆成五项＋启停（R26/061）：名称和上级、类型、地址和联系人、监控通道、负责人、启用/停用，有任意一项就能打开编辑。 */
 const canEditAny = computed(() =>
   [
     "sys:dept:update",
+    "sys:dept:disable",
+    "sys:dept:enable",
     "sys:dept:type",
     "sys:dept:address",
     "sys:dept:camera",
     "sys:dept:leader",
   ].some((code) => can(code))
 );
-/** 编辑已有部门时，名称、编号、上级、排序、状态要「编辑部门基本信息」；新建看「新增部门」。 */
+/** 编辑已有部门时，名称、编号、上级、排序要「编辑部门基本信息」；新建看「新增部门」。 */
 const basicLocked = computed(() => Boolean(formData.id) && !can("sys:dept:update"));
+/** R26（061）：被编辑部门的原状态（新建为 null）。启停 gate 按原状态判方向，不按表单草稿值——
+ * 免得有停用码无启用码的人切到「禁用」后回不来。 */
+const editingStatus = ref<number | null>(null);
+/** 切到「正常」＝启用动作，要「启用部门」；原状态就正常时选它是 no-op，不锁。 */
+const enableLocked = computed(
+  () => editingStatus.value === CommonStatus.DISABLED && !can("sys:dept:enable")
+);
+/** 切到「禁用」＝停用动作，要「停用部门」；原状态就禁用时选它是 no-op，不锁。 */
+const disableLocked = computed(
+  () => editingStatus.value === CommonStatus.ENABLED && !can("sys:dept:disable")
+);
 /** 人员页签与 GET /users 同口径：只有部门查看权限（如资产管理员）时不渲染、不请求，避免 403 报错页（R4）。 */
 const canMembers = computed(() =>
   [
@@ -1139,6 +1170,7 @@ async function openDialog(parentId?: string, deptId?: string): Promise<void> {
     dialogState.title = "修改部门";
     dialogState.visible = true;
     Object.assign(formData, form);
+    editingStatus.value = Number(form.status);
     if (form.leaderUserId) {
       leader.options = [
         { id: form.leaderUserId, nickname: form.leaderName, mobile: form.leaderMobile } as UserItem,
@@ -1158,6 +1190,7 @@ async function openDialog(parentId?: string, deptId?: string): Promise<void> {
     }
     dialogState.title = "新增部门";
     dialogState.visible = true;
+    editingStatus.value = null;
     contactAuto = true;
     formData.parentId = fallback;
     formData.code = buildCode();
@@ -1244,6 +1277,7 @@ async function handleDelete(deptId?: string): Promise<void> {
  */
 function closeDialog(): void {
   dialogState.visible = false;
+  editingStatus.value = null;
   resetForm();
 }
 

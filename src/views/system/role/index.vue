@@ -120,10 +120,10 @@
                 授权审计
               </el-button>
               <el-button
-                v-if="(canUpdate || canScope) && (!fixed || isAdmin)"
+                v-if="(canUpdate || canScope || canDisable || canEnable) && (!fixed || isAdmin)"
                 @click="openForm(current.id)"
               >
-                {{ canUpdate ? "编辑" : "改数据范围" }}
+                {{ canUpdate ? "编辑" : canScope ? "改数据范围" : "改状态" }}
               </el-button>
               <el-button
                 v-if="canDelete && !fixed && current.code !== 'HOME_SWITCH'"
@@ -400,13 +400,22 @@
           </el-col>
           <el-col :span="12">
             <el-form-item label="状态">
-              <el-switch
-                v-model="form.data.status"
-                :active-value="1"
-                :inactive-value="0"
-                active-text="启用"
-                :disabled="formIsAdmin || !formCanEdit"
-              />
+              <!-- R26（061）：启停各查各码——启用中的角色切停要「停用角色」、停用中的切启要「启用角色」；
+                   无码 disabled＋tooltip 说明原因（ADMIN 固定不能停用） -->
+              <el-tooltip
+                :content="formStatusTip"
+                placement="top"
+                :disabled="!(formIsAdmin || formStatusLocked)"
+              >
+                <el-switch
+                  v-model="form.data.status"
+                  :active-value="1"
+                  :inactive-value="0"
+                  active-text="启用"
+                  :disabled="formIsAdmin || formStatusLocked"
+                  data-test="role-status-switch"
+                />
+              </el-tooltip>
             </el-form-item>
           </el-col>
         </el-row>
@@ -457,7 +466,8 @@ import { buildIndex, fillNeeds, needsMet } from "@/utils/permDeps";
  * 套用模板时一键带入 suggestedScope；「授权审计」抽屉只读回看谁在何时授了什么。
  * 底部保存栏显示这次改了几项，保存前弹确认框按模块列出增减，收回的标红并写明影响几个人。
  *
- * 一个动作一个权限：新增、编辑、删除角色（sys:role:create/update/delete）、给角色分配权限（sys:role:grant）、
+ * 一个动作一个权限：新增、编辑、删除角色（sys:role:create/update/delete）、启用/停用角色
+ * （sys:role:enable/disable，R26/061 从 update 拆出）、给角色分配权限（sys:role:grant）、
  * 设置角色数据范围（sys:role:scope）、给人员分配角色（sys:user:role，在人员页）各自单独授予。
  * 每项权限另有「可转授」：非管理员只能动自己可转授的权限，服务端会再校验。
  * 自定义范围 D3：orgIds ⊆ 自己 manageOrgIds，仅 scope≤2 的角色可授 5，与部门上限取交集封顶（服务端兜底）。
@@ -493,6 +503,9 @@ const userStore = useUserStore();
 const isAdmin = computed(() => (userStore.userInfo.roles || []).includes("ADMIN"));
 const canCreate = computed(() => can("sys:role:create"));
 const canUpdate = computed(() => can("sys:role:update"));
+/** R26（061）：角色启停从 update 拆出——停用/启用各一码，与人员模块对称。 */
+const canDisable = computed(() => can("sys:role:disable"));
+const canEnable = computed(() => can("sys:role:enable"));
 const canDelete = computed(() => can("sys:role:delete"));
 const canGrant = computed(() => can("sys:role:grant"));
 const canScope = computed(() => can("sys:role:scope"));
@@ -1044,8 +1057,25 @@ onBeforeRouteLeave(() => confirmDiscard("离开页面"));
 const formRef = ref<FormInstance>();
 const form = reactive({ open: false, saving: false, data: {} as RoleForm });
 const formIsAdmin = computed(() => form.data.code === "ADMIN" && Boolean(form.data.id));
-/** 新建看「新增角色」，编辑已有的看「编辑角色」。 */
+/** 新建看「新增角色」，编辑已有的看「编辑角色」（名称/排序）；启停另查 disable/enable（见下）。 */
 const formCanEdit = computed(() => (form.data.id ? canUpdate.value : canCreate.value));
+/** R26（061）：打开表单时的原状态。状态 switch 按原状态判方向，不按草稿值——
+ * 免得有停用码无启用码的人切到「停用」后回不来。新建不锁（服务端 createRole 只查新增角色）。 */
+const formOriginalStatus = ref(1);
+const formStatusLocked = computed(() =>
+  form.data.id
+    ? formOriginalStatus.value === 1
+      ? !canDisable.value
+      : !canEnable.value
+    : !canCreate.value
+);
+const formStatusTip = computed(() =>
+  formIsAdmin.value
+    ? "系统管理员角色不能停用"
+    : formOriginalStatus.value === 1
+      ? "需要停用权限"
+      : "需要启用权限"
+);
 const rules: FormRules = {
   name: [{ required: true, message: "请填写角色名称", trigger: "blur" }],
   code: [
@@ -1075,6 +1105,7 @@ async function openForm(id = "") {
   // 自定义范围（5）：回显已勾选的部门（不再把 5 折成 3）
   if (id && Number(form.data.dataScope) === 5)
     form.data.deptIds = await RoleAPI.getRoleDeptIds(id).catch(() => []);
+  formOriginalStatus.value = Number(form.data.status ?? 1);
   form.open = true;
 }
 async function saveForm() {
