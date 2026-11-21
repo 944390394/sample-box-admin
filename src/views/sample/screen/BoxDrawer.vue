@@ -26,7 +26,7 @@
 
       <section class="block">
         <h4>位置</h4>
-        <LocationLine :box="box" :period-sec="box.reportPeriodSec" empty-text="还没有定位" />
+        <LocationLine :box="box" :period-sec="box.reportPeriodSec" empty-text="还没有定位" dual />
       </section>
 
       <section class="block">

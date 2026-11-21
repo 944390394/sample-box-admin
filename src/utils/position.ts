@@ -28,8 +28,10 @@ export interface BoxPositions {
   current: PositionFix | null;
   gps: PositionFix | null;
   lbs: PositionFix | null;
-  /** 当前用的是基站、而且 GPS 已经过时（比基站旧 10 分钟以上）。 */
+  /** 当前用的是基站、而且 GPS 已经过时（比基站旧 10 分钟以上，或 GPS 无时间记录而基站有）。 */
   gpsStale: boolean;
+  /** GPS 有坐标但没有定位时间记录（老数据 gps_info 为空）：不能当新鲜位置展示。 */
+  gpsTimeUnknown: boolean;
   /** 最后一次 GPS 定位时间，没定过位是空串（位置卡写「无记录」）。 */
   lastGpsAt: string;
   /** 最后一次基站定位时间，没有基站记录是空串。 */
@@ -74,11 +76,24 @@ export function boxPositions(box: PositionFields): BoxPositions {
           address: box.lbsAddress || "",
         }
       : null;
-  const gpsStale = Boolean(gps && lbs && ms(lbs.at) - ms(gps.at) > GPS_STALE_MS);
+  // GPS 无时间记录（老数据 gps_info 空）时不能证明它新鲜：基站有时间就信基站，
+  // 否则保留 GPS 但标记 gpsTimeUnknown，界面按「历史位置·时间未知」展示，不装新鲜。
+  const gpsTimeUnknown = Boolean(gps && !gps.at);
+  const gpsStale = Boolean(
+    gps && lbs && (ms(lbs.at) - ms(gps.at) > GPS_STALE_MS || (gpsTimeUnknown && Boolean(lbs.at)))
+  );
   // 时间以服务端给的 lastGpsAt / lastLbsAt 为准：没定到坐标也可能定过位，位置卡要能写「无记录」
   const lastGpsAt = box.lastGpsAt || box.gpsInfo?.at || gps?.at || "";
   const lastLbsAt = box.lastLbsAt || box.lbsAt || lbs?.at || "";
-  return { current: gpsStale ? lbs : gps || lbs, gps, lbs, gpsStale, lastGpsAt, lastLbsAt };
+  return {
+    current: gpsStale ? lbs : gps || lbs,
+    gps,
+    lbs,
+    gpsStale,
+    gpsTimeUnknown,
+    lastGpsAt,
+    lastLbsAt,
+  };
 }
 
 /**

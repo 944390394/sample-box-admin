@@ -55,12 +55,15 @@
   与 seedRolePerms/055b 一致；角色页显式收回过的项会被恢复，一次性，发布说明列明）。DISPATCH 保留为分公司内部调度岗（P1，scope2）。
 - **旧新建码只读保留**：`task:create:inspect`（新建送检单）文案注「送检已并入采样任务」；`task:create:transfer` 现管划拨单。
   通用建单端点只收 kind=采样（接收方固定唯一检测站），调拨/送检新建一律 400。
+- **划拨/送检功能常开，无开关**：旧 `box.enableTransferInspect` 开关退役（写入被忽略、读取恒 true），
+  saveBox 不再因该键做权限差异；`device:box:policyDefault`（修改默认上报策略）仍管周期/定时上报/宽限/唯一检测站。
 - **task:send-back 文案改合并流**（B4a，B3 遗留③）：标签「寄出（寄检测站）」——合并单此码管「已封箱→在途」＝寄往唯一检测站；
   旧双向采样单寄回段只读兼容。`task:finish`（完成采样任务）标注旧单向历史码。
 - **部门类型/摄像头文案**：类型只有「公司」「检测站」；检测站全局唯一＋属总公司子树（org-api 写侧校验）。
   摄像头 gate 反转：分公司（公司类型）采样现场可配 1–8 路，**检测站禁配**（改类型为检测站时清理已有通道）；
   `task:video/task:camera` 文案同口径（检测站不设录像/摄像头）。
 - **菜单预览镜像**：角色页 menu-preview 与真实侧栏单源（server/menus.js LOCAL_TRANSFER_INSPECT 镜像 local-menus）；
+  功能常开后镜像恒含调拨单组（on 按 `device:box:task` 判，与开关配置无关）；
   送检单独立页退役（P9）后镜像只剩调拨单组，旧链接 /sample/inspections 是隐藏重定向、不进预览。
 
 ## 工作台卡片

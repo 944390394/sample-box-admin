@@ -40,6 +40,7 @@ import {
   assertStationSavable,
   mergeBoxSettings,
   publicBox,
+  resolveStation,
 } from "./src/settings/boxConfig.js";
 import { mergeLabels, publicLabels } from "./src/settings/labelConfig.js";
 import { searchPlaces } from "./src/geo/placeSearch.js";
@@ -763,8 +764,8 @@ const routes = [
     auth: true,
     handler: (ctx) => useSample(ctx, (api) => api.policy.retryVideo(ctx)),
   },
-  // 划拨（B1）：提交即生效 + 整单禁撤。特性开关 box.enableTransferInspect 默认关，
-  // 关时这些端点报「未开通」（A0409），旧 /sample/tasks 行为不变。权限在控制器里按动作查。
+  // 划拨（B1）：提交即生效 + 整单禁撤。功能常开（组织简化后无开关，旧 box.enableTransferInspect
+  // 写入被忽略、读取恒 true），这些端点恒可用；旧 /sample/tasks 行为不变。权限在控制器里按动作查。
   // candidate-boxes 必须排在 /transfers/:id 前面（matchRoute 首个命中即返回）。
   {
     method: "POST",
@@ -1260,6 +1261,16 @@ async function useSample(ctx, run) {
   return run(sampleApi);
 }
 
+/**
+ * box 载荷＋唯一检测站自动认定提示（常开波）：配置未指定（stationDeptId 空）且 resolveStation
+ * 自动认定成功时 stationAuto={id,name}，否则 null。GET 与 saveBox 回读同形状，前端保存后提示不闪断。
+ */
+async function boxPayload(config) {
+  const box = publicBox(config);
+  const row = !box.stationDeptId && state.db ? await resolveStation(state.db) : null;
+  return { ...box, stationAuto: row ? { id: String(row.id), name: String(row.name ?? "") } : null };
+}
+
 async function systemSettings(ctx) {
   const access = await requireAccess(state.db, ctx);
   const has = (code) => access.perms.has(code);
@@ -1293,7 +1304,7 @@ async function systemSettings(ctx) {
     // 天地图 tk 是浏览器端密钥，看地图的人都要用；sk 是服务端密钥，只给能改地图密钥的人。
     // hasKey/hasSecret 是布尔标识不泄露秘密本体，谁都能看「配没配过」
     map: { tk: map.tk, sk: can.map ? map.sk : "", hasKey: map.hasKey, hasSecret: map.hasSecret },
-    box: publicBox(state.config),
+    box: await boxPayload(state.config),
     labels: publicLabels(state.config),
     security: view || can.password || can.lockout ? publicSecurity(state.config) : null,
     smtp: view || can.smtp ? publicSmtp(state.config) : null,
@@ -1488,12 +1499,7 @@ async function saveBox(ctx) {
     !perms?.has("sys:settings:arrive-radius")
   )
     return ctx.fail("没有「修改到达判定半径」权限");
-  // 划拨/送检功能开关：沿用「修改默认上报策略」这项箱子设置写权限（不新增权限码）
-  if (
-    Boolean(before.enableTransferInspect) !== Boolean(after.enableTransferInspect) &&
-    !perms?.has("device:box:policyDefault")
-  )
-    return ctx.fail("没有修改划拨/送检功能开关的权限");
+  // 划拨/送检功能常开（键恒 true）：不再因该键做权限差异；旧客户端写入被 mergeBoxSettings 忽略。
   // 唯一检测站（组织简化 B1b/P5）：改配置同样沿用箱子设置写权限；
   // 配置时校验存在/启用/类型检测站/属总公司子树/全局唯一（友好报错），清空不校验。
   if (String(before.stationDeptId ?? "") !== String(after.stationDeptId ?? "")) {
@@ -1519,7 +1525,7 @@ async function saveBox(ctx) {
     result: "成功",
     ip: ctx.ip || "",
   });
-  ctx.ok(publicBox(state.config), "已保存");
+  ctx.ok(await boxPayload(state.config), "已保存");
 }
 
 /** 地图选点的地名搜索：按全国、省、市逐级缩小，密钥只留在服务器。 */

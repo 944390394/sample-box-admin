@@ -37,7 +37,7 @@ export interface BoxSettings {
   batteryReserve: number;
   /** 任务里箱子离目的地多近算到达，米 */
   arriveRadiusM?: number;
-  /** 划拨/送检功能开关（B1）：默认关。开时才启用 /sample/transfers* 与送检建单、任务单默认采样。 */
+  /** 划拨/送检功能常开（组织简化后无开关）：服务端恒 true，旧客户端写入被忽略；键保留兼容。 */
   enableTransferInspect?: boolean;
   /** 建单后未上线的离线宽限，秒（B3/#18）：默认 3600。设置页以分钟展示（1–1440）。 */
   taskOfflineGraceSec?: number;
@@ -47,6 +47,11 @@ export interface BoxSettings {
    * 保存走 saveBox，服务端 assertStationSavable 校验存在/启用/类型/总公司子树/全局唯一。
    */
   stationDeptId?: string;
+  /**
+   * 唯一检测站自动认定结果（只读，GET/saveBox 回读下发）：配置未指定且服务端自动认定成功时
+   * {id,name}，否则 null；配置已指定时恒 null。老服务端没有此键（undefined），前端不显示提示。
+   */
+  stationAuto?: { id: string; name: string } | null;
 }
 
 export interface TcpSettings {

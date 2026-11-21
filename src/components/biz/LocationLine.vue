@@ -7,11 +7,11 @@
         </span>
         <span class="addr" :title="addressOf(pos.current)">{{ addressOf(pos.current) }}</span>
         <FreshTag
-          v-if="pos.current.at"
           class="age"
           :time="pos.current.at"
           :period-sec="periodSec"
           :now="now"
+          empty-text="无定位时间"
         />
       </div>
       <!-- 位置卡（详情、抽屉）用双行：GPS 和基站各写各自的时效，当前没用上的那个徽章置灰 -->
@@ -42,6 +42,13 @@
         data-test="gps-stale-hint"
       >
         {{ staleGpsText }}
+      </div>
+      <div
+        v-else-if="pos.gpsTimeUnknown && pos.current.source === 'GPS'"
+        class="location-line__sub"
+        data-test="gps-time-unknown-hint"
+      >
+        GPS 无定位时间记录，按历史位置展示，可能已过期
       </div>
       <div v-else-if="pos.current.source === '基站' && !compact" class="location-line__sub">
         基站定位误差可能有一两公里

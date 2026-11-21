@@ -74,19 +74,25 @@ async function role(db, id, code, scope, perms = []) {
     ]);
 }
 
-/** 用 menusFor 的裁剪结果独立重算每个菜单项的 on/off，钉死「预览=menusFor」。 */
+/** 用 menusFor 的裁剪结果独立重算每个菜单项的 on/off，钉死「预览=menusFor」。
+ * 功能常开（无开关）：local-menus 调拨单组恒镜像（on 按 device:box:task），插在任务单组之后。 */
 function expectedPreview(perms) {
   const visible = new Set(menusFor(perms).flatMap((g) => g.children.map((c) => c.name)));
-  return menuRoutes.flatMap((group) =>
-    group.children.map((item) => ({
+  const local = [
+    { title: "调拨单", on: perms.has("device:box:task"), hidden: false },
+    { title: "调拨单 · 划拨单详情", on: perms.has("device:box:task"), hidden: true },
+  ];
+  return menuRoutes.flatMap((group) => {
+    const items = group.children.map((item) => ({
       title:
         item.meta.title === group.meta.title
           ? item.meta.title
           : `${group.meta.title} · ${item.meta.title}`,
       on: visible.has(item.name),
       hidden: Boolean(item.meta.hidden),
-    }))
-  );
+    }));
+    return group.path === "/task" ? [...items, ...local] : items;
+  });
 }
 
 test("菜单预览单源：已保存/草稿预览都与 menusFor 一致；ADMIN 全亮；未知码丢掉", async () => {

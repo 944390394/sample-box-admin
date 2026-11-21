@@ -2,9 +2,15 @@
   <span v-if="time" class="fresh-tag" :class="`is-${level}`" :title="fullTime(time)">
     <i class="fresh-tag__dot" />
     {{ prefix }}{{ text }}
-    <em v-if="level === 'stale' && markStale" class="fresh-tag__old">旧</em>
+    <em v-if="(level === 'stale' || level === 'unknown') && markStale" class="fresh-tag__old">
+      旧
+    </em>
   </span>
-  <span v-else class="fresh-tag is-unknown">{{ emptyText }}</span>
+  <span v-else class="fresh-tag is-unknown">
+    <i class="fresh-tag__dot" />
+    {{ emptyText }}
+    <em v-if="markStale" class="fresh-tag__old">旧</em>
+  </span>
 </template>
 
 <script setup lang="ts">

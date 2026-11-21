@@ -8,8 +8,8 @@
  * 3. revoke 四守卫（IN_ACTIVE_TASK/OPENED_AFTER/INSPECTED/ORG_MOVED）各一条：整单禁撤、状态不变；
  *    全合格时归属精确退回建单快照（含 owner_id 空串）、审计留痕、已撤销不可再撤；
  * 4. candidate-boxes 服务端下发可选箱集，与提交守卫同一结论（替换前端 16 台 POOL）；
- * 5. 特性开关关：新端点报未开通，旧 /tasks 行为完全不变；开：tasks 默认采样（D-1）、
- *    送检 IN- 前缀 + is_inspect=1、划拨走错端点被拒。
+ * 5. 功能常开（组织简化后无开关）：旧 off 配置写入被忽略、读取恒 true，新端点恒可用；tasks 默认采样（D-1）、
+ *    合并单 TK- + is_inspect=1、划拨走错端点被拒。
  * 6. P8 划拨目标类型闸门（组织简化 B1c）：检测站拒绝、总部/分公司（公司类型）允许、非公司类型拒绝。
  */
 import test from "node:test";
@@ -25,7 +25,12 @@ import { UplinkParser } from "../src/domain/UplinkParser.js";
 import { IngestService } from "../src/service/IngestService.js";
 import { ReportPolicy } from "../src/settings/ReportPolicy.js";
 import { SqlBoxStore } from "../src/store/SqlBoxStore.js";
-import { applyBoxSettings } from "../src/settings/boxConfig.js";
+import {
+  applyBoxSettings,
+  mergeBoxSettings,
+  publicBox,
+  transferInspectEnabled,
+} from "../src/settings/boxConfig.js";
 import { packet } from "./fixture.js";
 
 const PERMS = upgradeCodes([
@@ -56,6 +61,7 @@ const ORG_NAMES = {
   5: "第三方公司",
 };
 
+/** enabled 模拟存量配置里的旧开关值：常开后写入被忽略、读取恒 true（false 用于钉死兼容契约）。 */
 async function setup({ enabled = true } = {}) {
   applyBoxSettings({
     box: {
@@ -726,12 +732,24 @@ test("candidate-boxes：服务端下发可选箱集，与提交守卫同一结�
   }
 });
 
-test("开关关：划拨新端点报未开通；合并采样单不受开关影响，调拨/送检不再新建", async () => {
+test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒可用；合并采样单不受影响，调拨/送检不再新建", async () => {
   const s = await setup({ enabled: false });
   try {
+    // 常开契约：off 配置不改读取/守卫；旧客户端写 off 被 merge 忽略；两边都没设过仍不写键、读取恒 true
+    assert.equal(transferInspectEnabled(), true, "off 配置下守卫仍恒通过");
+    assert.equal(publicBox({ box: { enableTransferInspect: false } }).enableTransferInspect, true);
+    const merged = mergeBoxSettings(
+      { box: { enableTransferInspect: false } },
+      { reportPeriodSec: 60, batteryReserve: 20, enableTransferInspect: false }
+    );
+    assert.equal(merged.box.enableTransferInspect, true, "旧 off 配置＋旧客户端写 off 都被忽略");
+    const omitted = mergeBoxSettings({}, { reportPeriodSec: 60, batteryReserve: 20 });
+    assert.equal(omitted.box.enableTransferInspect, undefined, "两边都没设过仍不写键");
+    assert.equal(publicBox(omitted).enableTransferInspect, true, "无键读取恒 true");
     const b1 = await s.makeBox("2");
     const b2 = await s.makeBox("2");
-    // 合并采样单：不受划拨/送检开关影响
+    const b3 = await s.makeBox("2");
+    // 合并采样单：主流程，与划拨/送检常开契约无关
     const sample = await s.run(
       s.controller.createTask.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
@@ -810,19 +828,57 @@ test("开关关：划拨新端点报未开通；合并采样单不受开关影�
     );
     assert.equal(inspect.code, "A0400");
     assert.match(inspect.message, /送检已并入采样单/);
-    // 新端点一律明确未开通（A0409 notConfigured）
-    for (const [fn, extra] of [
-      [s.controller.createTransfer, { body: { name: "x", toOrgId: "3", boxIds: [b1] } }],
-      [s.controller.transfers, {}],
-      [s.controller.transferCandidates, {}],
-      [s.controller.transferDetail, { params: { id: legacyId } }],
-      [s.controller.revokeTransfer, { params: { id: legacyId }, body: { reason: "误划拨" } }],
-    ]) {
-      const res = await s.run(fn.bind(s.controller), s.ctx(s.people.a, ["2", "3"]), extra);
-      assert.equal(res.code, "A0409", `${fn.name} 应报未开通`);
-      assert.match(res.message, /未开通/);
-    }
-    // 存量旧调拨流程照常推进（不受开关影响）
+    // 新端点恒可用（off 配置不再报未开通）：提交/列表/候选/详情/撤销走一张真实划拨单
+    const created = await s.run(
+      s.controller.createTransfer.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      { body: { name: "常开划拨", toOrgId: "3", boxIds: [b3] } }
+    );
+    assert.ok(created.ok, `${created.code} ${created.message}`);
+    assert.match(created.data.id, /^AL-/);
+    assert.equal((await s.boxRow(b3)).org_id, "3", "提交即生效");
+    const list = await s.run(
+      s.controller.transfers.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      {}
+    );
+    assert.ok(list.ok, list.message);
+    assert.equal(list.data.total, 1);
+    const cand = await s.run(
+      s.controller.transferCandidates.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      { query: { toOrgId: "3" } }
+    );
+    assert.ok(cand.ok, cand.message);
+    const detail = await s.run(
+      s.controller.transferDetail.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      { params: { id: created.data.id } }
+    );
+    assert.ok(detail.ok, detail.message);
+    assert.equal(detail.data.boxes[0].revocable, true);
+    const revoke = await s.run(
+      s.controller.revokeTransfer.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      { params: { id: created.data.id }, body: { reason: "误划拨" } }
+    );
+    assert.ok(revoke.ok, `${revoke.code} ${revoke.message}`);
+    assert.equal((await s.boxRow(b3)).org_id, "2", "撤销归属退回快照");
+    // 旧调拨单不走新端点：详情 404、撤销 kind 闸门（不再是「未开通」）
+    const legacyDetail = await s.run(
+      s.controller.transferDetail.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      { params: { id: legacyId } }
+    );
+    assert.equal(legacyDetail.code, "A0404");
+    const legacyRevoke = await s.run(
+      s.controller.revokeTransfer.bind(s.controller),
+      s.ctx(s.people.a, ["2", "3"]),
+      { params: { id: legacyId }, body: { reason: "误划拨" } }
+    );
+    assert.equal(legacyRevoke.code, "A0409");
+    assert.match(legacyRevoke.message, /只有划拨单可以撤销/);
+    // 存量旧调拨流程照常推进（常开不改变旧流程）
     const step = await s.run(s.controller.transition.bind(s.controller), s.ctx(s.people.a, ["2"]), {
       params: { id: legacyId },
       body: { status: "运送中" },
@@ -833,7 +889,7 @@ test("开关关：划拨新端点报未开通；合并采样单不受开关影�
   }
 });
 
-test("开关开：tasks 默认采样/allKinds 兜底，合并单 TK-+is_inspect，划拨列表/详情/走错端点", async () => {
+test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 TK-+is_inspect，划拨列表/详情/走错端点", async () => {
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");

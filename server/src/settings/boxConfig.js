@@ -11,8 +11,8 @@ const DEFAULTS = {
   batteryReserve: 20,
   /** 箱子离任务目的地多近算「到达附近」，米。基站定位误差常有一两公里，所以默认 2 公里。 */
   arriveRadiusM: 2000,
-  /** 划拨/送检（B1）功能开关：默认关。关时 /sample/transfers* 报未开通，/sample/tasks 保持旧行为。 */
-  enableTransferInspect: false,
+  /** 划拨/送检功能常开（组织简化后合并采样单/划拨是主流程，无开关）。键保留兼容旧客户端：写入一律忽略、读取恒 true。 */
+  enableTransferInspect: true,
   /** 建单后未上线的离线宽限，秒（B3/#18）。默认 1 小时；设置页以分钟展示（1–1440）。 */
   taskOfflineGraceSec: 3600,
   /**
@@ -29,10 +29,8 @@ const applied = {
   batteryReserve: DEFAULTS.batteryReserve,
   arriveRadiusM: DEFAULTS.arriveRadiusM,
 };
-// 开关单独存放，不进 applied：currentBoxSettings() 参与上报策略版本哈希（resolvePolicy），
-// 混进去会让所有「系统默认」策略的版本号变化、触发全网重新下发。
-let transferInspect = DEFAULTS.enableTransferInspect;
-// 宽限同样不进 applied：它只影响离线判定，不参与上报策略版本哈希。
+// 划拨/送检常开、无开关：不再存开关状态（旧配置里的 enableTransferInspect 写入被忽略、读取恒 true）。
+// 宽限不进 applied：它只影响离线判定，不参与上报策略版本哈希。
 let offlineGrace = DEFAULTS.taskOfflineGraceSec;
 // 唯一检测站 id 也不进 applied：它是组织配置，不参与上报策略版本哈希。
 let station = DEFAULTS.stationDeptId;
@@ -73,7 +71,8 @@ export function publicBox(config) {
     reportOnlyWhenCharging: Boolean(box.reportOnlyWhenCharging),
     batteryReserve: reserveOf(box.batteryReserve, DEFAULTS.batteryReserve),
     arriveRadiusM: radiusOf(box.arriveRadiusM, DEFAULTS.arriveRadiusM),
-    enableTransferInspect: Boolean(box.enableTransferInspect),
+    // 功能常开：键保留兼容旧客户端，值恒 true（存量 off 配置读取时也按 true）。
+    enableTransferInspect: true,
     taskOfflineGraceSec: graceOf(box.taskOfflineGraceSec, DEFAULTS.taskOfflineGraceSec),
     stationDeptId: stationOf(box.stationDeptId),
   };
@@ -85,7 +84,6 @@ export function applyBoxSettings(config) {
   applied.reportOnlyWhenCharging = next.reportOnlyWhenCharging;
   applied.batteryReserve = next.batteryReserve;
   applied.arriveRadiusM = next.arriveRadiusM;
-  transferInspect = next.enableTransferInspect;
   offlineGrace = next.taskOfflineGraceSec;
   station = next.stationDeptId;
   return { ...applied };
@@ -95,9 +93,9 @@ export function currentBoxSettings() {
   return { ...applied };
 }
 
-/** 划拨/送检功能是否开通（B1 开关，默认关）。新端点与新语义都先问这里。 */
+/** 划拨/送检功能常开（组织简化后无开关）。保留导出供调用方；旧 off 配置写入被忽略、读取恒 true。 */
 export function transferInspectEnabled() {
-  return transferInspect;
+  return true;
 }
 
 /** 建单后未上线的离线宽限（秒，B3/#18）。offlineSql / flagMatch 唯一读取点。 */
@@ -217,13 +215,9 @@ export function mergeBoxSettings(current, input) {
   if (!Number.isInteger(radius) || radius < 100 || radius > 50000) {
     throw badRequest("到达半径要在 100 到 50000 米之间");
   }
-  // 功能开关：旧页面不带这个字段时保留原值；两边都没设过就不写键（读取时按默认关）。
-  const flag =
-    input?.enableTransferInspect != null
-      ? Boolean(input.enableTransferInspect)
-      : base.box?.enableTransferInspect != null
-        ? Boolean(base.box.enableTransferInspect)
-        : null;
+  // 功能常开：键保留兼容旧客户端，写入一律忽略（恒 true）；两边都没设过仍不写键（读取恒 true）。
+  const flagPresent =
+    input?.enableTransferInspect != null || base.box?.enableTransferInspect != null;
   // 离线宽限：旧页面不带时保留原值；两边都没设过不写键（读取按默认 3600）。带值时校验 1–1440 分钟。
   const grace =
     input?.taskOfflineGraceSec != null
@@ -248,7 +242,7 @@ export function mergeBoxSettings(current, input) {
       reportOnlyWhenCharging: Boolean(input?.reportOnlyWhenCharging),
       batteryReserve: reserve,
       arriveRadiusM: radius,
-      ...(flag == null ? {} : { enableTransferInspect: flag }),
+      ...(flagPresent ? { enableTransferInspect: true } : {}),
       ...(grace == null ? {} : { taskOfflineGraceSec: grace }),
       ...(stationId == null ? {} : { stationDeptId: stationId }),
     },

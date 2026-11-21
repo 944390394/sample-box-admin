@@ -32,25 +32,33 @@
               <template #label>
                 <span class="label-help">
                   应用密钥
-                  <el-tag :type="mapHasKey ? 'success' : 'info'" effect="plain" size="small">
-                    {{ mapHasKey ? "已配置" : "未配置" }}
+                  <el-tag
+                    :type="mapKeySource === 'none' ? 'info' : 'success'"
+                    effect="plain"
+                    size="small"
+                  >
+                    {{ MAP_SOURCE_TAG[mapKeySource] }}
                   </el-tag>
                 </span>
               </template>
               <el-input
                 v-model="mapForm.tk"
                 :disabled="!can.map"
-                :placeholder="mapHasKey ? SECRET_CONFIGURED_HINT : '天地图 tk'"
+                :placeholder="mapTkHint"
                 clearable
               />
-              <div v-if="mapHasKey" class="form-extra">{{ SECRET_CONFIGURED_HINT }}</div>
+              <div v-if="mapKeySource !== 'none'" class="form-extra">{{ mapTkHint }}</div>
             </el-form-item>
             <el-form-item>
               <template #label>
                 <span class="label-help">
                   安全密钥
-                  <el-tag :type="mapHasSecret ? 'success' : 'info'" effect="plain" size="small">
-                    {{ mapHasSecret ? "已配置" : "未配置" }}
+                  <el-tag
+                    :type="mapSecretSource === 'none' ? 'info' : 'success'"
+                    effect="plain"
+                    size="small"
+                  >
+                    {{ MAP_SOURCE_TAG[mapSecretSource] }}
                   </el-tag>
                 </span>
               </template>
@@ -60,9 +68,9 @@
                 show-password
                 autocomplete="new-password"
                 :disabled="!can.map"
-                :placeholder="mapHasSecret ? SECRET_CONFIGURED_HINT : '选填'"
+                :placeholder="mapSkHint"
               />
-              <div v-if="mapHasSecret" class="form-extra">{{ SECRET_CONFIGURED_HINT }}</div>
+              <div v-if="mapSecretSource !== 'none'" class="form-extra">{{ mapSkHint }}</div>
             </el-form-item>
             <el-form-item v-if="can.map">
               <el-button type="primary" :loading="savingMap" @click="saveMap">保存</el-button>
@@ -755,6 +763,33 @@ const labelForm = reactive<Labels>(defaultLabelSet());
 const mapHasKey = computed(() => Boolean(settings.value?.map?.hasKey ?? settings.value?.map?.tk));
 const mapHasSecret = computed(() =>
   Boolean(settings.value?.map?.hasSecret ?? settings.value?.map?.sk)
+);
+/**
+ * 天地图密钥生效来源：服务器配置优先，未配置时回落构建内置（.env 的 VITE_TIANDITU_*，
+ * 与 TiandituMap 的 fallback 同口径）。标识要反映「生效密钥」而不是仅服务器存储，
+ * 否则内置密钥生效时界面误报未配置。内置键本就在浏览器 bundle 里，标注来源不泄密。
+ */
+const builtinTk = String(import.meta.env.VITE_TIANDITU_TK ?? "");
+const builtinSk = String(import.meta.env.VITE_TIANDITU_SK ?? "");
+const mapKeySource = computed(() => (mapHasKey.value ? "server" : builtinTk ? "builtin" : "none"));
+const mapSecretSource = computed(() =>
+  mapHasSecret.value ? "server" : builtinSk ? "builtin" : "none"
+);
+const MAP_SOURCE_TAG = { server: "已配置", builtin: "内置生效", none: "未配置" } as const;
+const MAP_BUILTIN_HINT = "当前使用构建内置密钥；填写并保存后改用服务器值";
+const mapTkHint = computed(() =>
+  mapKeySource.value === "server"
+    ? SECRET_CONFIGURED_HINT
+    : mapKeySource.value === "builtin"
+      ? MAP_BUILTIN_HINT
+      : "天地图 tk"
+);
+const mapSkHint = computed(() =>
+  mapSecretSource.value === "server"
+    ? SECRET_CONFIGURED_HINT
+    : mapSecretSource.value === "builtin"
+      ? MAP_BUILTIN_HINT
+      : "选填"
 );
 const smtpHasPassword = computed(() => Boolean(smtpForm.hasPassword ?? smtpForm.passwordSet));
 const videoHasToken = computed(() => Boolean(videoForm.hasToken ?? videoForm.tokenSet));

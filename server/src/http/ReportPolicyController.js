@@ -576,7 +576,7 @@ export class ReportPolicyController {
     ctx.ok({ list, total, counts });
   }
 
-  /** 划拨/送检特性开关（box.enableTransferInspect，默认关）：关时新端点明确报未开通，旧 /tasks 不受影响。 */
+  /** 划拨/送检功能常开（组织简化后无开关）：守卫入口保留、恒通过（transferInspectEnabled 恒 true），旧 off 配置不再拦新端点。 */
   #requireTransferFeature() {
     if (!transferInspectEnabled()) throw notConfigured("划拨/送检功能未开通，请先在系统设置中开启");
   }

@@ -69,12 +69,6 @@
           3 个上报周期」口径。
         </div>
       </el-form-item>
-      <el-form-item label="划拨/送检功能">
-        <el-switch v-model="form.enableTransferInspect" :disabled="!can.box" />
-        <div class="form-extra">
-          开启后启用「调拨单（批量划拨）」「送检单」两个独立页与建单入口；任务单页只放采样。关闭时新端点报未开通，旧流程不受影响。
-        </div>
-      </el-form-item>
       <el-form-item label="唯一检测站">
         <el-select
           v-model="form.stationDeptId"
@@ -89,6 +83,7 @@
             :value="opt.value"
           />
         </el-select>
+        <div v-if="autoStationName" class="form-extra">自动认定：{{ autoStationName }}</div>
         <div class="form-extra">
           合并采样单（任务单）的接收方固定为该检测站，建单页不再手选接收方。未指定时，总公司下恰有一个启用的检测站会自动认定；零个或多个时建单会提示先在这里指定。
         </div>
@@ -111,9 +106,10 @@ import SectionCard from "@/components/biz/SectionCard.vue";
 
 /**
  * 采样箱默认策略与任务表单（IA 迁移：原系统设置 sec-box 分区整体迁入，现挂采样箱 › 默认策略页）。
- * 字段级授权：上报周期/定时上报/宽限/划拨送检开关/唯一检测站走 can.box（device:box:policyDefault），
+ * 字段级授权：上报周期/定时上报/宽限/唯一检测站走 can.box（device:box:policyDefault），
  * 电量预留、到达半径各自授权；有任意一项就能保存（服务端按改了哪样再查）。
- * 脏状态向父级 emit（dirty），保存成功 emit saved（父级刷新全站开关/宽限缓存）；expose save 供保存条调用。
+ * 划拨/送检功能常开（组织简化后合并采样单/划拨是主流程）：无开关，旧 enableTransferInspect 写入被服务端忽略。
+ * 脏状态向父级 emit（dirty），保存成功 emit saved（父级刷新全站宽限缓存）；expose save 供保存条调用。
  * 放弃更改由父级重新 load() 后 value 变化触发回填（与设置页 discardDirty 同口径）。不含任何密钥字段。
  */
 const props = defineProps<{
@@ -139,8 +135,6 @@ const form = reactive({
   arriveRadiusM: 2000,
   /** 建单后未上线宽限，UI 以分钟展示（1–1440），保存时 ×60 存秒。 */
   taskOfflineGraceMin: 60,
-  /** 划拨/送检功能开关。 */
-  enableTransferInspect: false,
   /** 唯一检测站部门 id（组织简化 P5/review-org M1）：空串＝未配置，服务端自动认定。 */
   stationDeptId: "",
 });
@@ -149,6 +143,13 @@ const saving = ref(false);
 const savedSnap = ref("");
 const canSetPolicy = computed(() =>
   Boolean(props.can.box || props.can.batteryReserve || props.can.arriveRadius)
+);
+/**
+ * 唯一检测站自动认定提示（灰字「自动认定：{name}」）：服务端在配置未指定且自动认定成功时
+ * 下发 stationAuto；配置已指定（stationAuto=null）或表单里已选站时不显示。老服务端无此键不显示。
+ */
+const autoStationName = computed(() =>
+  !form.stationDeptId && props.value?.stationAuto?.name ? props.value.stationAuto.name : ""
 );
 
 /** 服务端 box 块 → 表单（宽限秒→分钟，默认 3600s=60 分钟），并刷新快照、清脏。 */
@@ -160,7 +161,6 @@ function fill(source?: BoxSettings) {
   const graceSec = Number(source?.taskOfflineGraceSec);
   form.taskOfflineGraceMin =
     Number.isFinite(graceSec) && graceSec > 0 ? Math.round(graceSec / 60) : 60;
-  form.enableTransferInspect = Boolean(source?.enableTransferInspect);
   form.stationDeptId = source?.stationDeptId || "";
   savedSnap.value = JSON.stringify(form);
   emit("dirty", false);
@@ -215,21 +215,6 @@ async function loadStations() {
 onMounted(loadStations);
 
 async function save() {
-  // #settings-refactor audit-5：功能开关影响全局流程，变更时二次确认（取消＝不保存、不算错误）
-  const flagBefore = Boolean(props.value?.enableTransferInspect);
-  if (form.enableTransferInspect !== flagBefore) {
-    try {
-      await ElMessageBox.confirm(
-        form.enableTransferInspect
-          ? "开启后启用「调拨单/送检单」独立页与建单入口，任务单页只放采样。确认开启？"
-          : "关闭后调拨/送检新端点报未开通，仅旧流程可用。确认关闭？",
-        "划拨/送检功能开关",
-        { confirmButtonText: "确认", cancelButtonText: "取消", type: "warning" }
-      );
-    } catch {
-      return;
-    }
-  }
   saving.value = true;
   try {
     const saved = await SettingsAPI.saveBox({
@@ -239,7 +224,6 @@ async function save() {
       arriveRadiusM: form.arriveRadiusM,
       // 分钟 → 秒（服务端 taskOfflineGraceSec 校验 60–86400）
       taskOfflineGraceSec: Math.round(form.taskOfflineGraceMin * 60),
-      enableTransferInspect: form.enableTransferInspect,
       // 唯一检测站（P5/M1）：空串＝清空配置（服务端不校验清空，回退 DB 自动认定）
       stationDeptId: form.stationDeptId || "",
     });
