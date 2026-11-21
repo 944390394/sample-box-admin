@@ -6,7 +6,14 @@
           {{ task.kind }}
         </el-tag>
         <el-tag :type="taskStatusType(task.status)">{{ task.status }}</el-tag>
-        <el-tag v-if="task.trip" type="warning" effect="plain">{{ task.trip }}寄送</el-tag>
+        <el-tag
+          v-if="task.trip"
+          :type="merged ? (task.trip === '双向' ? 'warning' : 'success') : 'warning'"
+          effect="plain"
+          :title="merged ? MERGED_TRIP_TEXT[task.trip] : TRIP_TEXT[task.trip]"
+        >
+          {{ task.trip }}{{ merged ? "（派生）" : "寄送" }}
+        </el-tag>
         <el-tag v-if="task.recordVideo" type="success" effect="plain">开箱录像</el-tag>
         <el-tag v-if="stale" type="warning" effect="plain" data-test="task-stale">
           刷新失败，内容可能不是最新
@@ -88,7 +95,7 @@
           </div>
         </div>
 
-        <!-- 旧物流单/合并单/带寄送的旧采样单：寄出方 → 接收方（检测站/采样单位）；双向箭头两头都有表示采样后寄回 -->
+        <!-- 旧物流单/合并单/带寄送的旧采样单：寄出方 → 接收方；R22 双向合并单三段：寄出方（检测站）→采样单位→检测站 -->
         <div v-if="showRoute" class="route">
           <div class="party">
             <span class="role from">寄出方</span>
@@ -96,7 +103,25 @@
             <span class="who">寄出人 {{ task.sender || "—" }}</span>
             <span class="addr"><PlaceText :place="task.fromPlace" /></span>
           </div>
-          <div class="arrow">
+          <template v-if="roundTrip">
+            <div class="arrow">
+              <el-icon><Right /></el-icon>
+              <small>寄去采样</small>
+            </div>
+            <div class="party">
+              <span class="role plan">采样单位</span>
+              <b>{{ task.org || "—" }}</b>
+              <span class="who">授权人员 {{ task.people || "未指定" }}</span>
+              <span class="addr">
+                <PlaceText :place="task.placeAt" :fallback="task.place || '计划地点未填写'" />
+              </span>
+            </div>
+            <div class="arrow">
+              <el-icon><Right /></el-icon>
+              <small>采样后寄回</small>
+            </div>
+          </template>
+          <div v-else class="arrow">
             <el-icon>
               <Sort v-if="task.trip === '双向'" class="both" />
               <Right v-else />
@@ -118,7 +143,7 @@
             </span>
           </div>
         </div>
-        <dl v-if="task.trip" class="facts pair">
+        <dl v-if="task.trip && !merged" class="facts pair">
           <div class="wide">
             <dt>寄送方式</dt>
             <dd :title="TRIP_TEXT[task.trip]">
@@ -135,6 +160,12 @@
           </div>
         </dl>
         <dl v-else-if="!logistics" class="facts">
+          <div v-if="merged && task.trip" class="wide">
+            <dt>寄送方向</dt>
+            <dd :title="MERGED_TRIP_TEXT[task.trip]">
+              {{ task.trip }}（按箱归属派生）· {{ MERGED_TRIP_TEXT[task.trip] }}
+            </dd>
+          </div>
           <div>
             <dt>采样单位</dt>
             <dd>{{ task.org || "—" }}</dd>
@@ -442,6 +473,7 @@ import PageHeader from "@/components/biz/PageHeader.vue";
 import UplinkLog, { type UplinkLoadParams } from "@/components/biz/UplinkLog.vue";
 import SampleBoxAPI, { type BoxLogItem } from "@/api/sample/box";
 import {
+  MERGED_TRIP_TEXT,
   NEEDS_REASON,
   TASK_ACTIONS,
   TRIP_TEXT,
@@ -477,6 +509,8 @@ const logistics = computed(() => task.value?.kind === "调拨" || task.value?.ki
 const merged = computed(
   () => task.value?.kind === "采样" && !isLegacySample(task.value as Record<string, unknown>)
 );
+/** R22 双向合并单：寄出方（检测站）→采样单位（分公司）→检测站三段路线，步条含首腿。 */
+const roundTrip = computed(() => merged.value && task.value?.trip === "双向");
 /** 寄出方→接收方路线：旧物流单、合并单、带寄送的旧采样单都画。 */
 const showRoute = computed(() => logistics.value || merged.value || Boolean(task.value?.trip));
 /** 接收方是检测站：旧送检与合并单固定寄检测站。 */
@@ -618,6 +652,10 @@ const actions = computed(() => {
 const waitingFor = computed(() => {
   const t = task.value;
   if (!t || !Object.keys(detail.value?.can || {}).length) return "";
+  // R22 双向首腿：检测站寄出→分公司确认到达
+  if (roundTrip.value && t.status === "待寄出") return `等待 ${t.fromOrg || "检测站"} 寄出箱子`;
+  if (roundTrip.value && t.status === "运送中")
+    return `箱子寄往 ${t.org || "采样单位"} 途中，等待确认到达`;
   if (toStation.value && t.status === "待签收") return `等待 ${t.toOrg} 签收`;
   // 合并单退回不必经拒收（待检测/已检测可直接发起），等待文案不再写「已拒收」
   if (t.status === "退回中")
@@ -880,7 +918,9 @@ const actionText = computed(() => {
   if (action.to === "待签收") return `确认箱子已到达 ${t.toOrg || "接收方"}，等待签收。`;
   // 采样单各步
   if (action.to === "待采样")
-    return `确认 ${n} 台箱子已送到 ${t.org || "采样单位"}，可以开始采样。`;
+    return roundTrip.value
+      ? `确认 ${n} 台箱子已送到 ${t.org || "采样单位"}（首腿签收）：箱子归属交采样单位，可以开始采样。`
+      : `确认 ${n} 台箱子已送到 ${t.org || "采样单位"}，可以开始采样。`;
   if (action.to === "采样中")
     return `开始采样：${n} 台箱子进入采样阶段${t.recordVideo ? "，在计划地点开箱会自动请求录像" : ""}。`;
   if (action.to === "已封箱")

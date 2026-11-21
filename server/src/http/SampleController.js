@@ -1,5 +1,6 @@
 import {
   BOX,
+  boxLowMv,
   boxNameCell,
   boxOnline,
   canSee,
@@ -16,19 +17,23 @@ import {
   scopeSql,
   usableMv,
 } from "../auth/boxAccess.js";
-import { bucketBattery } from "../domain/BatterySeries.js";
+import { bucketBattery, readMillivolts } from "../domain/BatterySeries.js";
 import { foldBoxEvents } from "../domain/feed.js";
 import { formatTimestamp } from "../domain/Clock.js";
+import { Uplink } from "../domain/Uplink.js";
 import { audit } from "../log/audit.js";
 import { resolveTimeRange } from "../log/timeRange.js";
 import { currentBoxSettings, firmwareSupportsRemote } from "../settings/boxConfig.js";
 import { boxReserve, companyLimits, withCompanyBattery } from "../settings/companyPolicy.js";
 import { readBoxName } from "../domain/boxName.js";
+import { ENDED_SQL } from "../settings/taskFlow.js";
+import { openCounts, overOpenLimit } from "../settings/taskPlaces.js";
 import { taskTrack } from "../settings/taskTrack.js";
 
 const LIVES = ["在途", "未使用", "停用", "待激活"];
 const EXPORT_MAX = 50000;
-const EXPORT_LOG_MAX = 100000;
+/** 上报流水导出上限：与箱子/操作日志导出同规约（5 万行，超出截断并标明）。 */
+const EXPORT_LOG_MAX = 50000;
 const BATTERY_MAX_MS = 31 * 24 * 3600 * 1000;
 
 /**
@@ -450,7 +455,7 @@ export class SampleController {
   }
 
   /** 只查开关箱、上电、充电时，有对应的记录权限就够；要看全部报文得有「查看上报记录」。 */
-  async logs(ctx) {
+  #logPerm(ctx) {
     const kinds = String(ctx.query?.kind || "")
       .split(",")
       .map((item) => item.trim())
@@ -459,11 +464,46 @@ export class SampleController {
     const onlyEvents =
       kinds.length > 0 &&
       kinds.every((kind) => EVENT_KINDS.includes(kind) && (!perms || perms.has(EVENT_PERMS[kind])));
-    const perm = onlyEvents && perms && !perms.has(BOX.log) ? EVENT_PERMS[kinds[0]] : BOX.log;
-    const box = await this.#visible(ctx, perm);
+    return onlyEvents && perms && !perms.has(BOX.log) ? EVENT_PERMS[kinds[0]] : BOX.log;
+  }
+
+  /**
+   * 「仅看异常」的阈值（行级口径复用现有判定）：
+   * 低电压＝箱子列表 low flag 的同一阈值（公司电量预留覆盖后的 boxLowMv）；
+   * 开箱超限＝该箱在未结束任务里开箱次数超上限（overOpenLimit，与签收核验/工作台待办同源）。
+   */
+  async #anomalyFilter(box) {
+    const lim = await this.#limits();
+    return { lowMv: boxLowMv(box, lim), overOpen: await this.#overOpen(box.id) };
+  }
+
+  async #overOpen(boxId) {
+    const db = this.boxes.executor;
+    if (!db) return false;
+    const rows = await db.all(
+      `SELECT t.id, t.body FROM sample_task t JOIN sample_task_box m ON m.task_id = t.id
+       WHERE m.box_id = ? AND t.status NOT IN (${ENDED_SQL})`,
+      [boxId]
+    );
+    for (const row of rows) {
+      let task;
+      try {
+        task = JSON.parse(row.body);
+      } catch {
+        continue;
+      }
+      if (!Number.isInteger(task.maxOpens)) continue;
+      if (overOpenLimit(task, await openCounts(db, row.id)).includes(boxId)) return true;
+    }
+    return false;
+  }
+
+  async logs(ctx) {
+    const box = await this.#visible(ctx, this.#logPerm(ctx));
     if (!box) return;
     const range = resolveTimeRange(ctx.query || {});
     if (range.error) return ctx.fail(range.error);
+    const anomaly = ctx.query?.anomaly === "1" ? await this.#anomalyFilter(box) : null;
     const page = await this.boxes.listLogs(box.id, {
       from: range.from,
       to: range.to,
@@ -471,12 +511,37 @@ export class SampleController {
       cursorTime: ctx.query?.cursorTime,
       cursorId: ctx.query?.cursorId,
       kind: ctx.query?.kind,
+      page: ctx.query?.page,
+      anomaly,
     });
     const rows = Array.isArray(page) ? page : page.list;
+    const perms = ctx.access?.perms;
     ctx.ok({
       list: rows.map((row) => maskUplink(withoutRaw(row), perms)),
       nextCursor: Array.isArray(page) ? null : page.nextCursor || null,
     });
+  }
+
+  /**
+   * 上报记录页概览条：当前筛选范围一次聚合（GROUP BY kind＋MIN/MAX 电压＋COUNT），与翻页游标无关。
+   * 权限与列表完全同口径（#logPerm）；total 给分页器，latest 给「最近上报」。
+   */
+  async uplinkSummary(ctx) {
+    const box = await this.#visible(ctx, this.#logPerm(ctx));
+    if (!box) return;
+    const range = resolveTimeRange(ctx.query || {});
+    if (range.error) return ctx.fail(range.error);
+    if (typeof this.boxes.uplinkSummary !== "function") {
+      return ctx.fail("当前存储不支持概览统计");
+    }
+    const anomaly = ctx.query?.anomaly === "1" ? await this.#anomalyFilter(box) : null;
+    const summary = await this.boxes.uplinkSummary(box.id, {
+      from: range.from,
+      to: range.to,
+      kind: ctx.query?.kind,
+      anomaly,
+    });
+    ctx.ok({ ...summary, window: { from: range.from, to: range.to } });
   }
 
   async raw(ctx) {
@@ -600,42 +665,77 @@ export class SampleController {
     );
   }
 
-  /** 导出单箱上报流水：服务器库里的数据，不占设备流量。最长 31 天。 */
+  /**
+   * 导出单箱上报流水：服务器库里的数据，不占设备流量。最长 31 天。
+   * 列与上报记录页表格一致（时间/类型/摘要/电压/箱盖/基站/GPS），支持 kind/anomaly 当前筛选。
+   * 上限 5 万行（与箱子/操作日志导出同规约）：超出截断，响应头三件＋CSV 末尾注释行双标明。
+   */
   async exportLogs(ctx) {
     const box = await this.#visible(ctx, BOX.logExport);
     if (!box) return;
     if (typeof ctx.download !== "function") return ctx.fail("当前存储不支持导出");
     const range = resolveTimeRange(ctx.query || {});
-    if (range.error) return ctx.fail(range.error);
+    // blob 下载通路要按失败处理：范围错误带 HTTP 400（#26 M-01 同规约），不再 200 假成功
+    if (range.error) return ctx.fail(range.error, "A0001", 400);
     const perms = ctx.access?.perms;
     const boxes = this.boxes;
     const kind = ctx.query?.kind;
+    const anomaly = ctx.query?.anomaly === "1" ? await this.#anomalyFilter(box) : null;
+    const filter = { from: range.from, to: range.to, kind, anomaly };
+    // 截断预记数：概览聚合与列表同口径；存储不支持概览时只给上限头，截断仍由 CSV 注释行标明
+    const summary =
+      typeof boxes.uplinkSummary === "function" ? await boxes.uplinkSummary(box.id, filter) : null;
+    const headers = { "X-Export-Max": String(EXPORT_LOG_MAX) };
+    if (summary) {
+      headers["X-Export-Row-Count"] = String(Math.min(summary.total, EXPORT_LOG_MAX));
+      headers["X-Export-Truncated"] = summary.total > EXPORT_LOG_MAX ? "1" : "0";
+    }
     async function* lines() {
-      yield `\uFEFF${["时间", "设备时间", "类型", "摘要", "经度", "纬度"].join(",")}\r\n`;
+      yield `\uFEFF${["时间", "设备时间", "类型", "摘要", "电压(V)", "箱盖", "基站经度", "基站纬度", "GPS经度", "GPS纬度"].join(",")}\r\n`;
       let cursor = {};
-      for (let sent = 0; sent < EXPORT_LOG_MAX;) {
+      let sent = 0;
+      let more;
+      for (;;) {
         const page = await boxes.listLogs(box.id, {
-          from: range.from,
-          to: range.to,
-          limit: 100,
-          kind,
+          ...filter,
+          limit: Math.min(100, EXPORT_LOG_MAX - sent),
           cursorTime: cursor.time,
           cursorId: cursor.id,
         });
         const rows = Array.isArray(page) ? page : page.list;
         for (const row of rows) {
           const item = maskUplink(withoutRaw(row), perms);
-          yield `${[item.time, item.deviceTime, item.kind, item.text, item.gpsLng ?? item.lbsLng ?? "", item.gpsLat ?? item.lbsLat ?? ""].map(csvCell).join(",")}\r\n`;
+          const mv = readMillivolts(item.text);
+          const lid = /开[着盖]/.test(item.text) ? "开" : /关[着盖]/.test(item.text) ? "关" : "";
+          yield `${[
+            item.time,
+            item.deviceTime,
+            Uplink.labelOf(item.kind),
+            item.text,
+            mv == null ? "" : (mv / 1000).toFixed(2),
+            lid,
+            item.lbsLng ?? "",
+            item.lbsLat ?? "",
+            item.gpsLng ?? "",
+            item.gpsLat ?? "",
+          ]
+            .map(csvCell)
+            .join(",")}\r\n`;
           sent += 1;
         }
-        if (Array.isArray(page) || !page.nextCursor) break;
+        more = !Array.isArray(page) && Boolean(page.nextCursor);
+        if (!more || sent >= EXPORT_LOG_MAX) break;
         cursor = page.nextCursor;
+      }
+      if (sent >= EXPORT_LOG_MAX && more) {
+        yield `# 已达单次导出上限 ${EXPORT_LOG_MAX} 行，仅导出最近的 ${EXPORT_LOG_MAX} 行；其余记录请缩小时间范围后分批导出\r\n`;
       }
     }
     await record(ctx, "导出单箱上报日志", box.id);
     await ctx.download(
       `${fileStem(box, ctx.access?.perms)}-上报日志-${formatTimestamp(new Date()).slice(0, 10)}.csv`,
-      lines()
+      lines(),
+      headers
     );
   }
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ENDED, ENDED_SQL, initialOf, nextOf, prefixOf } from "./taskFlow.js";
+import { deriveTrip, ENDED, ENDED_SQL, initialOf, nextOf, prefixOf } from "./taskFlow.js";
 import { formatTimestamp } from "../domain/Clock.js";
 import { voidBoxIds } from "./taskPlaces.js";
 import {
@@ -176,6 +176,22 @@ export async function revokeBlock(db, box, link, task) {
 }
 
 /**
+ * 总公司根 id（第一个根，按 sort、id；与 056/OverviewController 同约定）。
+ * R22 派生寄出方时未分配箱（org_id 空）归一到根——与「未分配＝总公司」显示口径一致。
+ */
+export function rootOrgId(depts) {
+  const ids = new Set(depts.map((row) => String(row.id)));
+  const parentOf = (row) => String(row.parent_id ?? row.parentId ?? "");
+  const roots = depts
+    .filter((row) => !ids.has(parentOf(row)))
+    .sort(
+      (a, b) =>
+        (Number(a.sort) || 0) - (Number(b.sort) || 0) || String(a.id).localeCompare(String(b.id))
+    );
+  return String(roots[0]?.id ?? "");
+}
+
+/**
  * 建单时寄出单位下面的所有部门（R-5 自控制器层移入）：只有还挂在这些单位名下的箱子才跟着交接。
  * 旧数据没有 fromOrgId，退回按单位名找一个同名部门；都对不上时返回 null 表示不拦。
  */
@@ -203,8 +219,14 @@ async function handOverBoxes(tx, task, ids, signerFit = "none") {
   if (!ids.length) return { moved, skipped };
   const depts = await tx.all("SELECT id, parent_id AS parentId, name, sort FROM sys_dept");
   const nameOf = new Map(depts.map((row) => [String(row.id), row.name]));
+  // R22 双向合并单：寄回腿的寄出方＝采样单位（首腿确认到达时箱子已交接到分公司），
+  // 不是 fromOrg（检测站）——否则箱子全被「已改挂」守卫跳过。单向/旧单口径不变。
+  const source =
+    task.tripDerived === true && task.trip === "双向"
+      ? { ...task, fromOrgId: task.orgId, fromOrg: task.org }
+      : task;
   // null = 判不出寄出单位（旧单只存了单位名），沿用改造前的无条件交接，不批量跳过
-  const fromIds = senderOrgIds(depts, task);
+  const fromIds = senderOrgIds(depts, source);
   // 签收人不在这张单的接收单位里时，别把他写成这批箱子的保管人：
   // 保管人会让自己数据范围里的账号看到这些箱子，等于给外来账号开了一条读取通道。
   const custodian = task.signerId && signerFit !== "foreign" ? String(task.signerId) : "";
@@ -245,7 +267,51 @@ async function handOverBoxes(tx, task, ids, signerFit = "none") {
 }
 
 /**
- * 退回目的地子树（组织简化 D3）：合并采样单退回时，箱子归属回原寄出分公司 fromOrg。
+ * 双向首腿交接（R22）：分公司确认到达（运送中→待采样）时，箱子归属从检测站（fromOrg）
+ * 交采样单位（orgId）。与 handOverBoxes 同一加锁顺序（排序后逐台 FOR UPDATE）、同一跳过守卫：
+ * 建单后被改挂到检测站子树之外的箱子跳过并记录；箱子已删除同样跳过。
+ * 保管人不动——首腿没有指定签收人，检测站寄出人保留保管人身份（借出跟踪），
+ * 采样单位按 org 数据范围看到箱子；最终签收时保管人才写检测站签收人。
+ * 返回 { moved, skipped }，结构与签收交接一致。
+ */
+async function outboundHandOverBoxes(tx, task, ids) {
+  const moved = [];
+  const skipped = [];
+  if (!ids.length) return { moved, skipped };
+  const depts = await tx.all("SELECT id, parent_id AS parentId, name, sort FROM sys_dept");
+  const nameOf = new Map(depts.map((row) => [String(row.id), row.name]));
+  const fromIds = senderOrgIds(depts, task);
+  const toOrgId = String(task.orgId ?? "");
+  const toOrg = task.org || nameOf.get(toOrgId) || "";
+  for (const boxId of [...ids].sort()) {
+    const box = await tx.get(
+      "SELECT id, org_id FROM sample_box WHERE id=?" +
+        (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+      [boxId]
+    );
+    if (!box) {
+      skipped.push({ boxId, reason: "箱子已删除" });
+      continue;
+    }
+    const current = String(box.org_id ?? "");
+    if (fromIds && !fromIds.has(current)) {
+      const where = nameOf.get(current) || current || "总公司";
+      skipped.push({ boxId, reason: `已改挂到${where}`, where });
+      continue;
+    }
+    if (!toOrgId) {
+      skipped.push({ boxId, reason: "采样单位不明，未自动改归属" });
+      continue;
+    }
+    await tx.run("UPDATE sample_box SET org_id=?, org=? WHERE id=?", [toOrgId, toOrg, boxId]);
+    moved.push(boxId);
+  }
+  return { moved, skipped };
+}
+
+/**
+ * 退回目的地子树（组织简化 D3）：合并采样单退回时，箱子归属回寄出方 fromOrg
+ * （R22：单向＝原寄出分公司；双向＝检测站，箱本就挂检测站，归属不变）。
  * 与 senderOrgIds 对称——按 toOrgId（检测站）取子树，只拉回还挂在检测站名下的箱子。
  * 旧数据没有 toOrgId 时按单位名唯一匹配；都对不上返回 null（不拦，沿用无条件交接）。
  */
@@ -577,8 +643,7 @@ export class ReportPolicy {
   async createTask(input, actor = {}) {
     // 单号前缀按 kind：采样 TK-（合并采样+送检）、划拨走 createTransfer（AL-）。前缀只是显示，kind 才是权威。
     const id = `${prefixOf(input.kind)}${Date.now()}-${randomUUID().slice(0, 6)}`;
-    const initial = initialOf(input);
-    // 合并采样单接收方固定检测站（控制器已校验 toOrgId＝stationDeptId）；trip 作废，不再按 orgId 改写接收方。
+    // 合并采样单接收方固定检测站（控制器已校验 toOrgId＝stationDeptId）。
     const toOrgId = input.toOrgId;
     const body = {
       ...input,
@@ -589,15 +654,10 @@ export class ReportPolicy {
     };
     // is_inspect 真列（050）：合并采样单恒送检测站（body.inspect=true）；旧送检/旧调拨送检测站的按 body.inspect，与统计侧 LIKE 判定同源
     const isInspect = input.kind === "送检" || body.inspect === true ? 1 : 0;
+    // R22：采样单的 trip 由箱归属派生（控制器已派生一次），行锁内复核后写权威值；首步随 trip 分流。
+    let initial = initialOf(input);
     await this.db.transaction(async (tx) => {
       const companyCtx = await companyContext(tx);
-      // R13 拍板①（选项 A）：本任务统一未设且寄出公司有任务期间默认策略 → 以它入 body.policy
-      // 并冻结进 assignedPolicies 快照。语义显式：进行中任务不受公司级后续修改影响；
-      // 长期单箱/批量仍优先于它（resolvePolicy 既有层级）。公司未设 task_json 时行为不变。
-      if (!body.policy && input.fromOrgId) {
-        const companyTask = await companyTaskFor(tx, input.fromOrgId, companyCtx);
-        if (companyTask) body.policy = stamped(companyTask);
-      }
       const snapshots = new Map();
       for (const boxId of [...input.boxIds].sort()) {
         const box = await tx.get(
@@ -617,17 +677,62 @@ export class ReportPolicy {
             `${box.name || boxId} 已在任务单「${busy.name}」里，那张单结束或取消后才能再绑定`
           );
         snapshots.set(boxId, box);
+      }
+      // R22 派生校验（锁内权威）：同一任务单的箱子须同归属（混归属方向歧义，整单拒，沿划拨 D-2 口径）；
+      // 未分配箱（org_id 空）归一总公司根。寄出方 fromOrg＝箱当前归属，trip 由它派生，客户端值不作数。
+      // 例外：显式 trip 且无 tripDerived 标记＝旧形状模拟（测试/迁移造历史数据），保留旧流不派生；
+      // HTTP 建单恒走控制器（metadata 带 tripDerived=true），不受此缝影响。
+      let policyOrgId = input.fromOrgId;
+      if (input.kind === "采样") {
+        if (input.trip && input.tripDerived !== true) {
+          initial = initialOf(input);
+        } else {
+          let boxOrg = "";
+          if (snapshots.size) {
+            const depts = await tx.all("SELECT id, parent_id, sort FROM sys_dept");
+            const root = rootOrgId(depts);
+            const orgs = new Set(
+              [...snapshots.values()].map((box) => String(box.org_id ?? "") || root)
+            );
+            if (orgs.size > 1)
+              throw conflict("同一任务单的箱子须同归属，请按归属拆分任务单（跨公司批量请用划拨）");
+            boxOrg = [...orgs][0] || "";
+            if (input.fromOrgId && String(input.fromOrgId) !== boxOrg)
+              throw conflict("箱子归属已变化，请刷新后重试");
+          }
+          const trip = deriveTrip(boxOrg, toOrgId, input.orgId);
+          if (input.trip && input.trip !== trip) throw conflict("寄送方向已变化，请刷新后重试");
+          body.trip = trip;
+          body.tripDerived = true;
+          initial = initialOf({ ...input, trip, tripDerived: true });
+          // R13④/R22：任务期间公司策略按采样单位（双向 fromOrg＝检测站，检测站无公司策略）
+          policyOrgId = input.orgId || input.fromOrgId;
+        }
+      }
+      // R13 拍板①（选项 A）：本任务统一未设且公司有任务期间默认策略 → 以它入 body.policy
+      // 并冻结进 assignedPolicies 快照。语义显式：进行中任务不受公司级后续修改影响；
+      // 长期单箱/批量仍优先于它（resolvePolicy 既有层级）。公司未设 task_json 时行为不变。
+      if (!body.policy && policyOrgId) {
+        const companyTask = await companyTaskFor(tx, policyOrgId, companyCtx);
+        if (companyTask) body.policy = stamped(companyTask);
+      }
+      for (const [boxId, box] of snapshots) {
         const layers = await tx.get(
           "SELECT single_json,batch_json FROM box_report_policy WHERE box_id=?",
           [boxId]
         );
         body.assignedPolicies ??= Object.create(null);
+        // R22 双向：箱在检测站期间公司 idle 层按采样分公司（R13④「寄出公司」的双向等价）
+        const idleBox =
+          body.tripDerived === true && body.trip === "双向" && input.orgId
+            ? { ...box, org_id: input.orgId }
+            : box;
         body.assignedPolicies[boxId] = resolvePolicy(
           parse(layers?.single_json),
           parse(layers?.batch_json),
           { ...body, id },
           boxId,
-          await companyIdleFor(tx, box, companyCtx)
+          await companyIdleFor(tx, idleBox, companyCtx)
         );
       }
       await tx.run(
@@ -1039,6 +1144,7 @@ export class ReportPolicy {
    * note、detail 记进流转记录；action 不填按状态取默认动作名。
    * handOver（R-5）：签收时传 { signerFit }，归属交接与状态更新同事务执行，任一台失败整体回滚；
    * 跳过明细持久化进本条流转记录的 detail.handOver，任务详情读最近一次交接结果。
+   * outboundHandOver（R22）：双向首腿分公司确认到达（待采样）时传 true，归属检测站→采样单位。
    * 返回 { from: 推进前的状态, handOver: { moved, skipped } | null }。
    */
   async transition(
@@ -1051,6 +1157,7 @@ export class ReportPolicy {
       action = "",
       handOver = null,
       returnHandOver = null,
+      outboundHandOver = null,
     } = {}
   ) {
     let from = "";
@@ -1159,6 +1266,23 @@ export class ReportPolicy {
             movedCount: handOverResult.moved.length,
             skippedCount: handOverResult.skipped.length,
             // detail 列是 TEXT（MySQL 64KB）：超大单只持久化前 200 台明细，总数另记
+            skipped: handOverResult.skipped
+              .slice(0, 200)
+              .map(({ boxId, reason }) => ({ boxId, reason })),
+          },
+        };
+      } else if (outboundHandOver && status === "待采样") {
+        // 双向首腿交接（R22）：分公司确认到达，归属检测站→采样单位，与状态更新同事务
+        handOverResult = await outboundHandOverBoxes(
+          tx,
+          JSON.parse(task.body),
+          ids.map((b) => b.box_id)
+        );
+        detail = {
+          ...(detail || {}),
+          handOver: {
+            movedCount: handOverResult.moved.length,
+            skippedCount: handOverResult.skipped.length,
             skipped: handOverResult.skipped
               .slice(0, 200)
               .map(({ boxId, reason }) => ({ boxId, reason })),

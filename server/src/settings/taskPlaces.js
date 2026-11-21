@@ -1,6 +1,6 @@
 import { boxPosition, distanceM } from "../geo/place.js";
 import { currentBoxSettings } from "./boxConfig.js";
-import { companyJudgmentFor } from "./companyPolicy.js";
+import { companyJudgmentFor, companyOrgOfTask } from "./companyPolicy.js";
 import { ENDED, isLegacySample } from "./taskFlow.js";
 
 /** 这些状态下箱子正朝某个地点去，列表要算「到达附近」。 */
@@ -28,9 +28,11 @@ export function targetOf(body, status) {
     return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
   }
   const plan = body.placeAt ? { ...body.placeAt, role: "计划地点" } : null;
-  // 合并采样单（组织简化 P6）：采样段看计划地点；在途/待签收/待检测看检测站收货地址；退回看寄出地址
+  // 合并采样单（组织简化 P6）：采样段看计划地点；在途/待签收/待检测看检测站收货地址；退回看寄出地址。
+  // R22 双向首腿：待寄出看寄出地址（检测站），运送中朝采样分公司的计划地点去。
   if (body.kind === "采样" && !isLegacySample({ ...body, status })) {
-    if (["待采样", "采样中", "已封箱"].includes(status)) return plan;
+    if (["待采样", "采样中", "已封箱", "运送中"].includes(status)) return plan;
+    if (status === "待寄出") return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
     if (["在途", "待签收", "待检测"].includes(status))
       return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
     if (status === "退回中") return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
@@ -176,13 +178,13 @@ export function radiusOf(target) {
 }
 
 /**
- * 任务到达半径（R13 P1 公司化）：地址显式 radiusM 优先；否则按寄出分公司（fromOrgId）的
- * 公司级到达半径——箱子在检测站期间判定也按寄出公司（拍板④），公司未覆盖时回落系统默认。
- * 旧单没有 fromOrgId 时按采样单位 orgId，再没有按总公司（""）。
+ * 任务到达半径（R13 P1 公司化）：地址显式 radiusM 优先；否则按任务归属公司的公司级到达半径——
+ * 箱子在检测站期间判定也按寄出公司（拍板④），公司未覆盖时回落系统默认。
+ * R22：派生方向合并单按采样单位（双向 fromOrg＝检测站无公司层）；旧单 fromOrgId→orgId→总公司（""）。
  */
 export async function taskRadiusOf(db, task, target) {
   if (Number.isInteger(target?.radiusM)) return target.radiusM;
-  const { arriveRadiusM } = await companyJudgmentFor(db, task?.fromOrgId || task?.orgId || "");
+  const { arriveRadiusM } = await companyJudgmentFor(db, companyOrgOfTask(task));
   return arriveRadiusM;
 }
 

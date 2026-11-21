@@ -32,6 +32,56 @@ const UPLINK_LIST_COLUMNS = [
   "gps_lat",
 ];
 
+/** 上报种类白名单（BoxState.apply 派生＋unknown 兜底），列表/概览同一份。 */
+const UPLINK_KINDS = ["boot", "timer", "pad", "shut", "chg", "chgs", "unknown"];
+
+function readUplinkKinds(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => UPLINK_KINDS.includes(item));
+}
+
+/**
+ * 「仅看异常」的行级口径（控制器算好阈值传入）：
+ * 低电压＝摘要电压低于 lowMv（与箱子列表 low flag 同源，公司预留覆盖后的值）；
+ * 开箱超限＝该箱当前未结束任务开箱超上限（overOpen）时的开箱行。
+ */
+function readAnomaly(value) {
+  if (!value) return null;
+  const lowMv = Number(value.lowMv);
+  if (!Number.isFinite(lowMv) || lowMv <= 0) return null;
+  return { lowMv, overOpen: Boolean(value.overOpen) };
+}
+
+function anomalyWhere(anomaly) {
+  const low = "(mv >= 2500 AND mv < ?)";
+  return anomaly.overOpen ? `(${low} OR kind = 'pad')` : low;
+}
+
+/**
+ * 摘要文本里的电压（mV）提取成 SQL 表达式，供列表「仅看异常」过滤和概览 MIN/MAX 聚合共用。
+ * 摘要形如「定时上报 · seq 709 · 4.15 V · 开着」（Uplink.digestAs）：取「 V」前的那段数字——
+ * SQLite 用 rtrim 去掉前缀尾部的数字/小数点定位起点；MySQL 用 REGEXP_SUBSTR。
+ * 没有电压给 NULL；有效区间（2500–4500，与 readMillivolts 同口径）由调用点判断。
+ */
+export function uplinkMvSql(dialect) {
+  if (dialect === "mysql") {
+    return "CAST(REPLACE(REGEXP_SUBSTR(summary, '[0-9]+([.][0-9]+)? V'), ' V', '') AS DECIMAL(8,3)) * 1000";
+  }
+  const prefix = "rtrim(substr(summary, 1, instr(summary, ' V') - 1), '0123456789.')";
+  const start = `length(${prefix}) + 1`;
+  const length = `instr(summary, ' V') - 1 - length(${prefix})`;
+  return `CASE WHEN instr(summary, ' V') > 0 THEN CAST(substr(summary, ${start}, ${length}) AS REAL) * 1000 END`;
+}
+
+/** 页码跳转（分页器直接跳页）：无游标时按 OFFSET 定位；有游标走键集（新上报追加也不漂移）。 */
+function pageOffset(page, limit) {
+  const number = Number(page);
+  if (!Number.isInteger(number) || number <= 1) return 0;
+  return (number - 1) * limit;
+}
+
 /** 管理操作和任务维护的列：上报写库时不覆盖（新建箱子时照常写入）。 */
 const MANAGED_COLUMNS = ["life", "org", "org_id", "owner", "owner_id", "name"];
 
@@ -614,20 +664,15 @@ export class SqlBoxStore extends BoxStore {
     }
     const limit = pageLimit(range.limit);
     const params = [boxId, from, to];
-    let sql = `SELECT ${UPLINK_LIST_COLUMNS.join(", ")}
-      FROM sample_uplink
-      WHERE box_id = ? AND received_at >= ? AND received_at <= ?`;
-    const allowed = ["boot", "timer", "pad", "shut", "chg", "chgs", "unknown"];
-    const kinds = String(range.kind || "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter((item) => allowed.includes(item));
+    const where = ["box_id = ?", "received_at >= ?", "received_at <= ?"];
+    const kinds = readUplinkKinds(range.kind);
     if (kinds.length) {
-      sql += ` AND kind IN (${kinds.map(() => "?").join(", ")})`;
+      where.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
       params.push(...kinds);
     }
-    if (range.cursorTime && range.cursorId) {
-      sql += " AND (received_at < ? OR (received_at = ? AND id < ?))";
+    const keyset = Boolean(range.cursorTime && range.cursorId);
+    if (keyset) {
+      where.push("(received_at < ? OR (received_at = ? AND id < ?))");
       const cursorId = Number(range.cursorId);
       params.push(
         range.cursorTime,
@@ -635,7 +680,24 @@ export class SqlBoxStore extends BoxStore {
         Number.isSafeInteger(cursorId) ? cursorId : range.cursorId
       );
     }
+    const anomaly = readAnomaly(range.anomaly);
+    let sql;
+    if (anomaly) {
+      // 电压在摘要文本里：先在内层取成 mv 列，外层按阈值过滤（与概览聚合同一表达式）
+      sql = `SELECT ${UPLINK_LIST_COLUMNS.join(", ")}
+      FROM (SELECT ${UPLINK_LIST_COLUMNS.join(", ")}, ${uplinkMvSql(this.executor.dialect)} AS mv
+        FROM sample_uplink
+        WHERE ${where.join(" AND ")}) u
+      WHERE ${anomalyWhere(anomaly)}`;
+      params.push(anomaly.lowMv);
+    } else {
+      sql = `SELECT ${UPLINK_LIST_COLUMNS.join(", ")}
+      FROM sample_uplink
+      WHERE ${where.join(" AND ")}`;
+    }
     sql += ` ORDER BY received_at DESC, id DESC LIMIT ${limit + 1}`;
+    const offset = keyset ? 0 : pageOffset(range.page, limit);
+    if (offset) sql += ` OFFSET ${offset}`;
     const rows = await this.executor.all(sql, params);
     const hasMore = rows.length > limit;
     const list = rows.slice(0, limit).map((row) => UplinkRecord.fromRow(row));
@@ -644,6 +706,66 @@ export class SqlBoxStore extends BoxStore {
       list,
       nextCursor: hasMore && last ? { time: last.receivedAt, id: last.id } : null,
     };
+  }
+
+  /**
+   * 上报记录页概览：当前筛选范围一次 GROUP BY kind 聚合（与翻页游标无关）。
+   * total 给分页器；MIN/MAX 电压与列表「仅看异常」用同一提取表达式；latest 给「最近上报」。
+   * 不取原文列，kind/anomaly 过滤与 listLogs 完全同口径。
+   */
+  async uplinkSummary(boxId, range = {}) {
+    await this.batch.flush();
+    let from = range.from;
+    let to = range.to;
+    if (!from || !to) {
+      const resolved = resolveTimeRange(range);
+      if (resolved.error) throw badRequest(resolved.error);
+      from = resolved.from;
+      to = resolved.to;
+    }
+    const params = [boxId, from, to];
+    const where = ["box_id = ?", "received_at >= ?", "received_at <= ?"];
+    const kinds = readUplinkKinds(range.kind);
+    if (kinds.length) {
+      where.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+      params.push(...kinds);
+    }
+    const anomaly = readAnomaly(range.anomaly);
+    const inner = `SELECT kind, received_at, ${uplinkMvSql(this.executor.dialect)} AS mv
+      FROM sample_uplink
+      WHERE ${where.join(" AND ")}`;
+    let outer = "";
+    if (anomaly) {
+      outer = ` WHERE ${anomalyWhere(anomaly)}`;
+      params.push(anomaly.lowMv);
+    }
+    const rows = await this.executor.all(
+      `SELECT kind, COUNT(*) AS n,
+              MIN(CASE WHEN mv BETWEEN 2500 AND 4500 THEN mv END) AS min_mv,
+              MAX(CASE WHEN mv BETWEEN 2500 AND 4500 THEN mv END) AS max_mv,
+              MAX(received_at) AS latest
+       FROM (${inner}) u${outer}
+       GROUP BY kind`,
+      params
+    );
+    const kindsOut = {};
+    let total = 0;
+    let minMv = null;
+    let maxMv = null;
+    let latest = "";
+    for (const row of rows) {
+      const count = Number(row.n) || 0;
+      const kind = String(row.kind || "unknown");
+      kindsOut[kind] = (kindsOut[kind] || 0) + count;
+      total += count;
+      const low = row.min_mv == null ? null : Number(row.min_mv);
+      const high = row.max_mv == null ? null : Number(row.max_mv);
+      if (low != null && (minMv == null || low < minMv)) minMv = low;
+      if (high != null && (maxMv == null || high > maxMv)) maxMv = high;
+      const at = String(row.latest || "");
+      if (at > latest) latest = at;
+    }
+    return { total, kinds: kindsOut, minMv, maxMv, latest };
   }
 
   /** 多台箱子在一段时间内的上报，按时间倒序翻页。任务详情用，时间范围由调用方限定在任务窗口内。 */

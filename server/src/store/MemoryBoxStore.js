@@ -1,4 +1,5 @@
 import { defaultBoxName } from "../domain/boxName.js";
+import { readMillivolts } from "../domain/BatterySeries.js";
 import { CommittedUplink } from "../domain/CommittedUplink.js";
 import { BoxState } from "../domain/BoxState.js";
 import { UplinkRecord } from "../domain/UplinkRecord.js";
@@ -106,6 +107,12 @@ export class MemoryBoxStore extends BoxStore {
   }
 
   async listLogs(boxId, range) {
+    const kinds = String(range?.kind || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const lowMv = Number(range?.anomaly?.lowMv);
+    const anomaly = Number.isFinite(lowMv) && lowMv > 0 ? range.anomaly : null;
     return this.logs
       .filter((item) => item.boxId === boxId)
       .filter((item) => {
@@ -113,11 +120,41 @@ export class MemoryBoxStore extends BoxStore {
         const time = item.receivedAt || item.toJSON?.().time || "";
         return time >= range.from && time <= range.to;
       })
+      .filter((item) => !kinds.length || kinds.includes(item.kind))
+      .filter((item) => {
+        if (!anomaly) return true;
+        // 与 SqlBoxStore 同口径：低电压（readMillivolts 已含 2500–4500 有效性）或超限开箱行
+        const mv = readMillivolts(item.summary);
+        return (mv != null && mv < lowMv) || (anomaly.overOpen && item.kind === "pad");
+      })
       .sort((a, b) => {
         const left = a.receivedAt || a.toJSON?.().time || "";
         const right = b.receivedAt || b.toJSON?.().time || "";
         return left < right ? 1 : left > right ? -1 : 0;
       });
+  }
+
+  /** 与 SqlBoxStore.uplinkSummary 同形状：内存模式按同一过滤口径聚合。 */
+  async uplinkSummary(boxId, range = {}) {
+    const rows = await this.listLogs(boxId, range);
+    const kinds = {};
+    let total = 0;
+    let minMv = null;
+    let maxMv = null;
+    let latest = "";
+    for (const item of rows) {
+      const kind = item.kind || "unknown";
+      kinds[kind] = (kinds[kind] || 0) + 1;
+      total += 1;
+      const mv = readMillivolts(item.summary);
+      if (mv != null) {
+        minMv = minMv == null ? mv : Math.min(minMv, mv);
+        maxMv = maxMv == null ? mv : Math.max(maxMv, mv);
+      }
+      const at = item.receivedAt || "";
+      if (at > latest) latest = at;
+    }
+    return { total, kinds, minMv, maxMv, latest };
   }
 
   async readRaw(boxId, logId) {

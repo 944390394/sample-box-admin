@@ -63,11 +63,28 @@
           </template>
 
           <template v-else-if="current === 'from'">
+            <!-- R22：寄出方＝箱子当前归属，只读带出（双向＝检测站，单向＝分公司/总部） -->
+            <el-form-item label="寄出方" data-test="create-from-readonly">
+              <div v-if="derivedFromText" class="station-fixed">
+                <div class="station-line">
+                  <b>{{ derivedFromOrg?.name || "总公司（未分配）" }}</b>
+                  <el-tag size="small" type="info" effect="plain">按箱子归属带出 · 只读</el-tag>
+                </div>
+                <div v-if="derivedFromOrg" class="text-muted">{{ derivedFromOrg.path }}</div>
+              </div>
+              <span v-else class="tip">先在「采样箱」步选箱，寄出方按箱子当前归属自动带出</span>
+            </el-form-item>
+            <el-form-item v-if="trip" label="寄送方向" data-test="create-trip-tag-from">
+              <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
+                {{ trip }}
+              </el-tag>
+              <p class="tip">{{ tripText }}</p>
+            </el-form-item>
             <el-form-item label="采样单位" required :error="errors.fromOrgId">
               <el-select
                 v-model="form.fromOrgId"
                 filterable
-                placeholder="选择采样单位（寄出分公司）"
+                placeholder="选择采样单位（分公司）"
                 style="width: 100%"
               >
                 <el-option
@@ -79,7 +96,8 @@
                 />
               </el-select>
               <p class="tip">
-                分公司自采：采样单位即寄出分公司，默认本单位。封箱后直寄唯一检测站，箱子归属签收后交检测站。
+                采样单位可选分公司，默认箱归属分公司（箱在检测站时默认本单位）。单向＝本地采样后寄检测站；
+                双向＝检测站把箱子寄到采样单位，采样封箱后寄回检测站。
               </p>
             </el-form-item>
             <el-form-item label="寄出人" required :error="errors.sender">
@@ -90,26 +108,32 @@
                 default-first-option
                 placeholder="选择人员，或直接输入姓名"
                 style="width: 100%"
-                :disabled="!form.fromOrgId"
+                :disabled="!chosenBoxes.length"
               >
-                <el-option v-for="u in fromUsers" :key="u.id" :value="`u:${u.id}`" :label="u.name">
+                <el-option
+                  v-for="u in senderUsers"
+                  :key="u.id"
+                  :value="`u:${u.id}`"
+                  :label="u.name"
+                >
                   <span>{{ u.name }}</span>
                   <span class="dept">{{ u.dept }}</span>
                 </el-option>
               </el-select>
+              <p class="tip">寄出人须是寄出方的人员（双向时＝检测站人员）。</p>
             </el-form-item>
             <el-alert
               v-if="outside.length"
               type="warning"
               :closable="false"
               class="indent"
-              :title="`${outside.join('、')} 不在「${orgById(form.fromOrgId)?.name}」及其上下级里，确认要从这里寄出吗？`"
+              :title="`${outside.join('、')} 不在寄出方「${derivedFromOrg?.name}」及其上下级里，确认要从这里寄出吗？`"
             />
             <el-form-item label="寄出地址">
               <PlaceField
                 v-if="form.fromOrgId"
                 v-model="form.fromPlace"
-                :org="orgById(form.fromOrgId)"
+                :org="derivedFromOrg || orgById(form.fromOrgId)"
                 :default-radius="arriveRadius"
               />
               <span v-else class="tip">先选采样单位</span>
@@ -117,16 +141,6 @@
           </template>
 
           <template v-else-if="current === 'sample'">
-            <el-form-item label="开箱录像">
-              <el-switch v-model="form.recordVideo" :disabled="!isCompany" />
-              <p class="tip">
-                {{
-                  isCompany
-                    ? "开启后，任务进行中箱子每次在计划地点（误差范围内）开箱，服务器会通知视频平台录像，录像显示在任务详情里。"
-                    : "只有采样单位是分公司（公司类型）时才能开启；检测站不设录像。单位类型在「组织管理 › 部门」里设置。"
-                }}
-              </p>
-            </el-form-item>
             <el-form-item label="计划地点">
               <PlaceField
                 :key="form.fromOrgId || 'none'"
@@ -154,6 +168,43 @@
                   <span class="dept">{{ u.dept }}</span>
                 </el-option>
               </el-select>
+            </el-form-item>
+            <!-- 流程守卫：录像＋开箱上限都是任务级守卫，与寄送方向无关（合并单直寄检测站） -->
+            <el-divider content-position="left">流程守卫</el-divider>
+            <el-form-item label="开箱录像">
+              <el-switch v-model="form.recordVideo" :disabled="!isCompany" />
+              <p class="tip">
+                {{
+                  isCompany
+                    ? "开启后，任务进行中箱子每次在计划地点（误差范围内）开箱，服务器会通知视频平台录像，录像显示在任务详情里。"
+                    : "只有采样单位是分公司（公司类型）时才能开启；检测站不设录像。单位类型在「组织管理 › 部门」里设置。"
+                }}
+              </p>
+            </el-form-item>
+            <el-form-item label="开箱次数上限" data-test="create-open-limit">
+              <div class="limit">
+                <el-switch
+                  v-model="limitOpens"
+                  inline-prompt
+                  active-text="限制"
+                  inactive-text="不限"
+                />
+                <template v-if="limitOpens">
+                  <span>每台最多开箱</span>
+                  <el-input-number
+                    v-model="maxOpens"
+                    :min="0"
+                    :max="999"
+                    size="small"
+                    controls-position="right"
+                  />
+                  <span>次</span>
+                </template>
+              </div>
+              <p class="tip">
+                从任务开始到结束，按箱子上报的开箱次数计算。上限计采样开箱（装样+封箱=2）；
+                寄出腿（寄往检测站／双向首腿检测站→分公司）途中开箱超限会在任务列表与详情标红。
+              </p>
             </el-form-item>
           </template>
 
@@ -211,35 +262,19 @@
               <BoxPicker v-model="form.boxIds" v-model:boxes="chosenBoxes" />
             </el-form-item>
             <el-alert
-              v-if="boxOrgs.length > 1"
-              type="info"
+              v-if="boxOrgIds.length > 1"
+              type="error"
               :closable="false"
               class="indent"
-              :title="`选中的箱子分属 ${boxOrgs.join('、')}，任务单只能写一个寄出单位，请确认`"
+              data-test="create-mixed-org"
+              :title="`选中的箱子分属 ${boxOrgs.join('、')}。同一任务单的箱子须同归属，请按归属拆分任务单（跨公司批量请用划拨）`"
             />
-            <el-form-item label="开箱次数上限">
-              <div class="limit">
-                <el-switch
-                  v-model="limitOpens"
-                  inline-prompt
-                  active-text="限制"
-                  inactive-text="不限"
-                />
-                <template v-if="limitOpens">
-                  <span>每台最多开箱</span>
-                  <el-input-number
-                    v-model="maxOpens"
-                    :min="0"
-                    :max="999"
-                    size="small"
-                    controls-position="right"
-                  />
-                  <span>次</span>
-                </template>
-              </div>
-              <p class="tip">
-                从任务开始到结束，按箱子上报的开箱次数计算；超过上限会在任务列表和详情里标红。采样一般开一次装样、一次封箱，可按流程设置；寄送途中一般不该开箱。
-              </p>
+            <!-- R22：方向由箱归属派生（只读）——选箱后即可见，采样单位步再确认一次 -->
+            <el-form-item v-if="trip" label="寄送方向" data-test="create-trip-tag">
+              <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
+                {{ trip }}
+              </el-tag>
+              <p class="tip">{{ tripText }}方向按箱子当前归属自动派生，不可手选。</p>
             </el-form-item>
           </template>
 
@@ -267,11 +302,28 @@
               </section>
               <section>
                 <header>
-                  <b>采样单位（寄出方）</b>
+                  <b>采样单位与寄出方</b>
                   <el-button link type="primary" @click="goto('from')">修改</el-button>
                 </header>
                 <dl>
-                  <dt>单位</dt>
+                  <dt>寄出方</dt>
+                  <dd>
+                    {{ derivedFromText || "—" }}
+                    <el-tag size="small" type="info" class="tag">按箱归属 · 只读</el-tag>
+                  </dd>
+                  <dt>方向</dt>
+                  <dd>
+                    <el-tag
+                      v-if="trip"
+                      size="small"
+                      :type="trip === '双向' ? 'warning' : 'success'"
+                      class="tag"
+                    >
+                      {{ trip }}
+                    </el-tag>
+                    {{ tripText || "选箱后按归属派生" }}
+                  </dd>
+                  <dt>采样单位</dt>
                   <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
                   <dt>寄出人</dt>
                   <dd>
@@ -298,6 +350,8 @@
                   <dd>{{ form.people || "—" }}</dd>
                   <dt>开箱录像</dt>
                   <dd>{{ form.recordVideo ? "开启" : "不录" }}</dd>
+                  <dt>开箱上限</dt>
+                  <dd>{{ limitOpens ? `每台最多 ${maxOpens} 次` : "不限" }}</dd>
                 </dl>
               </section>
               <section>
@@ -332,8 +386,6 @@
                       {{ outside.join("、") }} 不在寄出单位及其上下级里
                     </div>
                   </dd>
-                  <dt>开箱上限</dt>
-                  <dd>{{ limitOpens ? `每台最多 ${maxOpens} 次` : "不限" }}</dd>
                 </dl>
               </section>
               <section>
@@ -462,7 +514,7 @@ import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
 import { formatDuration } from "@/utils/duration";
-import { MERGED_FLOW_TEXT } from "./status";
+import { MERGED_FLOW_TEXT, MERGED_TRIP_TEXT } from "./status";
 import { useUserStore } from "@/stores/user";
 import SampleBoxAPI from "@/api/sample/box";
 import PageHeader from "@/components/biz/PageHeader.vue";
@@ -511,8 +563,33 @@ const peoplePick = computed({
       .join("、");
   },
 });
-/** 采样单位＝寄出分公司；录像 gate 公司类型（检测站禁录）。 */
+/** 采样单位＝所选分公司；录像 gate 公司类型（检测站禁录）。 */
 const isCompany = computed(() => orgById(form.fromOrgId)?.type === "公司");
+/** R22：选中箱子的归属集合（未分配算空串）；>1＝混归属，整单拒（方向是单级派生事实）。 */
+const boxOrgIds = computed(() => [
+  ...new Set(chosenBoxes.value.map((box) => String(box.orgId || ""))),
+]);
+/** 箱子共同归属（混归属时为空）；未分配＝""，显示总公司。 */
+const commonBoxOrgId = computed(() => (boxOrgIds.value.length === 1 ? boxOrgIds.value[0] : ""));
+/** 寄出方＝箱子当前归属（只读派生）：双向＝检测站，单向＝分公司/总部。 */
+const derivedFromOrg = computed(() =>
+  commonBoxOrgId.value ? orgById(commonBoxOrgId.value) : null
+);
+const derivedFromText = computed(() => {
+  if (!chosenBoxes.value.length || boxOrgIds.value.length > 1) return "";
+  return derivedFromOrg.value?.path || "总公司（未分配）";
+});
+/**
+ * R22 派生方向（只读，不手选）：箱在检测站且采样单位≠检测站→双向（检测站寄出→分公司采样→寄回），
+ * 否则单向（本地采样后寄检测站）。选了箱子才可派生；混归属/未指定检测站时为空。
+ */
+const trip = computed<"单向" | "双向" | null>(() => {
+  if (!chosenBoxes.value.length || boxOrgIds.value.length > 1 || !station.value) return null;
+  return commonBoxOrgId.value === station.value.id && form.fromOrgId !== station.value.id
+    ? "双向"
+    : "单向";
+});
+const tripText = computed(() => (trip.value ? MERGED_TRIP_TEXT[trip.value] : ""));
 const boxNames = computed(() =>
   form.boxIds
     .map((id) => {
@@ -575,13 +652,16 @@ const editOpen = ref(false),
 const arriveRadius = ref(2000);
 const limitOpens = ref(false),
   maxOpens = ref(0);
+// 任务级流程守卫（与寄送方向无关），控件在「采样安排」步的流程守卫分组；
 // 采样一般开一次装样、一次封箱，打开限制时默认 2 次
 watch(limitOpens, (on) => {
   if (on) maxOpens.value = 2;
 });
 const orgs = ref<TaskOrg[]>([]),
   fromUsers = ref<Person[]>([]),
-  toUsers = ref<Person[]>([]);
+  toUsers = ref<Person[]>([]),
+  /** R22：寄出人候选＝寄出方（箱归属）的人员；双向时是检测站的人。 */
+  senderUsers = ref<Person[]>([]);
 /** 唯一检测站（taskOptions 回生效值）：接收方固定为它，只读展示。 */
 const station = ref<TaskStation | null>(null);
 /** 采样单位候选＝公司类型（分公司自采），排除检测站。 */
@@ -633,6 +713,7 @@ const summaryItems = computed<InfoItem[]>(() => [
     label: "采样箱",
     value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
   },
+  { label: "方向", value: trip.value ? `${trip.value}（按箱归属派生）` : "选箱后派生" },
   {
     label: "采样单位",
     value: [orgById(form.fromOrgId)?.name, form.sender].filter(Boolean).join(" · ") || "—",
@@ -659,6 +740,8 @@ function checkStep(key: StepKey) {
   if (key === "to" && !station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
   if (key === "to" && !form.signer) errors.signer = "请选择或填写签收人";
   if (key === "boxes" && !form.boxIds.length) errors.boxIds = "请至少绑定一台采样箱";
+  if (key === "boxes" && boxOrgIds.value.length > 1)
+    errors.boxIds = "同一任务单的箱子须同归属，请按归属拆分任务单";
   return !Object.keys(errors).length;
 }
 function next() {
@@ -718,21 +801,19 @@ function personModel(
     },
   });
 }
-const senderPick = personModel("sender", "senderId", fromUsers);
+const senderPick = personModel("sender", "senderId", senderUsers);
 const signerPick = personModel("signer", "signerId", toUsers);
 
 async function loadUsers(orgId: string, target: Ref<Person[]>) {
   target.value = orgId ? (await API.taskOptions(orgId)).users : [];
 }
-// 寄出人默认是自己（自己在寄出单位里时）；授权人员同单位
+// 采样单位（授权人员）候选＋公司任务期间默认策略随采样单位；寄出人候选另按寄出方（箱归属）取
 watch(
   () => form.fromOrgId,
   async (id) => {
-    form.sender = "";
-    form.senderId = "";
     const opts = id ? await API.taskOptions(id) : null;
     fromUsers.value = opts?.users ?? [];
-    // R13 拍板①：「本任务统一」初始值随寄出公司的任务期间默认策略（公司未设回落系统默认）；
+    // R13 拍板①：「本任务统一」初始值随采样公司的任务期间默认策略（公司未设回落系统默认）；
     // 用户已勾「单独设置」时不动其表单。提交未勾时服务端再以公司策略兜底入快照。
     if (opts) {
       defaultPolicy.value = opts.companyTaskPolicy
@@ -743,8 +824,17 @@ watch(
           };
       if (!custom.value) policy.value = { ...defaultPolicy.value };
     }
-    const me = fromUsers.value.find((u) => u.id === String(user.userInfo.userId || ""));
-    if (me && !form.sender) Object.assign(form, { sender: me.name, senderId: me.id });
+  }
+);
+// R22：寄出人默认是自己（自己在寄出方单位里时）；换了箱归属就重取寄出方人员
+watch(
+  () => derivedFromOrg.value?.id || "",
+  async (id) => {
+    form.sender = "";
+    form.senderId = "";
+    senderUsers.value = id ? (await API.taskOptions(id)).users : [];
+    const me = senderUsers.value.find((u) => u.id === String(user.userInfo.userId || ""));
+    if (me) Object.assign(form, { sender: me.name, senderId: me.id });
   }
 );
 // 签收人默认是检测站的负责人
@@ -764,12 +854,11 @@ watch(
 );
 
 /**
- * 绑定的箱子里，单位既不是寄出单位的下级、也不是它的上级的。
- * 箱子挂在上级（比如挂在总公司、从总公司下的部门寄出）算正常；还没分配单位的箱子不提示。
+ * 绑定的箱子里，单位既不是寄出方的下级、也不是它的上级的。
+ * R22 同归属校验后通常为空；保留兜底提示。还没分配单位的箱子不提示。
  */
 const outside = computed(() => {
-  if (!form.fromOrgId) return [];
-  const root = orgById(form.fromOrgId);
+  const root = derivedFromOrg.value;
   if (!root) return [];
   return (
     chosenBoxes.value

@@ -47,6 +47,21 @@ export async function companyContext(db) {
   return { rows, tool, stationIds, hq: tool.hq };
 }
 
+/** 箱子最近一张寄检测站任务的寄出公司（R22：双向派生单 fromOrg＝检测站，改取采样单位 body.orgId）。 */
+function senderOrgOfTaskRow(fromOrg, bodyText) {
+  let from = String(fromOrg ?? "");
+  if (bodyText) {
+    try {
+      const body = JSON.parse(bodyText);
+      if (body?.tripDerived === true && body.trip === "双向" && body.orgId)
+        from = String(body.orgId);
+    } catch {
+      /* body 损坏按 from_org_id 列 */
+    }
+  }
+  return from;
+}
+
 /** 箱子生效公司 id：检测站子树内的箱子按最近寄出任务的 fromOrg 快照，其余按 companyOf(org_id)。 */
 export async function companyOrgForBox(db, box, ctx = null) {
   const c = ctx || (await companyContext(db));
@@ -55,13 +70,13 @@ export async function companyOrgForBox(db, box, ctx = null) {
   if (c.stationIds.size && boxId && c.stationIds.has(orgId)) {
     const ids = [...c.stationIds];
     const link = await db.get(
-      `SELECT t.from_org_id FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id
+      `SELECT t.from_org_id, t.body FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id
        WHERE m.box_id=? AND t.from_org_id IS NOT NULL AND t.from_org_id <> ''
          AND t.to_org_id IN (${ids.map(() => "?").join(",")})
        ORDER BY t.created_at DESC LIMIT 1`,
       [boxId, ...ids]
     );
-    const from = String(link?.from_org_id ?? "");
+    const from = senderOrgOfTaskRow(link?.from_org_id, link?.body);
     if (from) return c.tool.companyOf(from);
   }
   return c.tool.companyOf(orgId);
@@ -84,20 +99,36 @@ export async function companyTaskFor(db, orgId, ctx = null) {
   return row?.task_json ? JSON.parse(row.task_json) : null;
 }
 
-/** 检测站子树内箱子 → 寄出公司 id（一次查询取每台最近一张寄检测站任务的 fromOrg）。 */
+/**
+ * 任务的公司策略/判定阈值归属（R22）：派生方向合并单按采样单位 orgId——
+ * 双向 fromOrg＝检测站（无公司层），采样分公司才是 R13④「检测站期间按寄出公司」的等价主体；
+ * 单向 orgId 通常＝fromOrg。旧单（无 tripDerived 标记）沿用 fromOrgId→orgId 口径。
+ */
+export function companyOrgOfTask(task) {
+  return task?.tripDerived === true
+    ? String(task.orgId || task.fromOrgId || "")
+    : String(task?.fromOrgId || task?.orgId || "");
+}
+
+/** 检测站子树内箱子 → 寄出公司 id（一次查询取每台最近一张寄检测站任务的 fromOrg；R22 双向取采样单位）。 */
 async function stationSenderMap(db, ctx) {
   if (!ctx.stationIds.size) return new Map();
   const ids = [...ctx.stationIds];
   const marks = ids.map(() => "?").join(",");
-  const rows = await db.all(
-    `SELECT b.id, (SELECT t.from_org_id FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id
+  const latest = `FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id
         WHERE m.box_id=b.id AND t.from_org_id IS NOT NULL AND t.from_org_id <> ''
-          AND t.to_org_id IN (${marks}) ORDER BY t.created_at DESC LIMIT 1) AS from_org
+          AND t.to_org_id IN (${marks}) ORDER BY t.created_at DESC LIMIT 1`;
+  const rows = await db.all(
+    `SELECT b.id, (SELECT t.from_org_id ${latest}) AS from_org,
+            (SELECT t.body ${latest}) AS task_body
      FROM sample_box b WHERE b.org_id IN (${marks})`,
-    [...ids, ...ids]
+    [...ids, ...ids, ...ids]
   );
   return new Map(
-    rows.map((row) => [String(row.id), ctx.tool.companyOf(String(row.from_org ?? ""))])
+    rows.map((row) => [
+      String(row.id),
+      ctx.tool.companyOf(senderOrgOfTaskRow(row.from_org, row.task_body)),
+    ])
   );
 }
 

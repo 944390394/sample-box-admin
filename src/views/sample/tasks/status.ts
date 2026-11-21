@@ -16,7 +16,7 @@ import {
 export function taskStatusType(status: string) {
   if (ENDED_OK.includes(status)) return "success";
   if (ENDED_VOID.includes(status)) return "info";
-  if (["待签收", "待核验", "待检测", "退回中"].includes(status)) return "warning";
+  if (["待寄出", "待签收", "待核验", "待检测", "退回中"].includes(status)) return "warning";
   return "primary";
 }
 
@@ -43,15 +43,24 @@ export function endedTone(status?: string) {
   return ENDED_OK.includes(String(status || "")) ? "done" : "error";
 }
 
-/** 旧采样单的寄送方式（组织简化后作废），仅历史单详情说明用；新建合并单不写 trip。 */
+/** 旧采样单的手选寄送方式（组织简化后不再手选），仅历史单详情说明用。 */
 export const TRIP_TEXT: Record<string, string> = {
   单向: "寄出单位把箱子寄到采样单位，采样封箱后任务完成，箱子留在采样单位。",
   双向: "寄出单位把箱子寄到采样单位，采样封箱后寄回寄出单位，核验签收后完成。",
 };
 
-/** 合并采样单（P6）主路径说明：分公司自采→封箱→直寄唯一检测站→签收→逐台检测。 */
+/**
+ * 合并采样单（P6）主路径说明：R22 起方向由箱子当前归属派生（只读，不手选）。
+ * 单向＝箱在分公司/总部：本地采样后寄检测站；双向＝箱在检测站：检测站寄出→分公司采样→寄回检测站。
+ */
 export const MERGED_FLOW_TEXT =
-  "分公司自采：待采样 → 采样中 → 已封箱 → 在途 → 待签收 → 待检测 → 已检测。封箱后直寄唯一检测站，签收后逐台扫码开始检测；待检测/已检测可退回原寄出分公司。";
+  "方向按箱子归属自动派生（只读）：箱在分公司＝单向，本地采样封箱后直寄唯一检测站（待采样 → 采样中 → 已封箱 → 在途 → 待签收 → 待检测 → 已检测）；箱在检测站＝双向，检测站先寄箱到采样分公司（待寄出 → 运送中 → 待采样），采样封箱后寄回检测站。签收后逐台扫码开始检测；待检测/已检测可退回寄出方。";
+
+/** 合并采样单派生方向的说明（R22，详情页/建单页共用）。 */
+export const MERGED_TRIP_TEXT: Record<string, string> = {
+  单向: "箱子在采样单位本地：采样封箱后寄唯一检测站，签收后箱子归检测站。",
+  双向: "箱子在检测站：检测站先寄到采样分公司（分公司确认到达后箱子交采样单位），采样封箱后寄回检测站。",
+};
 
 /** 推进按钮上的文字，和服务端流转记录的动作名一致。 */
 export const TASK_ACTIONS: Record<string, string> = {

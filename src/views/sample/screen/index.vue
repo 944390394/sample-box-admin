@@ -139,6 +139,7 @@ import { boxTitle } from "@/utils/boxLabel";
  */
 const rootRef = ref<HTMLElement>();
 const listRef = ref<HTMLUListElement>();
+const route = useRoute();
 const can = usePerm();
 const boxes = ref<SampleBox[]>([]);
 const feed = ref<FeedItem[]>([]);
@@ -324,7 +325,12 @@ function onFullscreenChange() {
 
 let poll = 0;
 onMounted(() => {
-  void load();
+  void load().then(() => {
+    // 上报记录页「地图」深链（/monitor/screen?box=<id>）：首载完成后定位并打开该箱抽屉
+    const id = String(route.query.box || "");
+    const box = boxes.value.find((item) => item.id === id);
+    if (box) focus(box);
+  });
   // 30 秒一轮的后台刷新：不抢骨架屏，失败只标 stale
   poll = window.setInterval(() => void load(true), 30000);
   document.addEventListener("fullscreenchange", onFullscreenChange);

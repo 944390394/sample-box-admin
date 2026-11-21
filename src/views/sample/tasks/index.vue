@@ -2,7 +2,7 @@
   <div class="page-container page-flow">
     <PageHeader
       title="任务单（采样）"
-      subtitle="分公司自采，封箱后直寄唯一检测站，签收后逐台扫码开始检测；待检测/已检测可退回原寄出分公司。批量划拨见「调拨单」。"
+      subtitle="方向按箱子归属派生（只读）：箱在分公司＝单向（本地采样后寄检测站）；箱在检测站＝双向（检测站寄出→分公司采样→寄回检测站）。签收后逐台扫码开始检测；待检测/已检测可退回寄出方。批量划拨见「调拨单」。"
     >
       <template #actions>
         <el-button
@@ -80,6 +80,19 @@
           <template #default="{ row }">
             <div class="name">
               <el-tag size="small" type="success" effect="plain">采样</el-tag>
+              <el-tag
+                v-if="row.trip"
+                size="small"
+                :type="row.trip === '双向' ? 'warning' : 'info'"
+                effect="plain"
+                :title="
+                  row.trip === '双向'
+                    ? '箱在检测站：检测站寄出→分公司采样→寄回检测站'
+                    : '箱在分公司/总部：本地采样后寄检测站'
+                "
+              >
+                {{ row.trip }}
+              </el-tag>
               <b>{{ row.name }}</b>
               <el-tooltip v-if="row.recordVideo" content="分公司采样现场开箱时录像" placement="top">
                 <el-icon class="video"><VideoCamera /></el-icon>
@@ -202,6 +215,8 @@ const filtered = computed(() => Boolean(query.orgId || query.from || query.q || 
 const tabs = computed(() => [
   { key: "mine", label: "待我处理", count: counts.value.mine },
   { key: "进行中", label: "进行中", count: counts.value.进行中 },
+  // R22 双向首腿：待寄出（检测站寄出）；运送中在「进行中」里
+  { key: "待寄出", label: "待寄出", count: counts.value["待寄出"] ?? 0 },
   { key: "待采样", label: "待采样", count: counts.value["待采样"] ?? 0 },
   { key: "采样中", label: "采样中", count: counts.value["采样中"] ?? 0 },
   { key: "已封箱", label: "已封箱", count: counts.value["已封箱"] ?? 0 },

@@ -67,8 +67,10 @@ export interface PolicyTask {
   orgId?: string;
   org?: string;
   placeAt?: Place | null;
-  /** 旧采样单的寄送方式（组织简化后作废）：只读兼容历史单，新建不写。 */
+  /** R22 派生寄送方向（只读）：箱在检测站＝双向，否则单向；旧单为手选值/读时回算。 */
   trip?: "单向" | "双向";
+  /** R22 派生方向标记：true＝合并单（ trip 由箱归属派生）；旧 trip 单无此标记。 */
+  tripDerived?: boolean;
   /** 这张单的流程步骤，服务端按类型和寄送方式给出。 */
   steps?: string[];
   /** 任务期间每台箱子最多开几次箱，不设为不限。 */

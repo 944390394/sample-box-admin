@@ -1,5 +1,5 @@
 import { BOX } from "../auth/boxAccess.js";
-import { companyJudgmentFor, withCompanyBattery } from "./companyPolicy.js";
+import { companyJudgmentFor, companyOrgOfTask, withCompanyBattery } from "./companyPolicy.js";
 import { boxDistances, openCounts, sealOpenCounts, targetOf, taskRadiusOf } from "./taskPlaces.js";
 
 /**
@@ -19,9 +19,9 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
   const target = targetOf(task, at);
   const counts = await openCounts(db, taskId);
   const afterSeal = await sealOpenCounts(db, taskId);
-  // R13：到达半径与电量预留按寄出分公司公司层（检测站签收判定同口径，拍板④）
+  // R13：到达半径与电量预留按寄出分公司公司层（检测站签收判定同口径，拍板④）；R22 派生单按采样单位
   const radius = await taskRadiusOf(db, task, target);
-  const { batteryReserve } = await companyJudgmentFor(db, task?.fromOrgId || task?.orgId || "");
+  const { batteryReserve } = await companyJudgmentFor(db, companyOrgOfTask(task));
   const places = await boxDistances(db, ids, target, { withPosition: true, radius });
   const list = [];
   const problems = [];

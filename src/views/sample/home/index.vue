@@ -136,21 +136,17 @@
                 </li>
               </ul>
             </div>
-          </section>
-
-          <section v-if="quickLinks.length" class="block">
-            <div class="quick-bar">
-              <span class="quick-bar__title">快捷入口</span>
-              <el-button
-                v-for="link in quickLinks"
+            <div v-if="footerLinks.length" class="todo-footer">
+              <button
+                v-for="link in footerLinks"
                 :key="link.key"
-                :type="link.primary ? 'primary' : 'default'"
-                plain
-                :icon="link.icon"
+                type="button"
+                class="todo-footer__link"
                 @click="router.push(link.to)"
               >
+                <el-icon :size="14"><component :is="link.icon" /></el-icon>
                 {{ link.label }}
-              </el-button>
+              </button>
             </div>
           </section>
 
@@ -315,8 +311,8 @@ import TodoCard from "./TodoCard.vue";
  * 工作台：一页看「要我处理什么」。
  * 每张卡片单独授权（角色页「工作台」模块），勾了且有看里面内容的权限才显示；
  * 有数量的卡片在前，零组折成一枚 chip（点开看明细），全零时给引导空态。30 秒刷新一次。
- * 呈现约定（数据口径不变）：KPI 零值降权、整卡可点跳筛选列表；待办下是快捷入口横条；
- * 最近动态限高内滚、按日分组、默认 20 条＋加载更多。
+ * 呈现约定（数据口径不变）：KPI 零值降权、整卡可点跳筛选列表；待办区块底部是一行 ghost
+ * 快捷链接 footer（与区块同体，不再独立横条）；最近动态限高内滚、按日分组、默认 20 条＋加载更多。
  */
 const router = useRouter();
 const can = usePerm();
@@ -581,28 +577,20 @@ const showField = computed(() => {
 });
 
 /**
- * 快捷入口横条：填补待办区下方的空白。
- * 今日寄出/签收/开箱/退回没有可靠的现有数据源（workbench 无今日计数；feed 截断且折叠事件
- * 无法按日拆分；overview 只有检测站 todayOpened），按规格回退为入口按钮，不新增后端接口。
+ * 快捷入口：待我处理区块底部的 footer 链接（今日寄出/签收/开箱/退回没有可靠的现有数据源，
+ * workbench 无今日计数、feed 截断且折叠事件无法按日拆分，按规格回退为入口，不新增后端接口）。
  * gating 与页头/侧栏菜单一致：上报记录页按「采样箱列表」权限（server/menus.js）。
  */
 interface QuickLink {
   key: string;
   label: string;
   icon: Component;
-  primary?: boolean;
   to: string;
 }
 const quickLinks = computed<QuickLink[]>(() => {
   const links: QuickLink[] = [];
   if (TASK_CREATE.some((perm) => can(perm)))
-    links.push({
-      key: "create",
-      label: "创建任务单",
-      icon: Plus,
-      primary: true,
-      to: "/task/create",
-    });
+    links.push({ key: "create", label: "创建任务单", icon: Plus, to: "/task/create" });
   if (enableTransferInspect.value && can(TRANSFER_CREATE))
     links.push({ key: "transfer", label: "批量划拨", icon: Switch, to: "/sample/transfers" });
   if (can(BOX_PERM.list)) {
@@ -611,6 +599,12 @@ const quickLinks = computed<QuickLink[]>(() => {
   }
   return links;
 });
+/** footer 实显链接：全零空态的引导卡已有「创建任务单」按钮（同 gating），footer 去掉创建项避免重复。 */
+const footerLinks = computed(() =>
+  activeCards.value.length
+    ? quickLinks.value
+    : quickLinks.value.filter((link) => link.key !== "create")
+);
 
 /** 最近动态：全量按时间倒序；默认渲染 20 条，「加载更多」每次 +20。 */
 const feedAll = computed<FeedItem[]>(() =>
@@ -803,22 +797,31 @@ onBeforeUnmount(() => window.clearInterval(poll));
   font-variant-numeric: tabular-nums;
   color: var(--el-text-color-placeholder);
 }
-/* 快捷入口横条 */
-.quick-bar {
+/* 待办区块 footer：分隔线+内 padding 与区块同体，ghost 链接无外框 */
+.todo-footer {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 4px 18px;
   align-items: center;
-  padding: 10px 14px;
-  background: var(--el-fill-color-lighter);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  padding-top: 10px;
+  margin-top: 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
-.quick-bar__title {
-  margin-right: 4px;
-  font-size: 13px;
-  font-weight: 600;
+.todo-footer__link {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 12px;
   color: var(--el-text-color-secondary);
+  cursor: pointer;
+  background: none;
+  border: none;
+  transition: color 0.15s;
+}
+.todo-footer__link:hover {
+  color: var(--el-color-primary);
 }
 /* 最近动态：限高内滚 + 按日 sticky 小标题 */
 .feed-card {

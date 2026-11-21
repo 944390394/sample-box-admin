@@ -28,6 +28,9 @@ import {
 } from "echarts/components";
 // 引入 Canvas 渲染器，注意引入 CanvasRenderer 或者 SVGRenderer 是必须的一步
 import { CanvasRenderer } from "echarts/renderers";
+// UniversalTransition：series 配 universalTransition:true 时的 morph 过渡（电量图范围切换）。
+// 不注册的话该配置会被悄悄忽略（同 MarkArea 先例）；按 series 显式开启，未开启的图表零影响。
+import { UniversalTransition } from "echarts/features";
 
 import { useResizeObserver } from "@vueuse/core";
 
@@ -41,6 +44,7 @@ echarts.use([
   TooltipComponent,
   MarkAreaComponent,
   LegendComponent,
+  UniversalTransition,
 ]);
 
 const props = defineProps<{
@@ -75,12 +79,14 @@ useResizeObserver(chartRef, () => {
   chartInstance?.resize();
 });
 
-// 浅 watch：options 整包替换时增量更新，不 deep 遍历大对象、不重建实例
+// 浅 watch：options 整包替换时增量更新（notMerge:false），不 deep 遍历大对象、不重建实例；
+// 配合 series universalTransition＋animationDurationUpdate 让数据切换走 morph 过渡
 watch(
   () => props.options,
   (newOptions) => {
     if (chartInstance && newOptions) {
       chartInstance.setOption(newOptions, {
+        notMerge: false,
         lazyUpdate: true,
         replaceMerge: props.replaceMerge,
       });

@@ -2,6 +2,7 @@ import { filterEvents, limits } from "./SampleController.js";
 import { BOX, canSee, flagAllowed, historicalScopeSql, scopeSql } from "../auth/boxAccess.js";
 import {
   POLICY_PERMS as P,
+  rootOrgId,
   supportsDispatch,
   validatePolicy,
   transferBlock,
@@ -10,6 +11,7 @@ import {
   companyBoxIds,
   companyJudgmentFor,
   companyLimits,
+  companyOrgOfTask,
   companyTaskFor,
   boxReserve,
   readCompanyPolicy,
@@ -79,6 +81,7 @@ import {
 } from "../settings/taskPlaces.js";
 
 import {
+  deriveTrip,
   ENDED,
   ENDED_SQL,
   isLegacySample,
@@ -434,23 +437,43 @@ export class ReportPolicyController {
       String(input.toOrgId) !== String(station.id)
     )
       throw badRequest("任务单接收方固定为唯一检测站，不能寄给总部或其他分公司");
-    // 采样单位＝寄出分公司：必须 type=公司 且不是检测站（分公司自采，录音②③）
-    const from = deptOf(input.fromOrgId);
-    if (!from) throw badRequest("请选择寄出分公司（采样单位）");
-    if (String(from.id) === String(station.id)) throw badRequest("采样单位不能是检测站");
-    if (from.type !== "公司") throw badRequest("采样单位必须是分公司（公司类型）");
-    if (!inScope(ctx, from.id) && !isSystemAdmin(ctx))
-      throw badRequest("寄出单位不在你的管理范围内");
+    // R22：采样单位可选分公司（orgId；旧客户端把采样单位写在 fromOrgId，兼容取它）。
+    // 旧双向客户端形状（带 trip＋orgId=检测站）：合并流采样单位不能是检测站，回落 fromOrgId；
+    // 新客户端显式 orgId=检测站（不带 trip）仍拒绝。
+    // 寄出方 fromOrg＝箱当前归属（只读派生，客户端值不作数）：箱在检测站→双向（检测站寄出），否则单向。
+    let samplerId = String(input.orgId ?? "") || String(input.fromOrgId ?? "");
+    if (samplerId === String(station.id) && input.trip && input.fromOrgId)
+      samplerId = String(input.fromOrgId);
+    const sampler = deptOf(samplerId);
+    if (!sampler) throw badRequest("请选择采样单位（分公司）");
+    if (String(sampler.id) === String(station.id)) throw badRequest("采样单位不能是检测站");
+    if (sampler.type !== "公司") throw badRequest("采样单位必须是分公司（公司类型）");
+    // 箱归属归一：未分配（org_id 空）＝总公司根；同一任务单的箱子须同归属（混归属方向歧义，整单拒）
+    const rootId = rootOrgId(depts);
+    const boxOrgs = [...new Set(boxes.map((b) => String(b.org_id ?? "") || rootId))];
+    if (boxOrgs.length > 1)
+      throw badRequest("同一任务单的箱子须同归属，请按归属拆分任务单（跨公司批量请用划拨）");
+    const from = deptOf(boxOrgs[0]);
+    if (!from) throw badRequest("箱子归属单位不存在，请刷新后重试");
+    if (Number(from.status) !== 1) throw badRequest("箱子归属单位已停用，请先调整箱子归属");
+    if (from.type !== "公司" && from.type !== "检测站")
+      throw badRequest("箱子归属单位类型不支持建单，请先调整箱子归属");
+    const trip = deriveTrip(String(from.id), String(station.id), String(sampler.id));
+    if (!inScope(ctx, sampler.id) && !inScope(ctx, from.id) && !isSystemAdmin(ctx))
+      throw badRequest("采样单位或寄出方不在你的管理范围内");
     Object.assign(metadata, {
       fromOrgId: String(from.id),
       fromOrg: from.name,
       toOrgId: String(station.id),
       toOrg: station.name,
-      // 采样单位就是寄出分公司本身；#cameras/录像取这个单位的通道
-      orgId: String(from.id),
-      org: from.name,
+      // 采样单位（双向＝借箱采样的分公司；单向通常＝寄出分公司）；#cameras/录像取这个单位的通道
+      orgId: String(sampler.id),
+      org: sampler.name,
       // 合并单恒送检测站：签收→待检测→已检测
       inspect: true,
+      // R22 派生方向（只读）：双向首步待寄出（检测站→分公司），单向首步待采样
+      trip,
+      tripDerived: true,
     });
     metadata.fromPlace = readPlace(input.fromPlace);
     metadata.toPlace = readPlace(input.toPlace);
@@ -478,9 +501,9 @@ export class ReportPolicyController {
       metadata[idKey] = String(user.id);
       metadata[nameKey] = user.nickname;
     }
-    // 开箱录像只给分公司（公司类型）采样现场；检测站恒禁（录音⑥）。trip 作废，新建忽略。
+    // 开箱录像只给分公司（公司类型）采样现场；检测站恒禁（录音⑥）。R22：gate 按采样单位（双向寄出方是检测站，采样仍在分公司）。
     if (input.recordVideo) {
-      if (from.type !== "公司" || String(from.id) === String(station.id))
+      if (sampler.type !== "公司" || String(sampler.id) === String(station.id))
         throw badRequest("只有分公司（公司类型）采样时才能要求开箱录像，检测站不设录像");
       metadata.recordVideo = true;
     }
@@ -492,8 +515,8 @@ export class ReportPolicyController {
         throw badRequest("开箱次数上限要在 0 到 999 之间");
       metadata.maxOpens = max;
     }
-    if (!metadata.fromOrg || !metadata.toOrg || metadata.fromOrg === metadata.toOrg)
-      throw badRequest("请填写不同的寄出分公司与检测站");
+    // R22：双向单寄出方＝检测站＝接收方（合法）；采样单位≠检测站已在上面强制
+    if (!metadata.fromOrg || !metadata.toOrg) throw badRequest("请填写寄出方与检测站");
     if (!metadata.sender || !metadata.signer) throw badRequest("请填写寄出人和签收人");
     const id = await this.policies.createTask(
       {
@@ -546,11 +569,26 @@ export class ReportPolicyController {
     };
   }
 
-  #taskView(ctx, row) {
+  async #taskView(ctx, row) {
     const body = JSON.parse(row.body);
     if (!ctx.access.perms.has(P.read)) {
       delete body.policy;
       delete body.overrides;
+    }
+    // R22 旧单回算：存量合并单 body 无 trip（059 回填前/无快照漏回填的兜底）→
+    // 按首箱建单快照 org＋生效检测站派生显示方向。只注入视图，不改写 body/箱快照。
+    if (body.kind === "采样" && body.inspect === true && !body.trip && !body.tripDerived) {
+      const link = await this.db.get(
+        "SELECT org_id FROM sample_task_box WHERE task_id=? ORDER BY box_id LIMIT 1",
+        [row.id]
+      );
+      if (link) {
+        const station = await resolveStation(this.db);
+        const depts = await this.db.all("SELECT id, parent_id, sort FROM sys_dept");
+        const orgId = String(link.org_id ?? "") || rootOrgId(depts);
+        body.trip = deriveTrip(orgId, station?.id, body.orgId);
+        body.tripDerived = true;
+      }
     }
     return {
       ...body,
@@ -672,7 +710,7 @@ export class ReportPolicyController {
     const withPosition = ctx.access.perms.has(BOX.location);
     const list = [];
     for (const row of rows) {
-      const task = this.#taskView(ctx, row);
+      const task = await this.#taskView(ctx, row);
       // 正在去某地的任务，算出有几台已到附近
       const target = MOVING.includes(row.status) ? targetOf(task, row.status) : null;
       if (target && withPosition && hasCoords(target)) {
@@ -1140,7 +1178,7 @@ export class ReportPolicyController {
         httpStatus: 404,
         publicCode: "A0404",
       });
-    const task = this.#taskView(ctx, row);
+    const task = await this.#taskView(ctx, row);
     const logs = await this.db.all(
       "SELECT * FROM sample_task_log WHERE task_id=? ORDER BY created_at, id",
       [row.id]
@@ -1206,12 +1244,9 @@ export class ReportPolicyController {
       ).map((r) => [r.box_id, r])
     );
     const boxes = [];
-    // R13：到达半径与电量显示按寄出分公司公司层（箱子在检测站期间同口径，拍板④）
+    // R13：到达半径与电量显示按寄出分公司公司层（箱子在检测站期间同口径，拍板④）；R22 派生单按采样单位
     const radius = await taskRadiusOf(this.db, task, target);
-    const { batteryReserve } = await companyJudgmentFor(
-      this.db,
-      task.fromOrgId || task.orgId || ""
-    );
+    const { batteryReserve } = await companyJudgmentFor(this.db, companyOrgOfTask(task));
     for (const box of await boxDistances(this.db, task.boxIds || [], target, {
       withPosition,
       radius,
@@ -1306,7 +1341,7 @@ export class ReportPolicyController {
     const merged = task.kind === "采样" && !isLegacySample({ ...task, status });
     if (merged) {
       // 合并采样单（P6）：采样段归寄出分公司；签收/拒收/开始检测归检测站；
-      // 退回由检测站发起（待检测/已检测），分公司接收退回。
+      // 退回由检测站发起（待检测/已检测），寄出方接收退回（R22 双向＝检测站自己）。
       const sender = inScope(ctx, task.fromOrgId);
       const receiver = inScope(ctx, task.toOrgId);
       const signer = isSigner(ctx, task);
@@ -1316,6 +1351,11 @@ export class ReportPolicyController {
         next.map((to) => {
           if (to === "已取消") return [to, may(T.cancel, sender)];
           if (to === "待签收") return [to, may(T.arrive, sender || receiver)];
+          // R22 双向首腿：检测站寄出——task:send 或 task:sign 任一（检测站侧 DUTY/VERIFY 持 sign
+          // 的 045 拆分码集、无 send；DISPATCH 持 policyTask→send。双码门避免主责角色被挡，057 教训）。
+          if (to === "运送中") return [to, may(T.send, sender) || may(T.sign, sender)];
+          // 分公司确认到达（＝首腿签收）：归属随交接检测站→采样单位
+          if (to === "待采样") return [to, may(T.arrive, sampler)];
           if (STEP[to]) return [to, may(STEP[to], sampler || sender)];
           if (to === signTo) return [to, may(T.sign, task.signerId ? signer : receiver)];
           if (to === "已拒收") return [to, may(T.reject, signer || receiver)];
@@ -1788,6 +1828,9 @@ export class ReportPolicyController {
     );
     const transfer = task.kind === "调拨" && task.toOrgId;
     const merged = task.kind === "采样" && !isLegacySample({ ...task, status: row.status });
+    // R22 双向首腿：分公司确认到达（运送中→待采样），归属检测站→采样单位（同事务交接）
+    const outbound =
+      merged && task.trip === "双向" && row.status === "运送中" && status === "待采样";
     // 签收、强制签收、拒收：先做签收核验，有问题时不能直接签收
     const receiving = [signTo, FORCE_SIGN, "已拒收", "退回中"].includes(asked);
     const check = receiving
@@ -1879,6 +1922,7 @@ export class ReportPolicyController {
       action: force ? FORCE_SIGN : undefined,
       handOver: (transfer || merged) && status === signTo ? { signerFit } : null,
       returnHandOver: merged && status === "已退回" ? true : null,
+      outboundHandOver: outbound ? true : null,
     });
     const handOver = result.handOver;
     // 旧字段兼容：handOverSkipped 仍是 [{id, reason}]；新字段 handOver 给全量 moved/skipped
@@ -1992,9 +2036,10 @@ function actionable(can) {
 }
 
 /** 任务要记进出的地点：调拨/合并单看寄出、收货地址，采样看计划地点（旧双向单再加寄出地址）。没坐标的跳过。
- * R13：地点没显式半径时用寄出分公司的公司级到达半径（公司未覆盖＝系统默认）。 */
+ * R13：地点没显式半径时用寄出分公司的公司级到达半径（公司未覆盖＝系统默认）。
+ * R22：合并单判别走 isLegacySample（新合并单带派生 trip，不能再按「无 trip」认）。 */
 async function taskPlaces(task, db) {
-  const merged = task.kind === "采样" && !["单向", "双向"].includes(task.trip);
+  const merged = task.kind === "采样" && !isLegacySample(task);
   const companyRadius = await taskRadiusOf(db, task, null);
   return (
     task.kind === "调拨"

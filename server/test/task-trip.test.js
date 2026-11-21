@@ -21,7 +21,7 @@ async function call(fn, ctx) {
   return out;
 }
 
-test("流程：trip 作废——合并采样单按新流，旧 trip 单只读渲染（读兼容）", () => {
+test("流程：R22 派生 trip——合并采样单按新流（双向带首腿），旧 trip 单只读渲染（读兼容）", () => {
   // 新建合并流（不带 trip；body 恒 inspect=true，M2 判别按 inspect）
   assert.deepEqual(stepsOf({ kind: "采样", inspect: true }), [
     "待采样",
@@ -69,7 +69,7 @@ test("流程：trip 作废——合并采样单按新流，旧 trip 单只读渲
   assert.deepEqual(nextOf({ kind: "调拨" }, "待签收"), ["已签收", "已拒收", "退回中", "已取消"]);
 });
 
-test("合并单：建单忽略 trip（即使旧客户端传双向），接收方固定检测站、采样单位＝寄出分公司", async () => {
+test("合并单：建单 trip 按箱归属派生（旧客户端传双向不作数），接收方固定检测站、采样单位＝寄出分公司", async () => {
   applyBoxSettings({
     box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
   });
@@ -132,7 +132,8 @@ test("合并单：建单忽略 trip（即使旧客户端传双向），接收方
       user: { id: "1", nickname: "管理员" },
       access: { roles: ["ADMIN"], perms, scope: { all: true, orgIds: [], ownerIds: [] } },
     };
-    // 旧客户端仍传 trip=双向 + orgId：服务端忽略 trip，采样单位取寄出分公司，接收方固定检测站
+    // 旧客户端仍传 trip=双向 + orgId=检测站：R22 服务端忽略客户端 trip（按箱归属派生），
+    // orgId=station 回落 fromOrgId（采样单位不能是检测站），接收方固定检测站
     const { id } = await call(c.createTask.bind(c), {
       ...admin,
       body: {
@@ -148,8 +149,9 @@ test("合并单：建单忽略 trip（即使旧客户端传双向），接收方
       },
     });
     const detail = await call(c.taskDetail.bind(c), { ...admin, params: { id } });
-    assert.equal(detail.task.status, "待采样", "trip 被忽略，不从待寄出起步");
-    assert.equal(detail.task.trip, undefined);
+    assert.equal(detail.task.status, "待采样", "箱在分公司→单向，不从待寄出起步");
+    assert.equal(detail.task.trip, "单向", "R22：客户端 trip 不作数，按箱归属派生");
+    assert.equal(detail.task.tripDerived, true);
     assert.equal(detail.task.orgId, "2", "采样单位＝寄出分公司，不是旧 orgId");
     assert.equal(detail.task.toOrgId, "6", "接收方固定检测站");
     assert.equal(detail.task.inspect, true);

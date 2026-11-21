@@ -36,11 +36,25 @@ export interface UplinkQuery {
   cursorTime?: string;
   cursorId?: string;
   kind?: string;
+  /** 页码跳转（1 起）：无游标时服务端按 OFFSET 定位；带游标时游标优先。 */
+  page?: number;
+  /** "1"＝仅看异常（低电压或超限开箱，服务端按现有判定口径过滤）。 */
+  anomaly?: string;
 }
 
 export interface UplinkPage {
   list: BoxLogItem[];
   nextCursor: { time: string; id: string } | null;
+}
+
+/** 上报记录页概览：当前筛选范围一次聚合（与翻页游标无关）。电压单位 mV。 */
+export interface UplinkSummary {
+  total: number;
+  kinds: Record<string, number>;
+  minMv: number | null;
+  maxMv: number | null;
+  latest: string;
+  window: { from: string; to: string };
 }
 
 export interface PlaceHit {
@@ -204,7 +218,7 @@ const SampleBoxAPI = {
       params: wipe ? { wipe } : undefined,
     });
   },
-  exportLogs(id: string, params: { from?: string; to?: string; kind?: string }) {
+  exportLogs(id: string, params: { from?: string; to?: string; kind?: string; anomaly?: string }) {
     return request<unknown, { data: Blob; headers: Record<string, string> }>({
       url: `/api/v1/sample/boxes/${encodeURIComponent(id)}/export-logs`,
       method: "get",
@@ -278,6 +292,16 @@ const SampleBoxAPI = {
       url: `/api/v1/sample/boxes/${id}/logs`,
       method: "get",
       params,
+    });
+  },
+  /** 上报记录页概览条：总数/类型计数/电压 min–max/最近上报，权限与 logs 同口径。
+   * silent：旧服务端没有该端点时页面自行降级（概览「—」＋上一页/下一页），不弹错误提示。 */
+  uplinkSummary(id: string, params?: UplinkQuery) {
+    return request<unknown, UplinkSummary>({
+      url: `/api/v1/sample/boxes/${encodeURIComponent(id)}/uplinks/summary`,
+      method: "get",
+      params,
+      silent: true,
     });
   },
   battery(id: string, from: string, to: string) {

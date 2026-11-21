@@ -897,6 +897,12 @@ const routes = [
   },
   {
     method: "GET",
+    path: "/api/v1/sample/boxes/:id/uplinks/summary",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.uplinkSummary(ctx)),
+  },
+  {
+    method: "GET",
     path: "/api/v1/sample/boxes/:id",
     auth: true,
     handler: (ctx) => useSample(ctx, (api) => api.detail(ctx)),

@@ -269,7 +269,10 @@ test("主路径全步：建单固定检测站→采样→封箱→寄出→签�
     assert.equal(body.inspect, true);
     assert.equal(body.orgId, "2", "采样单位＝寄出分公司");
     assert.equal(body.toOrgId, "6");
-    assert.equal(body.trip, undefined, "trip 作废，新建不写");
+    // R22：trip 由箱归属派生（箱在分公司 2 → 单向），tripDerived 标记区分旧 trip 单
+    assert.equal(body.trip, "单向", "R22 派生方向：箱在分公司＝单向");
+    assert.equal(body.tripDerived, true);
+    assert.equal(body.fromOrgId, "2", "寄出方＝箱当前归属");
     let detail = await s.run(s.controller.taskDetail.bind(s.controller), s.admin, {
       params: { id },
     });
