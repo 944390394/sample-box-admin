@@ -6,6 +6,18 @@ import {
   validatePolicy,
   transferBlock,
 } from "../settings/ReportPolicy.js";
+import {
+  companyBoxIds,
+  companyJudgmentFor,
+  companyLimits,
+  companyTaskFor,
+  boxReserve,
+  readCompanyPolicy,
+  saveCompanyPolicy,
+  systemJudgmentDefaults,
+  validateCompanyNumbers,
+  withCompanyBattery,
+} from "../settings/companyPolicy.js";
 import { audit } from "../log/audit.js";
 import {
   currentBoxSettings,
@@ -14,6 +26,7 @@ import {
   transferInspectEnabled,
 } from "../settings/boxConfig.js";
 import { effectiveDeptLocation, hasCoords, readPlace } from "../geo/place.js";
+import { companyTool } from "../settings/boxCompany.js";
 import { taskTrack, taskWindow } from "../settings/taskTrack.js";
 import { maskBox, maskImei, maskUplink, identityGranted, boxNameCell } from "../auth/boxAccess.js";
 import { readCameras } from "../settings/deptCameras.js";
@@ -60,9 +73,9 @@ import {
   distanceSnapshot,
   openCounts,
   overOpenLimit,
-  radiusOf,
   sealOpenCounts,
   targetOf,
+  taskRadiusOf,
 } from "../settings/taskPlaces.js";
 
 import {
@@ -201,12 +214,13 @@ export class ReportPolicyController {
         throw badRequest("筛选条件不正确");
       const rows = [];
       // 只分页读取当前状态表，冻结本次目标，提交时不会扩大到新匹配的箱子。
+      const lim = await companyLimits(this.db, limits());
       for (let page = 1; page <= 101; page++) {
         const result = await this.boxes.page({
           ...filter,
           page,
           pageSize: 100,
-          limits: limits(),
+          limits: lim,
           scope: ctx.access.scope,
           matchImei: identityGranted(ctx.access.perms),
         });
@@ -247,6 +261,109 @@ export class ReportPolicyController {
         .join(",")
     );
     ctx.ok({ saved: boxes.length });
+  }
+
+  /**
+   * R13 公司策略中心的目标公司校验（GET/PUT 共用）：
+   * 存在＋启用＋type=公司（检测站拒绝，沿划拨 P8 文案口径）；
+   * 读闸门＝policyRead＋view 口径（orgIds，含祖先）；写闸门＝policyCompany＋manage 口径
+   * （manageOrgIds 不含祖先——分公司管理员天然只能改本公司，总部管理员 all 可改各分公司）。
+   */
+  async #companyTarget(ctx, { write = false } = {}) {
+    const orgId = String(ctx.params.id ?? "").slice(0, 32);
+    if (!orgId) throw badRequest("请选择公司");
+    this.require(ctx, write ? P.company : P.read);
+    const dept = await this.db.get("SELECT id, name, type, status FROM sys_dept WHERE id=?", [
+      orgId,
+    ]);
+    if (!dept || Number(dept.status) !== 1) throw badRequest("公司不存在或已停用");
+    if (dept.type !== "公司")
+      throw badRequest(
+        dept.type === "检测站"
+          ? "检测站不参与公司策略，请改选分公司或总部"
+          : "公司策略目标必须是公司类型（分公司或总部）"
+      );
+    // 公司层按顶级公司解析（companyOf）：下级部门即使 type=公司 也不收策略，
+    // 避免存一份永远读不到的死配置（如分公司下的调度室）。
+    const depts = await this.db.all("SELECT id, parent_id, sort, name FROM sys_dept");
+    if (companyTool(depts).companyOf(orgId) !== orgId)
+      throw badRequest("公司策略按顶级公司（分公司或总部）设置，请选择公司本身，不要选下级部门");
+    const scope = ctx.access?.scope;
+    if (write) {
+      if (scope && !scope.all && !(scope.manageOrgIds ?? []).includes(orgId))
+        throw noPermission("只能修改本公司的默认策略");
+    } else if (scope && !scope.all && !scope.orgIds.includes(orgId)) {
+      throw notVisible("公司不存在或不在你的管理范围内");
+    }
+    return dept;
+  }
+
+  /** GET /api/v1/depts/:id/policy：公司策略读模型＋系统默认（继承态灰字）＋可写标识＋影响台数。 */
+  async companyPolicyRead(ctx) {
+    const dept = await this.#companyTarget(ctx);
+    const policy = await readCompanyPolicy(this.db, dept.id);
+    const scope = ctx.access?.scope;
+    const canWrite =
+      Boolean(ctx.access?.perms?.has(P.company)) &&
+      (!scope || scope.all || (scope.manageOrgIds ?? []).includes(String(dept.id)));
+    const boxCount = (await companyBoxIds(this.db, String(dept.id))).length;
+    ctx.ok({
+      orgId: String(dept.id),
+      orgName: dept.name,
+      ...policy,
+      system: systemJudgmentDefaults(),
+      can: { write: canWrite },
+      boxCount,
+    });
+  }
+
+  /**
+   * PUT /api/v1/depts/:id/policy：保存公司策略（idle/task 完整策略或 null＝整层继承；
+   * 判定阈值三列 null＝继承系统默认）。事务内保存＋refresh 该公司全部箱子（含检测站里
+   * 由该公司寄出的箱子），提交后沿既有 policy 下发＋ACK 通道推送（不新建命令队列）。
+   * 审计（PM 裁决）：orgId 记目标公司，detail={before,after,affectedBoxCount}；先写库后审计。
+   */
+  async companyPolicySave(ctx) {
+    const dept = await this.#companyTarget(ctx, { write: true });
+    const body = ctx.body || {};
+    const idle = body.idle == null ? null : validatePolicy(body.idle);
+    const task = body.task == null ? null : validatePolicy(body.task);
+    const numbers = validateCompanyNumbers(body);
+    const before = await readCompanyPolicy(this.db, dept.id);
+    const after = { idle, task, ...numbers };
+    const ids = await companyBoxIds(this.db, String(dept.id));
+    let meta;
+    await this.db.transaction(async (tx) => {
+      meta = await saveCompanyPolicy(tx, dept.id, after, actorOf(ctx));
+      await this.policies.refresh(ids, tx);
+    });
+    this.policies.onPolicyChanged?.(ids);
+    this.boxes.summaryCache?.clear();
+    await audit(this.db, {
+      orgId: String(dept.id),
+      orgName: dept.name,
+      actorId: String(ctx.user.id),
+      actorName: ctx.user.nickname || ctx.user.username,
+      action: "修改公司策略",
+      targetType: "company-policy",
+      targetId: String(dept.id),
+      result: "成功",
+      ip: ctx.ip || "",
+      detail: { before, after, affectedBoxCount: ids.length },
+    });
+    ctx.ok(
+      {
+        orgId: String(dept.id),
+        orgName: dept.name,
+        ...after,
+        ...meta,
+        system: systemJudgmentDefaults(),
+        can: { write: true },
+        boxCount: ids.length,
+        affectedBoxCount: ids.length,
+      },
+      `已保存，${ids.length} 台箱子的策略已触发刷新`
+    );
   }
   async createTask(ctx) {
     const input = ctx.body;
@@ -559,7 +676,9 @@ export class ReportPolicyController {
       // 正在去某地的任务，算出有几台已到附近
       const target = MOVING.includes(row.status) ? targetOf(task, row.status) : null;
       if (target && withPosition && hasCoords(target)) {
-        const boxes = await boxDistances(this.db, task.boxIds || [], target);
+        const boxes = await boxDistances(this.db, task.boxIds || [], target, {
+          radius: await taskRadiusOf(this.db, task, target),
+        });
         task.arrival = {
           role: target.role,
           near: boxes.filter((b) => b.near).length,
@@ -989,15 +1108,22 @@ export class ReportPolicyController {
             : null,
         }
       : null;
+    // R13 拍板①：公司任务期间默认策略随寄出单位下发——建单页「本任务统一」初始值用它
+    //（公司未设＝null，页面回落系统默认）；提交未勾「本任务统一」时服务端再以它兜底入快照。
+    const companyTaskPolicy = orgId ? await companyTaskFor(this.db, orgId) : null;
+    const companyRadius = orgId
+      ? (await companyJudgmentFor(this.db, orgId)).arriveRadiusM
+      : settings.arriveRadiusM;
     ctx.ok({
       orgs,
       users,
       station,
       stationDeptId: stationId || "",
       myOrgId: String(ctx.user?.dept_id || ""),
-      arriveRadiusM: settings.arriveRadiusM,
+      arriveRadiusM: companyRadius,
       defaultReportPeriodSec: settings.reportPeriodSec,
       defaultReportOnlyWhenCharging: settings.reportOnlyWhenCharging,
+      companyTaskPolicy,
     });
   }
 
@@ -1080,8 +1206,20 @@ export class ReportPolicyController {
       ).map((r) => [r.box_id, r])
     );
     const boxes = [];
-    for (const box of await boxDistances(this.db, task.boxIds || [], target, { withPosition })) {
-      const state = box.missing ? null : (await this.boxes.findById(box.id))?.toJSON();
+    // R13：到达半径与电量显示按寄出分公司公司层（箱子在检测站期间同口径，拍板④）
+    const radius = await taskRadiusOf(this.db, task, target);
+    const { batteryReserve } = await companyJudgmentFor(
+      this.db,
+      task.fromOrgId || task.orgId || ""
+    );
+    for (const box of await boxDistances(this.db, task.boxIds || [], target, {
+      withPosition,
+      radius,
+    })) {
+      const boxState = box.missing ? null : await this.boxes.findById(box.id);
+      const state = boxState
+        ? withCompanyBattery(boxState.toJSON(), boxState, batteryReserve)
+        : null;
       boxes.push({
         ...box,
         opensDuring: counts.get(box.id) ?? null,
@@ -1104,7 +1242,9 @@ export class ReportPolicyController {
     // 轨迹和开关箱事件按任务窗口取；没有位置权限只给事件不给坐标
     const window = taskWindow(row.created_at, row.status, logs);
     await this.boxes.flush?.();
-    const track = await taskTrack(this.db, task.boxIds || [], window, { places: taskPlaces(task) });
+    const track = await taskTrack(this.db, task.boxIds || [], window, {
+      places: await taskPlaces(task, this.db),
+    });
     const perms = ctx.access.perms;
     ctx.ok({
       task,
@@ -1126,7 +1266,7 @@ export class ReportPolicyController {
         retry: perms.has(T.videoRetry),
         policy: perms.has(P.read),
       },
-      arriveRadiusM: radiusOf(target),
+      arriveRadiusM: radius,
       ...(await this.#receiveDetail(ctx, task, row)),
       // 最近一次签收交接的跳过明细（R-5）：页面据此显示「N 台箱子未随单交接」警示
       handOver,
@@ -1464,7 +1604,11 @@ export class ReportPolicyController {
         httpStatus: 403,
         publicCode: "A0301",
       });
-    const json = box.toJSON();
+    const json = withCompanyBattery(
+      box.toJSON(),
+      box,
+      boxReserve(box, await companyLimits(this.db, limits()))
+    );
     // 范围外、只在任务单上见过的箱子：给得越少越好，IMEI 同样按「设备标识」权限打码
     const hidden = {
       id: box.id,
@@ -1532,7 +1676,7 @@ export class ReportPolicyController {
     );
     const window = taskWindow(row.created_at, row.status, logs);
     await this.boxes.flush?.();
-    const places = taskPlaces(task);
+    const places = await taskPlaces(task, this.db);
     const track = await taskTrack(this.db, boxId ? [boxId] : all, window, { places });
     ctx.ok({
       task: {
@@ -1708,7 +1852,12 @@ export class ReportPolicyController {
     const target = targetOf(task, at);
     const detail =
       target && hasCoords(target)
-        ? distanceSnapshot(target, await boxDistances(this.db, ids, target))
+        ? distanceSnapshot(
+            target,
+            await boxDistances(this.db, ids, target, {
+              radius: await taskRadiusOf(this.db, task, target),
+            })
+          )
         : null;
     // 运送中（旧调拨）/在途（合并单）直接扫码签收、拒收：先自动记一笔确认到达
     if (
@@ -1842,9 +1991,11 @@ function actionable(can) {
   return Object.entries(can).some(([to, ok]) => ok && to !== "已取消");
 }
 
-/** 任务要记进出的地点：调拨/合并单看寄出、收货地址，采样看计划地点（旧双向单再加寄出地址）。没坐标的跳过。 */
-function taskPlaces(task) {
+/** 任务要记进出的地点：调拨/合并单看寄出、收货地址，采样看计划地点（旧双向单再加寄出地址）。没坐标的跳过。
+ * R13：地点没显式半径时用寄出分公司的公司级到达半径（公司未覆盖＝系统默认）。 */
+async function taskPlaces(task, db) {
   const merged = task.kind === "采样" && !["单向", "双向"].includes(task.trip);
+  const companyRadius = await taskRadiusOf(db, task, null);
   return (
     task.kind === "调拨"
       ? [
@@ -1858,5 +2009,10 @@ function taskPlaces(task) {
         ]
   )
     .filter((p) => hasCoords(p))
-    .map((p) => ({ role: p.role, lng: p.lng, lat: p.lat, radiusM: radiusOf(p) }));
+    .map((p) => ({
+      role: p.role,
+      lng: p.lng,
+      lat: p.lat,
+      radiusM: Number.isInteger(p.radiusM) ? p.radiusM : companyRadius,
+    }));
 }

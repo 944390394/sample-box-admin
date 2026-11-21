@@ -137,8 +137,8 @@ export const menuRoutes = [
         { perm: BOX }
       ),
       // 默认策略独立页（IA 迁移）：原系统设置「采样箱默认策略与任务」分区迁到采样箱组。
-      // 三码任意一个即可见（some），与 PUT /system/settings/box 的门禁一致；
-      // 无三码的角色（如现场采样员）菜单不显示。
+      // R13 扩为公司策略中心：公司默认策略码＋原三码任意一个即可见（some），
+      // 与页面内分组 gating 一致；无码的角色（如现场采样员）菜单不显示。
       menu(
         "policy",
         "device/policy/index",
@@ -148,6 +148,7 @@ export const menuRoutes = [
         false,
         {
           perm: [
+            "device:box:policyCompany",
             "device:box:policyDefault",
             "sys:settings:battery-reserve",
             "sys:settings:arrive-radius",

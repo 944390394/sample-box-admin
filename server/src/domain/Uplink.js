@@ -9,6 +9,8 @@ export class Uplink {
     this.policyVersion = fields.policyVersion;
     this.reportPeriodSec = fields.reportPeriodSec;
     this.reportCharging = fields.reportCharging;
+    /** STM 指示灯日常亮灭回显 rl=0|1（1.0.7 起）；旧固件没有＝null（未回报）。 */
+    this.reportLights = fields.reportLights ?? null;
     this.iccid = fields.iccid;
     this.imsi = fields.imsi;
     this.csq = fields.csq;

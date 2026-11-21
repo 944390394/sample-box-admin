@@ -1,5 +1,6 @@
 import { defaultBoxName } from "../domain/boxName.js";
 import { currentBoxSettings, offlineGraceSec } from "../settings/boxConfig.js";
+import { companyCaseSql } from "../settings/companyPolicy.js";
 import { formatTimestamp } from "../domain/Clock.js";
 import { CommittedUplink } from "../domain/CommittedUplink.js";
 import { BoxState } from "../domain/BoxState.js";
@@ -11,7 +12,7 @@ import { BoxStore } from "./BoxStore.js";
 import { decompressRaw } from "./rawCodec.js";
 import { rawStorage } from "./schema.js";
 import { UplinkBatch } from "./UplinkBatch.js";
-import { scopeSql } from "../auth/boxAccess.js";
+import { scopeSql, usableMv } from "../auth/boxAccess.js";
 import { queueWipe } from "../settings/DeviceCommands.js";
 import { ENDED_SQL } from "../settings/taskFlow.js";
 import { ESCAPE_SQL, likePattern } from "./sqlText.js";
@@ -193,18 +194,28 @@ export class SqlBoxStore extends BoxStore {
   async statsByOrg(limits = null) {
     await this.#ensureBoxIndex();
     const lim = limits || { onlineSince: "9999", lowMv: 0, readyMv: 99999 };
-    const online = onlineSql(this.executor.dialect, lim.onlineSince);
+    const online = onlineSql(this.executor.dialect, lim.onlineSince, lim.company);
+    const low = companyCaseSql(
+      lim.company,
+      (entry) => (entry.batteryReserve == null ? null : usableMv(20, entry.batteryReserve)),
+      lim.lowMv
+    );
+    const ready = companyCaseSql(
+      lim.company,
+      (entry) => (entry.batteryReserve == null ? null : usableMv(50, entry.batteryReserve)),
+      lim.readyMv
+    );
     const rows = await this.executor.all(
       `SELECT COALESCE(org_id,'') AS org_id, life, COUNT(*) AS n,
               SUM(CASE WHEN alert <> '' THEN 1 ELSE 0 END) AS alert,
               SUM(CASE WHEN ${online.sql} THEN 0 ELSE 1 END) AS offline,
-              SUM(CASE WHEN battery_mv > 0 AND battery_mv < ? THEN 1 ELSE 0 END) AS low,
+              SUM(CASE WHEN battery_mv > 0 AND battery_mv < ${low.sql} THEN 1 ELSE 0 END) AS low,
               SUM(CASE WHEN lid = 1 THEN 1 ELSE 0 END) AS lid,
-              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ?
+              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ${ready.sql}
                        THEN 1 ELSE 0 END) AS ready
        FROM sample_box GROUP BY org_id, life`,
-      // 参数顺序就是片段里 ? 出现的顺序：offline 的 onlineSince+now、low、ready 的 onlineSince+now、readyMv
-      [...online.params, lim.lowMv, ...online.params, lim.readyMv]
+      // 参数顺序就是片段里 ? 出现的顺序：offline 的 onlineSince+now+宽限CASE、low CASE、ready 的 onlineSince+now+宽限CASE、readyMv CASE
+      [...online.params, ...low.params, ...online.params, ...ready.params]
     );
     const map = new Map();
     for (const row of rows) {
@@ -225,23 +236,34 @@ export class SqlBoxStore extends BoxStore {
   }
 
   async #summarize(base, limits) {
+    // 缓存键带公司阈值指纹（company.token）：公司策略保存后几秒内也不会复用旧阈值的计数
     const key = JSON.stringify([base.where, base.params, limits]);
     const cached = this.summaryCache?.get(key);
     if (cached && Date.now() - cached.at < SUMMARY_TTL_MS) return cached.value;
     const whereSql = base.where.length ? `WHERE ${base.where.join(" AND ")}` : "";
     const lim = limits || { onlineSince: "9999", lowMv: 0, readyMv: 99999 };
-    const online = onlineSql(this.executor.dialect, lim.onlineSince);
+    const online = onlineSql(this.executor.dialect, lim.onlineSince, lim.company);
+    const low = companyCaseSql(
+      lim.company,
+      (entry) => (entry.batteryReserve == null ? null : usableMv(20, entry.batteryReserve)),
+      lim.lowMv
+    );
+    const ready = companyCaseSql(
+      lim.company,
+      (entry) => (entry.batteryReserve == null ? null : usableMv(50, entry.batteryReserve)),
+      lim.readyMv
+    );
     const rows = await this.executor.all(
       `SELECT life, COUNT(*) AS n,
               SUM(CASE WHEN alert <> '' THEN 1 ELSE 0 END) AS alert,
               SUM(CASE WHEN ${online.sql} THEN 0 ELSE 1 END) AS offline,
-              SUM(CASE WHEN battery_mv > 0 AND battery_mv < ? THEN 1 ELSE 0 END) AS low,
+              SUM(CASE WHEN battery_mv > 0 AND battery_mv < ${low.sql} THEN 1 ELSE 0 END) AS low,
               SUM(CASE WHEN lid = 1 THEN 1 ELSE 0 END) AS lid,
-              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ?
+              SUM(CASE WHEN life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ${ready.sql}
                        THEN 1 ELSE 0 END) AS ready
        FROM sample_box ${whereSql} GROUP BY life`,
       // 缓存键里没有 now：这批数量本来就允许旧 SUMMARY_TTL_MS，跟以前把 now 拼进 SQL 时一样
-      [...online.params, lim.lowMv, ...online.params, lim.readyMv, ...base.params]
+      [...online.params, ...low.params, ...online.params, ...ready.params, ...base.params]
     );
     const counts = { 在途: 0, 未使用: 0, 停用: 0, 待激活: 0 };
     const flags = { alert: 0, offline: 0, low: 0, lid: 0, ready: 0 };
@@ -754,20 +776,31 @@ function boxWhere({
     params.push(life);
   }
   if (flag && limits) {
-    const online = onlineSql(dialect, limits.onlineSince);
+    const online = onlineSql(dialect, limits.onlineSince, limits.company);
+    // R13：低电/可调配阈值按公司电量预留 CASE；无公司覆盖时是裸全局值（与改造前一致）
+    const low = companyCaseSql(
+      limits.company,
+      (entry) => (entry.batteryReserve == null ? null : usableMv(20, entry.batteryReserve)),
+      limits.lowMv
+    );
+    const ready = companyCaseSql(
+      limits.company,
+      (entry) => (entry.batteryReserve == null ? null : usableMv(50, entry.batteryReserve)),
+      limits.readyMv
+    );
     if (flag === "alert") where.push("alert <> ''");
     if (flag === "offline") {
       where.push(`NOT ${online.sql}`);
       params.push(...online.params);
     }
     if (flag === "low") {
-      where.push("battery_mv > 0 AND battery_mv < ?");
-      params.push(limits.lowMv);
+      where.push(`battery_mv > 0 AND battery_mv < ${low.sql}`);
+      params.push(...low.params);
     }
     if (flag === "lid") where.push("lid = 1");
     if (flag === "ready") {
-      where.push(`life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ?`);
-      params.push(...online.params, limits.readyMv);
+      where.push(`life = '未使用' AND alert = '' AND ${online.sql} AND battery_mv >= ${ready.sql}`);
+      params.push(...online.params, ...ready.params);
     }
   }
   return { where, params };
@@ -784,8 +817,10 @@ function sqlId(value) {
  * 「现在几点」以前是直接拼进 SQL 文本的：同一句查询每次文字都不一样，语句缓存用不上，
  * 时间还绕过了参数通道（L-P2-8）。现在 now 和阈值 onlineSince 一起放 params 里返回，
  * 顺序就是它们在片段里出现的顺序（先 onlineSince，再 now），调用点按这个顺序展开。
+ * R13：宽限按公司层 CASE（companyCaseSql，检测站箱按寄出公司）；无公司覆盖时与改造前逐字节一致。
+ * CASE 的部门 id 占位符排在片段末尾（宽限在 SQL 文本最后出现），调用点按序展开。
  */
-function onlineSql(dialect, onlineSince) {
+function onlineSql(dialect, onlineSince, company = null) {
   const now = formatTimestamp(new Date(Math.floor(Date.now() / 5000) * 5000)).slice(0, 19);
   const chargeOnly = currentBoxSettings().reportOnlyWhenCharging ? 1 : 0;
   const elapsed =
@@ -793,15 +828,15 @@ function onlineSql(dialect, onlineSince) {
       ? "TIMESTAMPDIFF(SECOND, last_report_at, ?)"
       : "(julianday(?) - julianday(last_report_at))*86400";
   // B3/#18 宽限分支：被未结束任务占用且从未上报的箱子，建单后 grace 内不算离线（中性），超 grace 才算离线。
-  // bound_task_at 与 now 同格式（formatTimestamp 墙钟），grace 为服务端整数秒，内插安全。
-  const grace = offlineGraceSec();
+  // bound_task_at 与 now 同格式（formatTimestamp 墙钟）；grace 为公司化 CASE 或全局整数秒，内插安全。
+  const grace = companyCaseSql(company, (entry) => entry.taskOfflineGraceSec, offlineGraceSec());
   const elapsedBound =
     dialect === "mysql"
       ? "TIMESTAMPDIFF(SECOND, bound_task_at, ?)"
       : "(julianday(?) - julianday(bound_task_at))*86400";
   return {
     // 外层必须整体括号：调用点有 `NOT ${sql}`，SQL 的 NOT 优先级高于 OR，不包裹会短路宽限分支
-    sql: `((last_report_at <> '' AND ((COALESCE(policy_charge_only,${chargeOnly})=1 AND charge=0) OR (CASE WHEN policy_period_sec IS NULL THEN last_report_at >= ? ELSE ${elapsed} <= policy_period_sec*3 END))) OR (last_report_at = '' AND bound_task_at <> '' AND ${elapsedBound} <= ${grace}))`,
-    params: [onlineSince, now, now],
+    sql: `((last_report_at <> '' AND ((COALESCE(policy_charge_only,${chargeOnly})=1 AND charge=0) OR (CASE WHEN policy_period_sec IS NULL THEN last_report_at >= ? ELSE ${elapsed} <= policy_period_sec*3 END))) OR (last_report_at = '' AND bound_task_at <> '' AND ${elapsedBound} <= ${grace.sql}))`,
+    params: [onlineSince, now, now, ...grace.params],
   };
 }

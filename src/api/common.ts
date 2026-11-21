@@ -48,6 +48,8 @@ export interface OptionItem {
   children?: OptionItem[];
   /** #26 B3（D2）：祖先只读壳——上级单位仅可见不可管，不能选为归属/上级，也不提供写操作入口。 */
   readOnly?: boolean;
+  /** R13：部门类型（公司/检测站）——公司策略中心选择器按顶级公司过滤；旧服务端无此键。 */
+  type?: string;
 }
 
 /**

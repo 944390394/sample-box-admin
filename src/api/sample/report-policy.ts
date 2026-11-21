@@ -16,7 +16,10 @@ export interface PolicyState {
   taskId: string | null;
   sentAt: string | null;
   confirmedAt: string | null;
-  echo?: { version: string; periodSec: number; charging: boolean } | null;
+  /** lights：rl= 灯回显（R13 P1），旧固件无 rl＝null（未回报）。 */
+  echo?: { version: string; periodSec: number; charging: boolean; lights?: boolean | null } | null;
+  /** 灯生效确认三态（R13 P1）：已确认/未回报/不符；无设备回报时 null。总状态仍按 pv/rp/rc。 */
+  lightsStatus?: "已确认" | "未回报" | "不符" | null;
 }
 /** 任务里的地址快照。orgId 是来源单位，custom 表示改过、不是单位地址原样。没有坐标时算不了距离。 */
 export interface Place {
@@ -115,6 +118,8 @@ export interface TaskOptions {
   /** 系统默认上报周期（创建任务时「本任务统一」的初始值），来自服务端设置，不在前端写死。 */
   defaultReportPeriodSec: number;
   defaultReportOnlyWhenCharging: boolean;
+  /** R13：寄出公司的任务期间默认策略（按 orgId 解析）；公司未设或旧服务端＝null/undefined，回落系统默认。 */
+  companyTaskPolicy?: Policy | null;
 }
 export interface TaskBox {
   id: string;
@@ -326,6 +331,8 @@ export const policyPerm = {
   defaults: "device:box:policyDefault",
   /** 任务期间上报策略（新建任务时设） */
   task: "task:policy",
+  /** R13 公司级策略中心：修改本公司默认策略（manageOrgIds 闸门限本公司） */
+  company: "device:box:policyCompany",
 };
 const base = "/api/v1/sample";
 export default {

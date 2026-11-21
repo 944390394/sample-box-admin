@@ -729,7 +729,19 @@ watch(
   async (id) => {
     form.sender = "";
     form.senderId = "";
-    await loadUsers(id, fromUsers);
+    const opts = id ? await API.taskOptions(id) : null;
+    fromUsers.value = opts?.users ?? [];
+    // R13 拍板①：「本任务统一」初始值随寄出公司的任务期间默认策略（公司未设回落系统默认）；
+    // 用户已勾「单独设置」时不动其表单。提交未勾时服务端再以公司策略兜底入快照。
+    if (opts) {
+      defaultPolicy.value = opts.companyTaskPolicy
+        ? { ...opts.companyTaskPolicy }
+        : {
+            reportPeriodSec: opts.defaultReportPeriodSec,
+            reportOnlyWhenCharging: opts.defaultReportOnlyWhenCharging,
+          };
+      if (!custom.value) policy.value = { ...defaultPolicy.value };
+    }
     const me = fromUsers.value.find((u) => u.id === String(user.userInfo.userId || ""));
     if (me && !form.sender) Object.assign(form, { sender: me.name, senderId: me.id });
   }

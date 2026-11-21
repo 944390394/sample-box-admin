@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { formatTimestamp } from "../domain/Clock.js";
 import { boxPosition, distanceM, hasCoords } from "../geo/place.js";
-import { radiusOf } from "./taskPlaces.js";
+import { taskRadiusOf } from "./taskPlaces.js";
 
 /** 合并采样单在这几个状态下（分公司采样现场），箱子到了计划地点开箱就要录像。 */
 const RECORDING = ["待采样", "采样中", "已封箱"];
@@ -40,7 +40,7 @@ export class TaskVideoService {
     const position = boxPosition(box);
     const distance = hasCoords(place) && position ? distanceM(position, place) : null;
     const atPlace = hasCoords(place)
-      ? distance != null && distance <= radiusOf(place)
+      ? distance != null && distance <= (await taskRadiusOf(this.db, body, place))
       : task.status === "采样中";
     if (!atPlace) return null;
     const id = randomUUID();

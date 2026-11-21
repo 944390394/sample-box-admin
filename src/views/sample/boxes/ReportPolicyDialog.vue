@@ -47,6 +47,23 @@
           <el-descriptions-item v-if="state.echo" label="设备回报">
             pv {{ state.echo.version }} · {{ state.echo.periodSec }} 秒 ·
             {{ state.echo.charging ? "仅充电时" : "持续定时" }}
+            <template v-if="state.lightsStatus">
+              · 灯{{
+                state.echo.lights == null ? "未回报" : state.echo.lights ? "日常亮" : "日常灭"
+              }}
+              <el-tag
+                size="small"
+                :type="
+                  state.lightsStatus === '已确认'
+                    ? 'success'
+                    : state.lightsStatus === '不符'
+                      ? 'danger'
+                      : 'info'
+                "
+              >
+                灯生效确认：{{ state.lightsStatus }}
+              </el-tag>
+            </template>
           </el-descriptions-item>
         </el-descriptions>
         <el-alert
@@ -69,7 +86,8 @@
         </el-radio-group>
         <PolicyFields v-if="custom" v-model="form" :disabled="!editable" />
         <p class="hint">
-          任务内单箱 ＞ 长期单箱 ＞ 任务统一 ＞ 批量 ＞ 系统默认。1.0.17
+          任务内单箱 ＞ 长期单箱 ＞ 任务统一 ＞ 批量 ＞ 公司默认 ＞ 系统默认。恢复继承后按 公司默认
+          → 系统默认 落底。1.0.17
           配套设备按派单时的策略执行，任务期间修改底层配置会在任务结束后使用。离线箱子下次上报时领取。
         </p>
       </template>

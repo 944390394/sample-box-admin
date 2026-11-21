@@ -120,6 +120,7 @@ export class UplinkParser {
       policyVersion: this.#readLearn(line, "pv"),
       reportPeriodSec: this.#readLearn(line, "rp"),
       reportCharging: this.#readLearn(line, "rc"),
+      reportLights: this.#readLearn(line, "rl"),
       iccid: String(body.iccid ?? ""),
       imsi: String(body.imsi ?? ""),
       csq: Number.isFinite(Number(body.csq)) ? Number(body.csq) : 0,
@@ -291,6 +292,8 @@ export class UplinkParser {
     if (name === "pv") return value >= 0 && value <= 4294967295 ? value : null;
     if (name === "rp") return value >= 5 && value <= 3600 ? value : null;
     if (name === "rc") return value === 0 || value === 1 ? value : null;
+    // rl= STM 指示灯日常亮灭回显（1.0.7 起随 pv/rp/rc 一起报）：0/1 之外当没报
+    if (name === "rl") return value === 0 || value === 1 ? value : null;
     if (name === "n") return value >= 1 && value <= 8 ? value : null;
     return value >= 2500 && value <= 4500 ? value : null;
   }

@@ -7,6 +7,7 @@ import {
 } from "../auth/boxAccess.js";
 import { buildDeptTree } from "../../../shared/org.js";
 import { audit } from "../log/audit.js";
+import { companyLimits } from "../settings/companyPolicy.js";
 import { ENDED, ENDED_SQL, isLegacySample } from "../settings/taskFlow.js";
 import { limits } from "./SampleController.js";
 import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
@@ -267,7 +268,10 @@ export class OverviewController {
 
   async #stats(orgIds) {
     if (typeof this.boxes.stats !== "function") return null;
-    return this.boxes.stats({ scope: { all: false, orgIds, ownerIds: [] }, limits: limits() });
+    return this.boxes.stats({
+      scope: { all: false, orgIds, ownerIds: [] },
+      limits: await companyLimits(this.db, limits()),
+    });
   }
 
   /** 送检测站的单才有的 body；不是送检单返回 null。 */
@@ -672,7 +676,9 @@ export class OverviewController {
     const today = localDay(new Date());
     const units = await this.#units(access);
     const byOrg =
-      typeof this.boxes.statsByOrg === "function" ? await this.boxes.statsByOrg(limits()) : null;
+      typeof this.boxes.statsByOrg === "function"
+        ? await this.boxes.statsByOrg(await companyLimits(this.db, limits()))
+        : null;
     const roll = (orgIds) => {
       if (!byOrg) return this.#stats(orgIds);
       const out = {

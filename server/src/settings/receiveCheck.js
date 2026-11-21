@@ -1,5 +1,6 @@
 import { BOX } from "../auth/boxAccess.js";
-import { boxDistances, openCounts, radiusOf, sealOpenCounts, targetOf } from "./taskPlaces.js";
+import { companyJudgmentFor, withCompanyBattery } from "./companyPolicy.js";
+import { boxDistances, openCounts, sealOpenCounts, targetOf, taskRadiusOf } from "./taskPlaces.js";
 
 /**
  * 签收核验：收货方扫码签收前，看每台箱子的状态、本次开了几次箱、在不在收货点附近。
@@ -18,7 +19,10 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
   const target = targetOf(task, at);
   const counts = await openCounts(db, taskId);
   const afterSeal = await sealOpenCounts(db, taskId);
-  const places = await boxDistances(db, ids, target, { withPosition: true });
+  // R13：到达半径与电量预留按寄出分公司公司层（检测站签收判定同口径，拍板④）
+  const radius = await taskRadiusOf(db, task, target);
+  const { batteryReserve } = await companyJudgmentFor(db, task?.fromOrgId || task?.orgId || "");
+  const places = await boxDistances(db, ids, target, { withPosition: true, radius });
   const list = [];
   const problems = [];
   const seeOpens = can(BOX.opens);
@@ -28,7 +32,8 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
   const seeCharge = can(BOX.charging);
   const limit = Number.isInteger(task.maxOpens) ? task.maxOpens : null;
   for (const place of places) {
-    const state = place.missing ? null : (await boxes.findById(place.id))?.toJSON();
+    const boxState = place.missing ? null : await boxes.findById(place.id);
+    const state = boxState ? withCompanyBattery(boxState.toJSON(), boxState, batteryReserve) : null;
     const opens = counts.get(place.id) ?? null;
     const over = Number.isInteger(limit) && opens != null && opens > limit;
     const lid = state?.lid ?? null;
@@ -76,7 +81,7 @@ export async function receiveCheck(db, boxes, task, taskId, status, { perms = nu
           hasCoords: target.lng != null && target.lat != null,
         }
       : null,
-    radiusM: radiusOf(target),
+    radiusM: radius,
     maxOpens: Number.isInteger(limit) ? limit : null,
     boxes: list,
     problems,

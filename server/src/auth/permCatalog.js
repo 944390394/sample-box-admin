@@ -534,6 +534,17 @@ export const BOX_PERMS = [
     "do",
     ["device:box:policyRead"]
   ),
+  // R13 公司级策略中心：公司默认策略（双频/灯/定位/判定阈值）单独一码，
+  // 与全局语义的 device:box:policyDefault 分开（一项只管一件事）；数据范围闸门 manageOrgIds 只能改本公司。
+  item(
+    9148,
+    "device:box:policyCompany",
+    "修改公司默认策略",
+    "设本公司箱子的非任务/任务期间上报策略、指示灯、卫星定位和判定阈值；只影响没有单箱、批量或任务设置的箱子，任务策略只作新建任务单的初始值",
+    "box",
+    "do",
+    ["device:box:policyRead"]
+  ),
   item(
     9113,
     "device:box:export",
@@ -1128,12 +1139,16 @@ const LEGACY_DEFAULTS = {
       "task",
       "assign",
       "policyTask",
+      // R13：公司策略中心前置（policyCompany 的 needs；存量库由 058 连前置一起补）
+      "policyRead",
     ]),
     // 组织简化（B4a，B3 遗留②）：分公司内部调度岗建合并采样单是主路径，显式钉死建单码
     //（policyTask 经 045 拆分已含此码，这里显式列出防拆链变动；存量库由 056 幂等补码）。
     "task:create:sample",
     // R12 门禁裁决：调度员可撤自己建的划拨单（存量库由 057 幂等补码）。
     "task:transfer:revoke",
+    // R13 公司策略中心：调度员可改本公司默认策略（manageOrgIds 闸门限本公司；存量库由 058 幂等补码）。
+    "device:box:policyCompany",
     "task:sign",
     "task:cancel",
     "task:video",
@@ -1146,7 +1161,18 @@ const LEGACY_DEFAULTS = {
     "sys:user:view",
   ],
   BRANCH_ADMIN: [
-    ...OLD(["list", "detail", "status", "location", "track", "event", "task", "assign"]),
+    ...OLD([
+      "list",
+      "detail",
+      "status",
+      "location",
+      "track",
+      "event",
+      "task",
+      "assign",
+      // R13：公司策略中心前置（policyCompany 的 needs；存量库由 058 连前置一起补）
+      "policyRead",
+    ]),
     // 组织简化（B4a/P11，B3 遗留②）：分公司自采建单是主路径——BRANCH_ADMIN 默认补
     // task:create:sample（存量库由 056 幂等补码步补齐，角色页保存过的以保存为准）。
     "task:create:sample",
@@ -1154,6 +1180,9 @@ const LEGACY_DEFAULTS = {
     //（存量库由 057 幂等补码；角色页保存过的以保存为准）。
     "task:create:transfer",
     "task:transfer:revoke",
+    // R13 公司策略中心：分公司管理员是本公司策略主责角色（存量库由 058 幂等补码；
+    // manageOrgIds 闸门限本公司子树，总部管理员可改各分公司）。
+    "device:box:policyCompany",
     "task:sign",
     "task:video",
     "sys:dept:view",

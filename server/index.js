@@ -392,6 +392,23 @@ const routes = [
     perm: "sys:dept:limit",
     handler: org.saveDeptLimit,
   },
+  // R13 公司策略中心：公司默认策略（双频/灯/定位/判定阈值）。
+  // 读＝policyRead/policyCompany 任一（handler 内再按 view 口径 orgIds 闸门）；
+  // 写＝policyCompany（handler 内 manageOrgIds 闸门只能改本公司＋type=公司校验）。
+  {
+    method: "GET",
+    path: "/api/v1/depts/:id/policy",
+    auth: true,
+    perm: ["device:box:policyRead", "device:box:policyCompany"],
+    handler: (ctx) => useSample(ctx, (api) => api.policy.companyPolicyRead(ctx)),
+  },
+  {
+    method: "PUT",
+    path: "/api/v1/depts/:id/policy",
+    auth: true,
+    perm: "device:box:policyCompany",
+    handler: (ctx) => useSample(ctx, (api) => api.policy.companyPolicySave(ctx)),
+  },
   {
     method: "DELETE",
     path: "/api/v1/depts/:id",

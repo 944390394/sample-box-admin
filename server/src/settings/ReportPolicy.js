@@ -11,6 +11,7 @@ import {
 } from "./boxConfig.js";
 import { badRequest, conflict, noPermission, notVisible } from "../domain/AppError.js";
 import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
+import { companyContext, companyIdleFor, companyTaskFor } from "./companyPolicy.js";
 
 export function supportsDispatch(firmware) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(firmware));
@@ -27,6 +28,8 @@ export const POLICY_PERMS = {
   batch: "device:box:policyBatch",
   task: "task:policy",
   defaults: "device:box:policyDefault",
+  /** R13 公司级策略中心：修改本公司默认策略（manageOrgIds 闸门限本公司）。 */
+  company: "device:box:policyCompany",
 };
 
 export function validatePolicy(input) {
@@ -63,10 +66,20 @@ function versioned(chosen) {
   };
 }
 
-/** 每一层是完整策略，避免周期和充电限制分别继承造成难以解释的组合。 */
-export function resolvePolicy(single, batch, task, boxId) {
+/**
+ * 每一层是完整策略，避免周期和充电限制分别继承造成难以解释的组合。
+ * R13：公司默认（companyIdle）插在批量与系统默认之间——
+ * 任务内单箱 > 长期单箱 > 任务统一 > 批量 > 公司默认 > 系统默认。
+ * companyIdle=null（公司未设或整层继承）时行为与改造前逐字节一致，版本指纹不变、不触发重发。
+ */
+export function resolvePolicy(single, batch, task, boxId, companyIdle = null) {
   const chosen =
-    task?.overrides?.[boxId] || single || task?.policy || batch || currentBoxSettings();
+    task?.overrides?.[boxId] ||
+    single ||
+    task?.policy ||
+    batch ||
+    companyIdle ||
+    currentBoxSettings();
   const source = task?.overrides?.[boxId]
     ? "任务内单箱"
     : single
@@ -75,7 +88,9 @@ export function resolvePolicy(single, batch, task, boxId) {
         ? "任务统一"
         : batch
           ? "批量设置"
-          : "系统默认";
+          : companyIdle
+            ? "公司默认"
+            : "系统默认";
   const version = String(
     parseInt(
       createHash("sha256")
@@ -306,7 +321,7 @@ export class ReportPolicy {
     this.db = db;
   }
 
-  async get(box, db = this.db) {
+  async get(box, db = this.db, companyCtx = null) {
     const row = await db.get("SELECT * FROM box_report_policy WHERE box_id = ?", [box.id]);
     let active = await db.get(
       "SELECT t.id,t.body FROM sample_task t JOIN box_active_task a ON a.task_id=t.id WHERE a.box_id=?",
@@ -324,8 +339,11 @@ export class ReportPolicy {
     const task = active ? { ...parse(active.body), id: active.id } : null;
     const single = parse(row?.single_json),
       batch = parse(row?.batch_json);
+    // R13 公司默认层：按箱子生效公司（检测站期间＝寄出分公司）取 idle 完整策略；
+    // ≥1.0.17 建单快照优先——快照里已冻结建单那一刻的公司层，任务期间不随公司修改波动。
+    const companyIdle = await companyIdleFor(db, box, companyCtx);
     const snapshot = supportsDispatch(box.firmware) ? task?.assignedPolicies?.[box.id] : null;
-    const effective = snapshot ?? resolvePolicy(single, batch, task, box.id);
+    const effective = snapshot ?? resolvePolicy(single, batch, task, box.id, companyIdle);
     const delivery = await db.get("SELECT * FROM box_report_delivery WHERE box_id=?", [box.id]);
     const matching = delivery?.version === effective.version;
     const echo =
@@ -334,6 +352,8 @@ export class ReportPolicy {
             version: String(delivery.echo_version),
             periodSec: Number(delivery.echo_period),
             charging: Number(delivery.echo_charge) === 1,
+            // rl= 灯回显（P1）：旧固件无 rl＝null（未回报），不因此判「未生效」
+            lights: delivery?.echo_lights == null ? null : Number(delivery.echo_lights) === 1,
           }
         : null;
     const echoMatches =
@@ -341,6 +361,14 @@ export class ReportPolicy {
       echo.version === effective.version &&
       echo.periodSec === effective.reportPeriodSec &&
       echo.charging === effective.reportOnlyWhenCharging;
+    // 灯生效确认三态（P1）：已确认/未回报/不符；总状态维持 pv/rp/rc 口径（拍板：旧固件兼容）
+    const lightsStatus = !echo
+      ? null
+      : echo.lights == null
+        ? "未回报"
+        : echo.lights === (effective.indicators !== false)
+          ? "已确认"
+          : "不符";
     const status = !box.firmware
       ? "待首次上报"
       : !firmwareAcceptsConfig(box.firmware)
@@ -359,6 +387,7 @@ export class ReportPolicy {
       taskId: active?.id || null,
       status,
       echo,
+      lightsStatus,
       sentAt: matching ? delivery?.sent_at : null,
       confirmedAt: matching ? delivery?.confirmed_at : null,
     };
@@ -380,24 +409,32 @@ export class ReportPolicy {
         const body = parse(row.body);
         if (!body || body.assignedPolicies) return;
         const boxes = await tx.all(
-          "SELECT m.box_id,p.single_json,p.batch_json FROM sample_task_box m LEFT JOIN box_report_policy p ON p.box_id=m.box_id WHERE m.task_id=?",
+          "SELECT m.box_id,p.single_json,p.batch_json,b.org_id FROM sample_task_box m LEFT JOIN box_report_policy p ON p.box_id=m.box_id LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=?",
           [id]
         );
-        body.assignedPolicies = Object.fromEntries(
-          boxes.map((b) => [
+        const companyCtx = await companyContext(tx);
+        const assigned = Object.create(null);
+        for (const b of boxes) {
+          assigned[b.box_id] = resolvePolicy(
+            parse(b.single_json),
+            parse(b.batch_json),
+            { ...body, id },
             b.box_id,
-            resolvePolicy(parse(b.single_json), parse(b.batch_json), { ...body, id }, b.box_id),
-          ])
-        );
+            await companyIdleFor(tx, { id: b.box_id, org_id: b.org_id }, companyCtx)
+          );
+        }
+        body.assignedPolicies = assigned;
         await tx.run("UPDATE sample_task SET body=? WHERE id=?", [JSON.stringify(body), id]);
       });
     }
   }
 
   async refresh(ids, tx) {
+    // R13：公司层按 org_id 解析——SELECT 补 org_id；公司上下文整批装一次，逐箱不再重复查部门树
+    const companyCtx = ids.length ? await companyContext(tx) : null;
     for (const id of ids) {
-      const box = await tx.get("SELECT id,firmware FROM sample_box WHERE id=?", [id]);
-      const p = (await this.get(box || { id }, tx)).effective;
+      const box = await tx.get("SELECT id,firmware,org_id FROM sample_box WHERE id=?", [id]);
+      const p = (await this.get(box || { id }, tx, companyCtx)).effective;
       await tx.run("UPDATE sample_box SET policy_period_sec=?,policy_charge_only=? WHERE id=?", [
         p.source === "系统默认" ? null : p.reportPeriodSec,
         p.source === "系统默认" ? null : Number(p.reportOnlyWhenCharging),
@@ -490,7 +527,7 @@ export class ReportPolicy {
       const now = new Date().toISOString();
       if (row)
         await tx.run(
-          "UPDATE box_report_delivery SET version=?,sent_at=?,confirmed_at=NULL,echo_version=NULL,echo_period=NULL,echo_charge=NULL WHERE box_id=?",
+          "UPDATE box_report_delivery SET version=?,sent_at=?,confirmed_at=NULL,echo_version=NULL,echo_period=NULL,echo_charge=NULL,echo_lights=NULL WHERE box_id=?",
           [version, now, boxId]
         );
       else
@@ -520,12 +557,15 @@ export class ReportPolicy {
       uplink.reportPeriodSec === p.reportPeriodSec &&
       uplink.reportCharging === Number(p.reportOnlyWhenCharging);
     const now = new Date().toISOString();
+    // rl= 灯回显（P1）：有就入库（0/1），旧固件无 rl 写 NULL＝未回报；
+    // 生效确认（confirmed_at）仍只按 pv/rp/rc 匹配——灯不符不推翻总状态，UI 单独三态展示。
     await this.db.run(
-      `UPDATE box_report_delivery SET echo_version=?,echo_period=?,echo_charge=?,confirmed_at=CASE WHEN ?=1 THEN COALESCE(confirmed_at,?) ELSE NULL END WHERE box_id=? AND version=?`,
+      `UPDATE box_report_delivery SET echo_version=?,echo_period=?,echo_charge=?,echo_lights=?,confirmed_at=CASE WHEN ?=1 THEN COALESCE(confirmed_at,?) ELSE NULL END WHERE box_id=? AND version=?`,
       [
         String(uplink.policyVersion),
         uplink.reportPeriodSec,
         uplink.reportCharging,
+        uplink.reportLights == null ? null : Number(uplink.reportLights),
         match ? 1 : 0,
         now,
         box.id,
@@ -550,6 +590,14 @@ export class ReportPolicy {
     // is_inspect 真列（050）：合并采样单恒送检测站（body.inspect=true）；旧送检/旧调拨送检测站的按 body.inspect，与统计侧 LIKE 判定同源
     const isInspect = input.kind === "送检" || body.inspect === true ? 1 : 0;
     await this.db.transaction(async (tx) => {
+      const companyCtx = await companyContext(tx);
+      // R13 拍板①（选项 A）：本任务统一未设且寄出公司有任务期间默认策略 → 以它入 body.policy
+      // 并冻结进 assignedPolicies 快照。语义显式：进行中任务不受公司级后续修改影响；
+      // 长期单箱/批量仍优先于它（resolvePolicy 既有层级）。公司未设 task_json 时行为不变。
+      if (!body.policy && input.fromOrgId) {
+        const companyTask = await companyTaskFor(tx, input.fromOrgId, companyCtx);
+        if (companyTask) body.policy = stamped(companyTask);
+      }
       const snapshots = new Map();
       for (const boxId of [...input.boxIds].sort()) {
         const box = await tx.get(
@@ -578,7 +626,8 @@ export class ReportPolicy {
           parse(layers?.single_json),
           parse(layers?.batch_json),
           { ...body, id },
-          boxId
+          boxId,
+          await companyIdleFor(tx, box, companyCtx)
         );
       }
       await tx.run(
@@ -756,6 +805,9 @@ export class ReportPolicy {
           boxId,
         ]);
       }
+      // R13：归属跨公司迁移后公司默认层随之切换——同事务刷新策略生效值快照，
+      // 提交后按既有通道下发（划拨两态 ∈ ENDED，无任务覆盖，公司层直接生效）。
+      await this.refresh(sorted, tx);
       await addTaskLog(tx, {
         taskId: id,
         status: "已划拨",
@@ -783,6 +835,8 @@ export class ReportPolicy {
         );
       result = { id, idempotent: false };
     });
+    // 幂等重放不重复下发；真正转移了归属才推策略（公司层随归属切换）
+    if (result && !result.idempotent) this.onPolicyChanged?.(boxIds);
     return result;
   }
 
@@ -862,6 +916,11 @@ export class ReportPolicy {
           item.owner,
           item.boxId,
         ]);
+      // R13：退回原公司后公司默认层切回——同事务刷新，提交后下发（与 createTransfer 同口径）
+      await this.refresh(
+        restored.map((item) => item.boxId),
+        tx
+      );
       // 带 status 条件：并发第二次撤销落到 0 行 → 整体回滚
       const updated = await tx.run(
         "UPDATE sample_task SET status='已撤销' WHERE id=? AND status='已划拨'",
@@ -898,6 +957,7 @@ export class ReportPolicy {
         log: { action: "撤销划拨", actorName: String(actor.name || ""), at: revokedAt },
       };
     });
+    this.onPolicyChanged?.(result.restored.map((item) => item.boxId));
     return result;
   }
 

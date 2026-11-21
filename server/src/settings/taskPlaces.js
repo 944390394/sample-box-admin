@@ -1,5 +1,6 @@
 import { boxPosition, distanceM } from "../geo/place.js";
 import { currentBoxSettings } from "./boxConfig.js";
+import { companyJudgmentFor } from "./companyPolicy.js";
 import { ENDED, isLegacySample } from "./taskFlow.js";
 
 /** 这些状态下箱子正朝某个地点去，列表要算「到达附近」。 */
@@ -172,6 +173,17 @@ export async function voidBoxIds(db, taskId, task) {
 /** 目标地址自己设了误差范围就用它，否则用系统设置的到达半径。 */
 export function radiusOf(target) {
   return Number.isInteger(target?.radiusM) ? target.radiusM : currentBoxSettings().arriveRadiusM;
+}
+
+/**
+ * 任务到达半径（R13 P1 公司化）：地址显式 radiusM 优先；否则按寄出分公司（fromOrgId）的
+ * 公司级到达半径——箱子在检测站期间判定也按寄出公司（拍板④），公司未覆盖时回落系统默认。
+ * 旧单没有 fromOrgId 时按采样单位 orgId，再没有按总公司（""）。
+ */
+export async function taskRadiusOf(db, task, target) {
+  if (Number.isInteger(target?.radiusM)) return target.radiusM;
+  const { arriveRadiusM } = await companyJudgmentFor(db, task?.fromOrgId || task?.orgId || "");
+  return arriveRadiusM;
 }
 
 /** 流转记录里只留距离，不留坐标。 */

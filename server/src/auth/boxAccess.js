@@ -1,7 +1,8 @@
 import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
 import { voltagePercent } from "../domain/BatteryEstimate.js";
 import { ALL_PERMS, DEFAULT_ROLE_PERMS, grantsAll } from "./permCatalog.js";
-import { firmwareSupportsRemote, offlineGraceSec } from "../settings/boxConfig.js";
+import { firmwareSupportsRemote } from "../settings/boxConfig.js";
+import { boxGraceSec, boxReserve } from "../settings/companyPolicy.js";
 
 export const BOX = {
   list: "device:box:list",
@@ -491,6 +492,7 @@ export function usableMv(usable, reserve) {
  * 3×周期，否则用 onlineSince；占用且从未上报走建单宽限（B3/#18）。
  * flagMatch 与列表 JSON 的 online 字段共用这一份——后者在查询时刻算好随箱下发，
  * 页面直接显示，不再拿可能过期的本地快照重算（快照比轮询间隔旧时会假离线）。
+ * R13：宽限按箱解析公司层（limits.company，检测站期间＝寄出公司），无公司覆盖用全局。
  */
 export function boxOnline(box, limits) {
   const last = String(box.last || "");
@@ -507,8 +509,16 @@ export function boxOnline(box, limits) {
   const boundPending =
     !last &&
     Boolean(boundAt) &&
-    Date.now() - Date.parse(boundAt.replace(" ", "T")) <= offlineGraceSec() * 1000;
+    Date.now() - Date.parse(boundAt.replace(" ", "T")) <= boxGraceSec(box, limits) * 1000;
   return (Boolean(last) && (exempt || within)) || boundPending;
+}
+
+/** 低电/可调配阈值按箱解析公司电量预留（R13 P1）：无公司覆盖时用调用点算好的全局值。 */
+export function boxLowMv(box, limits) {
+  return limits?.company ? usableMv(20, boxReserve(box, limits)) : limits.lowMv;
+}
+export function boxReadyMv(box, limits) {
+  return limits?.company ? usableMv(50, boxReserve(box, limits)) : limits.readyMv;
 }
 
 export function flagMatch(box, flag, limits) {
@@ -516,10 +526,10 @@ export function flagMatch(box, flag, limits) {
   const mv = Number(box.batteryMv);
   if (flag === "alert") return Boolean(box.alert);
   if (flag === "offline") return !online;
-  if (flag === "low") return mv > 0 && mv < limits.lowMv;
+  if (flag === "low") return mv > 0 && mv < boxLowMv(box, limits);
   if (flag === "lid") return Number(box.lid) === 1;
   if (flag === "ready") {
-    return box.life === "未使用" && !box.alert && online && mv >= limits.readyMv;
+    return box.life === "未使用" && !box.alert && online && mv >= boxReadyMv(box, limits);
   }
   return true;
 }

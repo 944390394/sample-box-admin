@@ -190,10 +190,12 @@ test("权限：默认授权、老角色升级补权限、菜单按权限裁剪",
   const sampler = menusFor(new Set(["device:box:list", "device:box:detail"]));
   const titles = sampler.map((group) => group.meta.title);
   assert.deepEqual(titles, ["工作台", "采样箱", "实时地图"]);
-  // IA 迁移：采样箱组「默认策略」子菜单对三码 some 可见（与 PUT settings/box 门禁一致）
+  // IA 迁移＋R13：采样箱组「默认策略」（公司策略中心）子菜单对四码 some 可见
+  //（policyCompany 公司层＋原三码系统默认/电量预留/到达半径，与页面分组 gating 一致）
   const deviceChildren = (perms) =>
     menusFor(perms).find((group) => group.path === "/device").children;
   for (const code of [
+    "device:box:policyCompany",
     "device:box:policyDefault",
     "sys:settings:battery-reserve",
     "sys:settings:arrive-radius",
@@ -204,7 +206,7 @@ test("权限：默认授权、老角色升级补权限、菜单按权限裁剪",
       ),
       code
     );
-  // 无三码不显示：仅列表权限、SAMPLER 默认授权都没有默认策略项
+  // 无四码不显示：仅列表权限、SAMPLER 默认授权都没有默认策略项
   assert.ok(
     !deviceChildren(new Set(["device:box:list"])).some((item) => item.name === "SampleBoxPolicy")
   );

@@ -586,6 +586,8 @@ function scopedDeptOptions(nodes) {
   return (nodes || []).map((node) => ({
     value: node.id,
     label: node.name,
+    // R13：公司策略中心的公司选择器按 type 过滤顶级公司（additive 键，旧消费方不受影响）
+    ...(node.type ? { type: node.type } : {}),
     ...(node.readOnly ? { readOnly: true } : {}),
     ...(node.children?.length ? { children: scopedDeptOptions(node.children) } : {}),
   }));

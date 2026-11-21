@@ -22,6 +22,7 @@ import { formatTimestamp } from "../domain/Clock.js";
 import { audit } from "../log/audit.js";
 import { resolveTimeRange } from "../log/timeRange.js";
 import { currentBoxSettings, firmwareSupportsRemote } from "../settings/boxConfig.js";
+import { boxReserve, companyLimits, withCompanyBattery } from "../settings/companyPolicy.js";
 import { readBoxName } from "../domain/boxName.js";
 import { taskTrack } from "../settings/taskTrack.js";
 
@@ -41,11 +42,22 @@ export class SampleController {
     this.boxes = boxes;
   }
 
+  /** 公司化判定阈值的库 handle（R13）：策略服务或存储执行器；测试内存存储没有时回落全局。 */
+  #db() {
+    return this.policies?.db ?? this.boxes?.executor ?? null;
+  }
+
+  /** 全局 limits＋公司阈值数据（每请求装载，无缓存）；无库 handle 时等价 limits()。 */
+  #limits() {
+    return companyLimits(this.#db(), limits());
+  }
+
   async list(ctx) {
     if (!allowed(ctx, BOX.list)) return;
     const query = ctx.query || {};
     if (query.flag && !flagAllowed(query.flag, ctx.access?.perms))
       return ctx.fail("没有查看这项状态的权限", "A0301", 403);
+    const lim = await this.#limits();
     const paged =
       query.page != null ||
       query.q != null ||
@@ -61,14 +73,14 @@ export class SampleController {
           })
         );
       await this.#markWipe(rows);
-      if (!paged) return ctx.ok(rows.map((box) => view(ctx, box)));
-      return ctx.ok(pageInMemory(ctx, rows, readFilter(ctx), limits()));
+      if (!paged) return ctx.ok(rows.map((box) => view(ctx, box, lim)));
+      return ctx.ok(pageInMemory(ctx, rows, readFilter(ctx), lim));
     }
     const filter = readFilter(ctx);
     const result = await this.boxes.page({
       ...filter,
       scope: ctx.access?.scope || null,
-      limits: limits(),
+      limits: lim,
       matchImei: canMatchImei(ctx),
     });
     if (this.policies)
@@ -79,7 +91,7 @@ export class SampleController {
       );
     await this.#markWipe(result.list);
     ctx.ok({
-      list: result.list.map((box) => view(ctx, box)),
+      list: result.list.map((box) => view(ctx, box, lim)),
       total: result.total,
       // 两份口径分开给：filteredTotal 跟 total 一样是列表行数，scopeTotal 是不含状态/快捷筛选的总台数，
       // 状态卡片上的数字加起来等于后者（L-P0-3）。
@@ -94,12 +106,13 @@ export class SampleController {
 
   async stats(ctx) {
     if (!allowed(ctx, BOX.list)) return;
+    const lim = await this.#limits();
     if (typeof this.boxes.stats === "function") {
-      const stats = await this.boxes.stats({ scope: ctx.access?.scope || null, limits: limits() });
+      const stats = await this.boxes.stats({ scope: ctx.access?.scope || null, limits: lim });
       return ctx.ok({ ...stats, flags: visibleFlags(stats.flags, ctx.access?.perms) });
     }
     const rows = (await this.boxes.list()).filter((box) => canSee(ctx.access, box));
-    const { counts, flags } = pageInMemory(ctx, rows, { page: 1, pageSize: 1 }, limits());
+    const { counts, flags } = pageInMemory(ctx, rows, { page: 1, pageSize: 1 }, lim);
     ctx.ok({ total: rows.length, counts, flags: visibleFlags(flags, ctx.access?.perms) });
   }
 
@@ -144,6 +157,7 @@ export class SampleController {
     const missing = [];
     const skipped = [];
     const used = new Set();
+    const lim = await this.#limits();
     for (const key of keys) {
       let box = byId.get(key) || null;
       if (!box) {
@@ -173,7 +187,7 @@ export class SampleController {
         });
         continue;
       }
-      list.push(view(ctx, box));
+      list.push(view(ctx, box, lim));
     }
     ctx.ok({ list, missing, skipped, truncated });
   }
@@ -183,7 +197,7 @@ export class SampleController {
     if (!box) return;
     if (this.policies) box.reportPolicy = await this.policies.get(box);
     await this.#markWipe([box]);
-    ctx.ok(view(ctx, box));
+    ctx.ok(view(ctx, box, await this.#limits()));
   }
 
   /** 正在等设备抹除的箱子带上 wipe，页面显示「抹除中」。每次都写，避免共享对象残留旧状态。 */
@@ -244,7 +258,7 @@ export class SampleController {
             boxIds: taskBoxIds,
           }
         : scope;
-    const lim = limits();
+    const lim = await this.#limits();
     // cards：勾了哪几张卡片（逐张授权）。卡片还要有看里面内容的权限才给数据
     const card = (name) => has(`monitor:card:${name}`);
     const result = {
@@ -256,7 +270,7 @@ export class SampleController {
       feed: [],
     };
     const brief = (box) => {
-      const json = view(ctx, box);
+      const json = view(ctx, box, lim);
       return {
         id: json.id,
         name: json.name,
@@ -422,7 +436,7 @@ export class SampleController {
       current.name = name;
     });
     await record(ctx, "采样箱改名", box.id);
-    ctx.ok(view(ctx, next), "已保存");
+    ctx.ok(view(ctx, next, await this.#limits()), "已保存");
   }
 
   async #nameTaken(name, exceptId) {
@@ -508,17 +522,19 @@ export class SampleController {
     if (has(BOX.imsi)) columns.push(["IMSI", (box) => box.imsi]);
     if (has(BOX.firmware)) columns.push(["固件", (box) => box.firmware]);
     const filter = readFilter(ctx);
+    const lim = await this.#limits();
     const rows = this.boxes.exportBoxes({
       ...filter,
       scope: ctx.access?.scope || null,
-      limits: limits(),
+      limits: lim,
       matchImei: canMatchImei(ctx),
       max: EXPORT_MAX,
     });
     async function* lines() {
       yield `\uFEFF${columns.map(([title]) => csvCell(title)).join(",")}\r\n`;
       for await (const box of rows) {
-        const json = box.toJSON();
+        // R13：导出电量列与列表同口径——公司预留覆盖时按公司重算
+        const json = withCompanyBattery(box.toJSON(), box, boxReserve(box, lim));
         yield `${columns.map(([, read]) => csvCell(read(json))).join(",")}\r\n`;
       }
     }
@@ -756,8 +772,14 @@ export class SampleController {
         current.ownerId = owner.id;
       }
     });
+    // R13：改挂单位后公司默认层随之切换——刷新策略生效值快照并沿既有通道下发
+    //（与划拨/签收交接同口径；仅改保管人不触发）。
+    if (org && this.policies) {
+      await this.policies.refresh([box.id], ctx.db);
+      this.policies.onPolicyChanged?.([box.id]);
+    }
     await record(ctx, "分配采样箱", box.id);
-    ctx.ok(view(ctx, next), "已保存");
+    ctx.ok(view(ctx, next, await this.#limits()), "已保存");
   }
 
   /** 分配弹窗的候选单位和人员。人员按单位取，十万台规模下人员也不一次拉全。 */
@@ -821,7 +843,7 @@ export class SampleController {
       return ctx.fail(reason);
     }
     await record(ctx, action, box.id);
-    ctx.ok(view(ctx, next), "已保存");
+    ctx.ok(view(ctx, next, await this.#limits()), "已保存");
   }
 
   /** 按编号（IMEI）找；找不到再按名称找，兼容 BOX-004 这类旧链接。 */
@@ -850,12 +872,14 @@ function allowedTo(ctx, perm) {
   return !perms || perms.has(perm);
 }
 
-function view(ctx, box) {
+function view(ctx, box, lim = null) {
   const json = box.toJSON();
+  const limits0 = lim || limits();
   // 在线在查询时刻算好随箱下发：地图/抽屉直接显示这个值，
   // 不再拿点击时的本地快照重算（快照旧于轮询间隔、周期又短时会被判假离线）。
-  json.online = boxOnline(json, limits());
-  return maskBox(json, ctx.access?.perms);
+  json.online = boxOnline(json, limits0);
+  // R13：电量显示按公司预留重算（公司未覆盖时与全局一致，原样返回）
+  return maskBox(withCompanyBattery(json, box, boxReserve(box, limits0)), ctx.access?.perms);
 }
 
 /**
@@ -934,7 +958,7 @@ function pageInMemory(ctx, rows, filter, lim) {
   );
   const start = (filter.page - 1) * filter.pageSize;
   return {
-    list: picked.slice(start, start + filter.pageSize).map((box) => view(ctx, box)),
+    list: picked.slice(start, start + filter.pageSize).map((box) => view(ctx, box, lim)),
     total: picked.length,
     // 和 SqlBoxStore.page 同一份口径：picked 含 life/flag，matched 只到搜索词（L-P0-3）
     filteredTotal: picked.length,

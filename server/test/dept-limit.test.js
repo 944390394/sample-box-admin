@@ -479,24 +479,29 @@ test("字段级遮挡：签收核验、轨迹事件按看的人的权限给；�
     }),
   };
   const db = {
+    // R13：签收核验的到达半径/电量预留按寄出公司解析（companyJudgmentFor）——
+    // 桩库补 get（无公司策略行）与 sys_dept 空表，回落系统默认，遮挡口径不变。
+    get: async () => null,
     all: async (sql) =>
-      sql.includes("sample_task_box")
-        ? [{ box_id: "A", opens_start: 0, opens_end: null, opens: 3 }]
-        : [
-            {
-              id: "A",
-              name: "A",
-              org: "",
-              life: "在途",
-              last_report_at: "",
-              gps_lng: null,
-              gps_lat: null,
-              lbs_lng: null,
-              lbs_lat: null,
-              gps_info: null,
-              lbs_at: null,
-            },
-          ],
+      sql.includes("sys_dept")
+        ? []
+        : sql.includes("sample_task_box")
+          ? [{ box_id: "A", opens_start: 0, opens_end: null, opens: 3 }]
+          : [
+              {
+                id: "A",
+                name: "A",
+                org: "",
+                life: "在途",
+                last_report_at: "",
+                gps_lng: null,
+                gps_lat: null,
+                lbs_lng: null,
+                lbs_lat: null,
+                gps_info: null,
+                lbs_at: null,
+              },
+            ],
   };
   const task = { kind: "调拨", boxIds: ["A"], maxOpens: 1 };
   const blind = await receiveCheck(db, boxes, task, "T", "待签收", { perms: new Set([BOX.task]) });
