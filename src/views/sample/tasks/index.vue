@@ -6,7 +6,7 @@
     >
       <template #actions>
         <el-button
-          v-if="can('task:create:sample')"
+          v-if="TASK_CREATE.some((perm) => can(perm))"
           type="primary"
           :icon="Plus"
           @click="router.push('/task/create')"
@@ -57,7 +57,11 @@
         <el-input
           v-model="query.q"
           :prefix-icon="Search"
-          placeholder="任务名称、编号、箱子名称或 IMEI"
+          :placeholder="
+            canImei
+              ? '任务名称、编号、箱子名称或 IMEI'
+              : '任务名称、编号、箱子名称（IMEI 检索需设备标识权限）'
+          "
           clearable
           style="width: 260px"
           @keyup.enter="reload"
@@ -65,6 +69,9 @@
         >
           <template #append><el-button @click="reload">搜索</el-button></template>
         </el-input>
+        <el-tag v-if="query.bucket" closable type="warning" @close="clearBucket">
+          {{ bucketLabel }}
+        </el-tag>
         <el-tag v-if="query.boxId" closable @close="clearBox">只看箱子 {{ query.boxId }}</el-tag>
         <el-button v-if="filtered" link type="primary" @click="resetAll">清除筛选</el-button>
       </div>
@@ -115,7 +122,7 @@
         <el-table-column label="进度" min-width="200">
           <template #default="{ row }">
             <div class="progress-line">
-              <span class="status" :class="`tone-${taskTone(row.status)}`">
+              <span class="status" :class="`tone-${taskToneFor(row)}`">
                 <i />
                 {{ row.status }}
               </span>
@@ -174,16 +181,17 @@ defineOptions({ name: "SampleTasks" });
 
 import { Plus, Search, VideoCamera } from "@element-plus/icons-vue";
 import type { OptionItem } from "@/api/common";
-import API, { type PolicyTask, type TaskCounts } from "@/api/sample/report-policy";
+import API, { type PolicyTask, type TaskCounts, type TaskQuery } from "@/api/sample/report-policy";
 import DeptAPI from "@/api/system/dept";
 import DataPager from "@/components/biz/DataPager.vue";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import TimeText from "@/components/biz/TimeText.vue";
 import { usePerm } from "@/composables/usePerm";
-import { useUrlQuery } from "@/composables/useUrlQuery";
-import { taskTone } from "@/utils/tone";
+import { hasActiveFilter, useUrlQuery } from "@/composables/useUrlQuery";
+import { taskToneFor } from "@/utils/tone";
 import { TASK_ACTIONS, isEndedFor, stepsOf } from "./status";
 import { kindLabel, kindTone } from "../doc-flow";
+import { IMEI_PERMS, TASK_CREATE } from "../data";
 
 /**
  * 任务单列表：上面按状态分标签并带数量，「待我处理」是我现在能推进的；
@@ -191,6 +199,8 @@ import { kindLabel, kindTone } from "../doc-flow";
  */
 const router = useRouter();
 const can = usePerm();
+// D7（R22 批3）：设备标识三项齐全才能按 IMEI 检索（与箱子页 canImei 同口径）；否则 placeholder 说明只能搜名称。
+const canImei = computed(() => IMEI_PERMS.every((perm) => can(perm)));
 const {
   state: query,
   sync,
@@ -198,6 +208,7 @@ const {
 } = useUrlQuery({
   status: "进行中",
   mine: "",
+  bucket: "",
   orgId: "",
   from: "",
   to: "",
@@ -213,7 +224,18 @@ const loading = ref(false);
 const orgOptions = ref<OptionItem[]>([]);
 const dates = ref<string[] | null>(query.from && query.to ? [query.from, query.to] : null);
 const tab = ref(query.mine === "1" ? "mine" : query.status || "全部");
-const filtered = computed(() => Boolean(query.orgId || query.from || query.q || query.boxId));
+const filtered = computed(() => hasActiveFilter(query, ["orgId", "from", "to", "q", "boxId"]));
+
+// D1（R22 批2）：工作台桶 chip 文案，与 home 卡片标题一致；地址栏 bucket= 可关闭（参照箱子页 tile=）。
+const BUCKET_LABELS: Record<string, string> = {
+  sampling: "采样待推进",
+  arrive: "待确认到达",
+  sign: "待签收",
+  returning: "待接收退回",
+  send: "待寄出",
+  overLimit: "开箱超限",
+};
+const bucketLabel = computed(() => BUCKET_LABELS[query.bucket] || query.bucket);
 
 const tabs = computed(() => [
   { key: "mine", label: "待我处理", count: counts.value.mine },
@@ -239,7 +261,10 @@ async function load() {
       page: query.page,
       pageSize: query.pageSize,
       mine: query.mine === "1" ? "1" : undefined,
-      status: query.mine === "1" || query.status === "全部" ? undefined : query.status || undefined,
+      // P1-4：mine=1 也带 status（服务端在 mineRows 上内存过滤，可组合）；「全部」页签不传 status
+      status: query.status === "全部" ? undefined : query.status || undefined,
+      // D1：桶参数（与 todo 同谓词）；非法值服务端静默忽略，这里只传已知桶
+      bucket: BUCKET_LABELS[query.bucket] ? (query.bucket as TaskQuery["bucket"]) : undefined,
       // R23：任务单页放三类（采样/送检/采样后送检），服务端默认口径；划拨有独立页，旧调拨只读不混入
       orgId: query.orgId || undefined,
       from: query.from || undefined,
@@ -264,6 +289,8 @@ function onTab(name: string | number) {
   const key = String(name);
   query.mine = key === "mine" ? "1" : "";
   query.status = key === "mine" ? "" : key;
+  // 切页签即退出桶视图（桶是「待我处理」的子筛，不挂在别的页签上）
+  query.bucket = "";
   reload();
 }
 function onDates(value: string[] | null) {
@@ -273,6 +300,10 @@ function onDates(value: string[] | null) {
 }
 function clearBox() {
   query.boxId = "";
+  reload();
+}
+function clearBucket() {
+  query.bucket = "";
   reload();
 }
 function resetAll() {

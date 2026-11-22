@@ -159,7 +159,7 @@ import StatTiles, { type StatTile } from "@/components/biz/StatTiles.vue";
 import TimeText from "@/components/biz/TimeText.vue";
 import DataPager from "@/components/biz/DataPager.vue";
 import { usePerm } from "@/composables/usePerm";
-import { useUrlQuery } from "@/composables/useUrlQuery";
+import { hasActiveFilter, useUrlQuery } from "@/composables/useUrlQuery";
 import { transferTone } from "@/utils/tone";
 import { TRANSFER_CREATE, TRANSFER_REVOKE } from "../data";
 import CreateDialog from "./CreateDialog.vue";
@@ -195,7 +195,7 @@ const tab = ref(query.status || "全部");
 const createOpen = ref(false);
 const revokeOpen = ref(false);
 const revokeId = ref("");
-const filtered = computed(() => Boolean(query.orgId || query.from || query.q));
+const filtered = computed(() => hasActiveFilter(query, ["orgId", "from", "to", "q"]));
 
 const tabs = computed(() => [
   { key: "全部", label: "全部", count: counts.value.全部 },

@@ -322,6 +322,8 @@ export interface TaskQuery {
   from?: string;
   to?: string;
   mine?: "1";
+  /** D1（R22 批2）：工作台桶参数，与 todo() 同谓词；mine=1 时落地行数==卡片数字。 */
+  bucket?: "sampling" | "arrive" | "sign" | "returning" | "send" | "overLimit";
 }
 /** 同样筛选下各状态的数量；mine 是我现在能推进的。 */
 export type TaskCounts = Record<string, number> & {

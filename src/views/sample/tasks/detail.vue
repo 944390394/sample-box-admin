@@ -5,7 +5,7 @@
         <el-tag :type="kindTone(kindLabel(task))" effect="plain">
           {{ kindLabel(task) }}
         </el-tag>
-        <el-tag :type="taskStatusType(task.status)">{{ task.status }}</el-tag>
+        <el-tag :type="taskStatusType(task)">{{ task.status }}</el-tag>
         <el-tag
           v-if="task.trip"
           :type="merged ? (task.trip === '双向' ? 'warning' : 'success') : 'warning'"

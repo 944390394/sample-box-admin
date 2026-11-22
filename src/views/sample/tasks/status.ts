@@ -16,9 +16,14 @@ import {
   stepsOf as flowStepsOf,
 } from "../../../../shared/taskFlow.js";
 
-export function taskStatusType(status: string) {
-  if (ENDED_OK.includes(status)) return "success";
-  if (ENDED_VOID.includes(status)) return "info";
+/**
+ * 任务状态 tag 色（详情头共用）。R22 批1/P1-3：kind 感知终态——仅本地采样单
+ * 「已封箱」是终态OK（success），与 isEndedFor/endedToneFor 同口径；合并单同名状态仍进行中。
+ * 参数收任务对象（status/kind/localOnly），不再只吃 status，避免列表与详情对「结没结束」给出相反答案。
+ */
+export function taskStatusType(task: { status?: string; kind?: string; localOnly?: boolean }) {
+  const status = String(task?.status || "");
+  if (isEndedFor(task)) return ENDED_VOID.includes(status) ? "info" : "success";
   if (["待寄出", "待签收", "待核验", "待检测", "退回中"].includes(status)) return "warning";
   return "primary";
 }

@@ -96,6 +96,17 @@ export function identityGranted(perms) {
   return !perms || IDENTITY_PERMS.every((perm) => perms.has(perm));
 }
 
+/**
+ * 能不能按 IMEI 检索（箱子列表与任务单列表共用，D7/R22 批3）。
+ * 箱子编号现在就是 15 位 IMEI，「按名称搜」和「按 IMEI 搜」是同一条 SQL；
+ * 没有「设备标识」权限的角色不该拿整队箱子的 IMEI 去试存在性（枚举预言机），
+ * 所以按 identity 口径收口：m.box_id / box.id 这一项不参与匹配，只能搜名称。
+ * 提到共享处避免箱子侧与任务侧两处漂移（任务侧 q 分支曾无门控，P1-2）。
+ */
+export function canMatchImei(ctx) {
+  return identityGranted(ctx.access?.perms);
+}
+
 /** IMEI 打码：留前 3 位和后 4 位，够现场对上尾号，又抄不走整串。 */
 export function maskImei(imei) {
   const text = String(imei || "");

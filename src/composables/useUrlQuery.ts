@@ -38,3 +38,15 @@ export function useUrlQuery<T extends Record<string, string | number>>(defaults:
 
   return { state, sync, reset };
 }
+
+/**
+ * 「清除筛选」按钮显隐（P2-9）：这些筛选键里有非空值即算有生效筛选。
+ * 显式列键（而非全量状态差集）——页签 status/mine 与分页 page/pageSize 不算筛选条条件。
+ * 任务单与调拨单共用，结束日期 to 这类漏项一次修齐，不再各页手抄 Boolean(a||b||…)。
+ */
+export function hasActiveFilter(state: Record<string, string | number>, keys: string[]): boolean {
+  return keys.some((key) => {
+    const value = state[key];
+    return value !== "" && value != null;
+  });
+}

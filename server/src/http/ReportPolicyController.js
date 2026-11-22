@@ -30,7 +30,14 @@ import {
 import { effectiveDeptLocation, hasCoords, readPlace } from "../geo/place.js";
 import { companyTool } from "../settings/boxCompany.js";
 import { taskTrack, taskWindow } from "../settings/taskTrack.js";
-import { maskBox, maskImei, maskUplink, identityGranted, boxNameCell } from "../auth/boxAccess.js";
+import {
+  maskBox,
+  maskImei,
+  maskUplink,
+  identityGranted,
+  boxNameCell,
+  canMatchImei,
+} from "../auth/boxAccess.js";
 import { readCameras } from "../settings/deptCameras.js";
 import { receiveCheck } from "../settings/receiveCheck.js";
 import {
@@ -144,6 +151,32 @@ function isSystemAdmin(ctx) {
     roles.some((role) => (typeof role === "string" ? role : role?.code) === "ADMIN") ||
     Boolean(ctx.access?.scope?.all)
   );
+}
+
+/**
+ * 系统管理员（角色口径，R-b）：数据范围=全部≠系统管理员——值班/核验等全部范围角色不是 ADMIN。
+ * 角色列表存在时只认 ADMIN（不再用 scope.all 兜底，否则 DUTY 全部范围被当成管理员）；
+ * 内部/手工构造的 access 无角色列表时回落 scope.all（生产 resolveAccess 恒填角色，空角色＝无权限到不了写动作）。
+ */
+function isAdminRole(ctx) {
+  const roles = ctx.access?.roles || ctx.user?.roles || [];
+  const codes = roles.map((role) => (typeof role === "string" ? role : role?.code)).filter(Boolean);
+  if (codes.length) return codes.includes("ADMIN");
+  return Boolean(ctx.access?.scope?.all);
+}
+
+/**
+ * 参与方门（写动作，R-b）：数据范围=全部不等于参与方。采样/寄出/接收单位要落在管理范围
+ * （manageOrgIds）里、或系统管理员（ADMIN）才认；全部范围的非 ADMIN 角色（如检测站值守 DUTY）
+ * 不能推进他单位的采样/检测步。读可见性仍走 inScope（orgIds 含祖先与全部），这里只收写动作的参与方判定。
+ * 手工构造的 scope 可能没有 manageOrgIds（如单测），退回 orgIds（与 orgScopeSql manage 口径同族）。
+ */
+function inPartyScope(ctx, orgId) {
+  const scope = ctx.access?.scope;
+  if (!scope) return true;
+  if (scope.all) return isAdminRole(ctx);
+  const ids = scope.manageOrgIds ?? scope.orgIds;
+  return ids.includes(String(orgId ?? ""));
 }
 
 /** 所有策略写入都再次校验目标设备范围；批量操作不接受客户端声称的权限。 */
@@ -703,10 +736,17 @@ export class ReportPolicyController {
     const q = typeof ctx.query.q === "string" ? ctx.query.q.trim().slice(0, 60) : "";
     if (q) {
       const like = likePattern(q);
+      // D7（R22 批3/P1-2）：m.box_id 就是整串 IMEI，无设备标识权限时这一项不参与匹配
+      //（与箱子列表 canMatchImei 同口径，堵「IMEI→存在性/挂哪张单」枚举预言机）。
+      // b.name 保留现状：已命名箱可按名称搜；未命名箱 name 列空串（编号只在 JSON 出口回显，不落 name 列），非泄漏面。
+      const matchImei = canMatchImei(ctx);
+      const boxMatch = matchImei
+        ? `m.box_id LIKE ? ${ESCAPE_SQL} OR b.name LIKE ? ${ESCAPE_SQL}`
+        : `b.name LIKE ? ${ESCAPE_SQL}`;
       clauses.push(
-        `(t.id LIKE ? ${ESCAPE_SQL} OR t.name LIKE ? ${ESCAPE_SQL} OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (m.box_id LIKE ? ${ESCAPE_SQL} OR b.name LIKE ? ${ESCAPE_SQL})))`
+        `(t.id LIKE ? ${ESCAPE_SQL} OR t.name LIKE ? ${ESCAPE_SQL} OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (${boxMatch})))`
       );
-      params.push(like, like, like, like);
+      params.push(like, like, ...(matchImei ? [like, like] : [like]));
     }
     const base = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     // 各状态数量（不受状态筛选影响）。R23：本地采样已封箱是终态，按 kind+localOnly 区分进行中/已结束。
@@ -725,16 +765,35 @@ export class ReportPolicyController {
         (row.kind === "采样" && Number(row.local) === 1 && row.status === "已封箱");
       counts[ended ? "已结束" : "进行中"] += n;
     }
-    // 我能推进的：只在进行中的任务里找，最多看 500 张
+    // 我能推进的：只在进行中的任务里找，最多看 500 张（与工作台 todo 同窗口）
     const activeRows = await this.db.all(
       `SELECT t.* FROM sample_task t ${base ? `${base} AND` : "WHERE"} ${activeTaskSql()} ORDER BY created_at DESC LIMIT 500`,
       params
     );
+    // 每单 abilities 算一次：mine 过滤与 bucket 分桶共用（D1：与 todo() 同谓词同窗口）
+    const active = activeRows.map((row) => {
+      const task = JSON.parse(row.body);
+      return { row, task, can: this.#abilities(ctx, task, row.status) };
+    });
     // 只能取消的不算「待我处理」：和工作台、顶栏铃铛用同一个口径
-    const mineRows = activeRows.filter((row) =>
-      actionable(this.#abilities(ctx, JSON.parse(row.body), row.status))
-    );
+    const mineRows = active.filter((item) => actionable(item.can)).map((item) => item.row);
     counts.mine = mineRows.length;
+    // D1（R22 批2）：bucket 与 todo() 同谓词（bucketsOf），在同一「进行中前 500 张」窗口上分桶，
+    // 保证工作台卡片数字==点击落地行数。overLimit 要开箱数，仅该桶时逐单算；其余桶只看 can。
+    // 非法 bucket 静默忽略（回落普通列表，与 kind 非法值同口径）。
+    const bucket = BUCKET_KEYS.includes(ctx.query.bucket) ? ctx.query.bucket : "";
+    let bucketIds = null;
+    if (bucket) {
+      bucketIds = new Set();
+      for (const item of active) {
+        const openOver =
+          bucket === "overLimit" && Number.isInteger(item.task.maxOpens)
+            ? overOpenLimit(item.task, await openCounts(this.db, item.row.id)).length
+            : null;
+        if (bucketsOf(item.task, item.row.status, item.can, openOver).includes(bucket))
+          bucketIds.add(item.row.id);
+      }
+    }
 
     const statusClauses = [...clauses],
       statusParams = [...params];
@@ -755,9 +814,31 @@ export class ReportPolicyController {
     const page = Math.max(1, Math.floor(Number(ctx.query.page) || 1));
     const pageSize = Math.min(100, Math.max(1, Math.floor(Number(ctx.query.pageSize) || 20)));
     let rows, total;
-    if (ctx.query.mine === "1") {
-      total = mineRows.length;
-      rows = mineRows.slice((page - 1) * pageSize, page * pageSize);
+    const mine = ctx.query.mine === "1";
+    if (mine || bucket) {
+      // mine/bucket/status 在内存组合（mineRows 上再过滤，500 截断行为不变；P1-4：mine+status 可组合）。
+      // bucket 命中集来自 activeRows（todo 同窗口）；mine=1 再与 mineRows 取交集
+      //（can 基桶 send/arrive/sign/returning/sampling 本就⊆mineRows；overLimit 含只能取消的单，故不强制 mine）。
+      let picked = bucket ? activeRows.filter((row) => bucketIds.has(row.id)) : mineRows;
+      if (mine && bucket) {
+        const mineIds = new Set(mineRows.map((row) => row.id));
+        picked = picked.filter((row) => mineIds.has(row.id));
+      }
+      const status = typeof ctx.query.status === "string" ? ctx.query.status : "";
+      if (status && status !== "全部") {
+        // 窗口本身只含进行中：进行中＝全留、已结束＝空；签收/具体状态按状态名匹配
+        picked = picked.filter((row) =>
+          status === "进行中"
+            ? true
+            : status === "已结束"
+              ? false
+              : status === "签收"
+                ? SIGN_STEPS.includes(row.status)
+                : row.status === status
+        );
+      }
+      total = picked.length;
+      rows = picked.slice((page - 1) * pageSize, page * pageSize);
     } else {
       rows = await this.db.all(
         `SELECT t.* FROM sample_task t ${where} ORDER BY created_at DESC,id DESC LIMIT ${pageSize} OFFSET ?`,
@@ -1403,7 +1484,8 @@ export class ReportPolicyController {
     const may = (perm, party) => Boolean(view && has(perm) && party);
     // R23 仅本地采样单：采样段归采样单位（＝箱归属），无寄送/检测站步；已封箱终态。
     if (isLocalSample(task)) {
-      const unit = inScope(ctx, task.orgId || task.fromOrgId);
+      // R-b：参与方门走管理范围（manageOrgIds/ADMIN），全部范围的非 ADMIN 角色不能推进他单位采样步
+      const unit = inPartyScope(ctx, task.orgId || task.fromOrgId);
       const STEP = { 采样中: T.sampleStart, 已封箱: T.seal };
       return Object.fromEntries(
         next.map((to) => {
@@ -1419,10 +1501,12 @@ export class ReportPolicyController {
     if (merged) {
       // 合并采样单（P6）：采样段归寄出分公司；签收/拒收/开始检测归检测站；
       // 退回由检测站发起（待检测/已检测），寄出方接收退回（R22 双向＝检测站自己）。
-      const sender = inScope(ctx, task.fromOrgId);
-      const receiver = inScope(ctx, task.toOrgId);
+      // R-b：参与方门走管理范围（manageOrgIds/ADMIN）——数据范围=全部≠参与方，
+      // 检测站值守（DUTY 全部范围）不能推进他单位的采样段/检测段（写探针证实越权后收紧）。
+      const sender = inPartyScope(ctx, task.fromOrgId);
+      const receiver = inPartyScope(ctx, task.toOrgId);
       const signer = isSigner(ctx, task);
-      const sampler = task.orgId ? inScope(ctx, task.orgId) : sender;
+      const sampler = task.orgId ? inPartyScope(ctx, task.orgId) : sender;
       const STEP = { 采样中: T.sampleStart, 已封箱: T.seal, 在途: T.sendBack };
       const can = Object.fromEntries(
         next.map((to) => {
@@ -1608,23 +1692,12 @@ export class ReportPolicyController {
         boxes: (task.boxIds || []).length,
       };
       if (actionable(can)) groups.todo.push(brief);
-      if (can["运送中"]) groups.send.push(brief);
-      if (can["待签收"] || (row.status === "运送中" && can["待采样"])) groups.arrive.push(brief);
-      if (can["已签收"] || can["待检测"] || can[FORCE_SIGN]) groups.sign.push(brief);
-      if (can["已退回"]) groups.returning.push(brief);
-      if (can["已检测"]) groups.inspect.push(brief);
-      if (
-        (isLocalSample(task) || isMergedSample(task)) &&
-        ["待采样", "采样中", "已封箱"].includes(row.status) &&
-        Object.entries(can).some(([to, ok]) => ok && to !== "已取消")
-      )
-        groups.sampling.push(brief);
+      // 分桶谓词与 tasks()?bucket= 共用 bucketsOf（D1/R22 批2：卡片数字==点击落地行数）
+      const openOver = Number.isInteger(task.maxOpens)
+        ? overOpenLimit(task, await openCounts(this.db, row.id)).length
+        : 0;
+      for (const key of bucketsOf(task, row.status, can, openOver)) groups[key].push(brief);
       if (["运送中", "在途"].includes(row.status)) groups.moving.push(brief);
-      if (
-        Number.isInteger(task.maxOpens) &&
-        overOpenLimit(task, await openCounts(this.db, row.id)).length
-      )
-        groups.overLimit.push(brief);
       if (
         (me && (task.senderId === me || task.signerId === me)) ||
         (myName && String(task.people || "").includes(myName))
@@ -2119,6 +2192,31 @@ const SIGN_STEPS = ["待签收", "待核验"];
 /** 有取消以外的动作可做：算「待我处理」。只能取消的（比如管理员看别人的单）不算。 */
 function actionable(can) {
   return Object.entries(can).some(([to, ok]) => ok && to !== "已取消");
+}
+
+/** 任务单列表支持的桶参数（D1/R22 批2）：与工作台 todo() 同一份谓词，保证「卡片数字==点击落地行数」。 */
+const BUCKET_KEYS = ["sampling", "arrive", "sign", "returning", "send", "overLimit"];
+
+/**
+ * 工作台分桶谓词（D1/R22 批2）：todo() 与 tasks()?bucket= 共用这一份，避免两处漂移。
+ * 返回该任务命中的桶名数组。overLimit 要开箱数（异步），由调用方先算好传入
+ * （>0＝命中；null/0＝未算或无超限，不算命中）；其余桶只看 can（与 todo 逐条判定一致）。
+ */
+function bucketsOf(task, status, can, openOver = null) {
+  const buckets = [];
+  if (can["运送中"]) buckets.push("send");
+  if (can["待签收"] || (status === "运送中" && can["待采样"])) buckets.push("arrive");
+  if (can["已签收"] || can["待检测"] || can[FORCE_SIGN]) buckets.push("sign");
+  if (can["已退回"]) buckets.push("returning");
+  if (can["已检测"]) buckets.push("inspect");
+  if (
+    (isLocalSample(task) || isMergedSample(task)) &&
+    ["待采样", "采样中", "已封箱"].includes(status) &&
+    Object.entries(can).some(([to, ok]) => ok && to !== "已取消")
+  )
+    buckets.push("sampling");
+  if (openOver) buckets.push("overLimit");
+  return buckets;
 }
 
 /** 任务要记进出的地点：调拨/送检/合并单看寄出、收货地址，本地采样看计划地点（旧双向单再加寄出地址）。没坐标的跳过。

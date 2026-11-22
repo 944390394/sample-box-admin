@@ -428,7 +428,11 @@ const cards = computed<Card[]>(() => {
   if (!d) return [];
   const list: Card[] = [];
   const t = d.taskTodo;
-  const mine = { path: "/task/tasks", query: { mine: "1" } };
+  // D1（R22 批2）：一卡一筛——more 带 mine=1＋bucket，落地行数==卡片数字（服务端 bucketsOf 与 todo 同谓词）。
+  const bucketMore = (bucket: string) => ({
+    path: "/task/tasks",
+    query: { mine: "1", bucket },
+  });
   const push = (
     card: Omit<Card, "tasks" | "boxes">,
     bucket?: Bucket<TaskBrief> | Bucket<BoxBrief>,
@@ -448,7 +452,7 @@ const cards = computed<Card[]>(() => {
         title: "待寄出",
         hint: "箱子装好后点「确认寄出」",
         tone: "primary",
-        more: mine,
+        more: bucketMore("send"),
       },
       t.send
     );
@@ -458,12 +462,18 @@ const cards = computed<Card[]>(() => {
         title: "待确认到达",
         hint: "箱子到了收货地址后确认",
         tone: "primary",
-        more: mine,
+        more: bucketMore("arrive"),
       },
       t.arrive
     );
     push(
-      { key: "sign", title: "待签收", hint: "扫箱码做签收核验", tone: "warning", more: mine },
+      {
+        key: "sign",
+        title: "待签收",
+        hint: "扫箱码做签收核验",
+        tone: "warning",
+        more: bucketMore("sign"),
+      },
       t.sign
     );
     push(
@@ -472,7 +482,7 @@ const cards = computed<Card[]>(() => {
         title: "待接收退回",
         hint: "被拒收、正退回本单位的箱子，到了以后扫码接收",
         tone: "warning",
-        more: mine,
+        more: bucketMore("returning"),
       },
       t.returning
     );
@@ -482,7 +492,7 @@ const cards = computed<Card[]>(() => {
         title: "采样待推进",
         hint: "开始采样、封箱、寄检测站",
         tone: "primary",
-        more: mine,
+        more: bucketMore("sampling"),
       },
       t.sampling
     );
@@ -502,7 +512,8 @@ const cards = computed<Card[]>(() => {
         title: "开箱超限",
         hint: "任务期间开箱次数超过上限",
         tone: "danger",
-        more: { path: "/task/tasks", query: { status: "进行中" } },
+        // 超限桶不按 actionable 过滤（todo.overLimit 含只能取消的单），故不带 mine=1，落地行数==卡片数字
+        more: { path: "/task/tasks", query: { bucket: "overLimit" } },
       },
       t.overLimit
     );

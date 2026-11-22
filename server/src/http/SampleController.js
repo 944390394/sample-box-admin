@@ -3,6 +3,7 @@ import {
   boxLowMv,
   boxNameCell,
   boxOnline,
+  canMatchImei,
   canSee,
   EVENT_KINDS,
   EVENT_PERMS,
@@ -1006,15 +1007,6 @@ function view(ctx, box, lim = null) {
   json.online = boxOnline(json, limits0);
   // R13：电量显示按公司预留重算（公司未覆盖时与全局一致，原样返回）
   return maskBox(withCompanyBattery(json, box, boxReserve(box, limits0)), ctx.access?.perms);
-}
-
-/**
- * 能不能按 IMEI 搜。箱子编号现在就是 IMEI，所以「按名称搜」和「按 IMEI 搜」是同一条 SQL；
- * 没有「设备标识」权限的角色（现场采样员默认就是这样）不该拿整队箱子的 IMEI 去试，
- * 所以这里按 identity 口径收口：只能搜名称。
- */
-function canMatchImei(ctx) {
-  return identityGranted(ctx.access?.perms);
 }
 
 /** 低电量、开着盖、可调配的计数要对应的字段权限，没有就不给这几个数。 */
