@@ -52,7 +52,10 @@
               修改
             </el-button>
           </template>
-          <span v-else class="box-strip-empty" data-test="create-box-strip-empty">未选采样箱</span>
+          <template v-else>
+            <span class="box-strip-empty" data-test="create-box-strip-empty">未选采样箱</span>
+            <span class="box-strip-hint">在「采样箱」步绑定后，这里会常驻显示已绑定的箱子</span>
+          </template>
         </div>
         <el-steps :active="step" finish-status="success" align-center class="steps">
           <el-step
@@ -72,10 +75,36 @@
           @submit.prevent
         >
           <template v-if="current === 'basic'">
-            <el-form-item label="任务类型" required>
-              <div class="kind-cards" data-test="create-kind-cards">
+            <el-form-item label="任务类型" required class="kind-item">
+              <div
+                class="kind-cards"
+                :class="{ solo: kindCards.length === 1 }"
+                data-test="create-kind-cards"
+              >
+                <!-- 暂时下线（#73）：单独的「采样」「送检」两张类型卡暂不开放，只保留「采样后送检」。
+                     恢复时取消注释下方原卡片循环并同步 kindAllowed（脚本内同名恢复点），删掉 kindCards 临时过滤。
                 <button
                   v-for="meta in KIND_META"
+                  :key="meta.kind"
+                  type="button"
+                  class="kind-card"
+                  :class="{ on: form.kind === meta.kind, disabled: !kindAllowed(meta.kind) }"
+                  :disabled="!kindAllowed(meta.kind)"
+                  :data-test="`create-kind-${meta.kind}`"
+                  @click="pickKind(meta.kind)"
+                >
+                  <span class="kind-head">
+                    <el-tag :type="kindTone(meta.kind)" effect="plain" size="small">
+                      {{ meta.label }}
+                    </el-tag>
+                    <el-icon v-if="form.kind === meta.kind" class="check"><Check /></el-icon>
+                  </span>
+                  <span class="kind-desc">{{ meta.desc }}</span>
+                  <span class="kind-flow">{{ meta.flow }}</span>
+                </button>
+                -->
+                <button
+                  v-for="meta in kindCards"
                   :key="meta.kind"
                   type="button"
                   class="kind-card"
@@ -666,7 +695,9 @@
         </el-form>
 
         <div class="actions">
-          <el-button @click="router.push('/task/tasks')">放弃</el-button>
+          <el-button text data-test="create-abandon" @click="router.push('/task/tasks')">
+            放弃
+          </el-button>
           <div class="grow"></div>
           <el-button v-if="step > 0" @click="step--">上一步</el-button>
           <el-button v-if="current !== 'review'" type="primary" @click="next">下一步</el-button>
@@ -742,8 +773,16 @@ const canReadPolicy = computed(() => Boolean(user.userInfo.perms?.includes(polic
 const canManage = computed(() => canSample.value || canInspect.value);
 /** 某类型当前账号能不能建（送检严格要 inspect 码，与服务器同口径；R21/062 去 sample 兜底）。 */
 function kindAllowed(kind: string) {
-  return kind === "送检" ? canInspect.value : canSample.value;
+  // 暂时下线（#73）：建单口径暂只放行「采样后送检」。恢复时取消注释原判定、删掉本行守卫，
+  // 并同步模板 kindCards（恢复 v-for="meta in KIND_META"）。
+  // return kind === "送检" ? canInspect.value : canSample.value;
+  return kind === "采样后送检" && canSample.value;
 }
+/**
+ * 暂时下线（#73）：类型卡只渲染「采样后送检」，单独的「采样」「送检」隐藏（模板原循环已注释保留）。
+ * 恢复点：删掉本过滤，模板恢复 KIND_META 全量循环，kindAllowed 同步放行。
+ */
+const kindCards = KIND_META.filter((meta) => meta.kind === "采样后送检");
 const previewFailed = ref(false);
 let previewRequest = 0;
 const form = reactive({
@@ -777,6 +816,26 @@ const kindFlowTip = computed(() =>
     ? MERGED_FLOW_TEXT
     : KIND_META.find((m) => m.kind === form.kind)?.desc || ""
 );
+/**
+ * 暂时下线（#73）：深链（?kind= 或旧入口 ?type=）／缓存旧状态带「采样」「送检」进创建页时，
+ * 回落默认「采样后送检」并一次性提示，不报错。恢复三类型时删除本段及 init/onActivated 里的调用。
+ */
+const kindFallbackNoticed = ref(false);
+function fallbackKindIfNeeded() {
+  const asked = String(route.query.kind || route.query.type || "");
+  const legacy = asked === "采样" || asked === "送检";
+  const stale = form.kind !== "采样后送检";
+  // 已回落且提示过就不再动（keep-alive 切回时 query 仍带旧 kind，不能把用户填到一半的步骤重置）
+  if (!stale && (!legacy || kindFallbackNoticed.value)) return;
+  if (stale) {
+    form.kind = "采样后送检";
+    step.value = 0;
+  }
+  if (!kindFallbackNoticed.value) {
+    kindFallbackNoticed.value = true;
+    ElMessage.info("单独的「采样」「送检」建单暂时下线，已按「采样后送检」继续填写。");
+  }
+}
 /** 各步骤的字段错误，显示在对应输入框下面。 */
 const errors = reactive<Record<string, string>>({});
 const advancedOpen = ref(false);
@@ -1340,6 +1399,7 @@ const presetMissing = ref(0);
  */
 async function init() {
   if (!canManage.value) return;
+  fallbackKindIfNeeded();
   optionsFailed.value = false;
   try {
     const loaded = await API.taskOptions();
@@ -1382,16 +1442,30 @@ onMounted(() => {
 });
 // 页面被 keep-alive 缓存时切走不会 unmount：不摘掉监听，在别的页面关标签也会被拦
 onDeactivated(() => window.removeEventListener("beforeunload", onBeforeUnload));
-onActivated(() => window.addEventListener("beforeunload", onBeforeUnload));
+onActivated(() => {
+  window.addEventListener("beforeunload", onBeforeUnload);
+  // keep-alive 切回时深链 query 可能已换成旧 kind，同样回落（一次性提示由 kindFallbackNoticed 保证）
+  fallbackKindIfNeeded();
+});
 onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload));
 </script>
 <style scoped>
-/* 卡片铺开到 1280px：选箱表格、核对页要宽；填写类的步骤输入框收在 720px 内，不拉得太长 */
+/* 卡片铺开到 1280px：选箱表格、核对页要宽；填写类的步骤输入框收在 720px 内，不拉得太长。
+   #74：超宽屏封顶 1280 居中不拉伸（settings 先例）；flex-grow 让卡片吃掉页面剩余高度，
+   卡底贴视口底，去掉卡片外死白（内容高于视口时整页滚动＋操作条吸底）。
+   #79/D2：flex-column 父容器里 margin-inline:auto 吸收 cross-axis 自由空间、废掉 stretch，
+   solo 单列步（选箱/核对）会缩成 fit-content 窄卡；显式 width:100% 让所有步骤统一铺满内容宽
+   （仍封顶 1280 居中），核对页 auto-fill 网格随之在宽容器恢复多列。 */
 .create-layout {
   display: grid;
+  flex-grow: 1;
+  grid-template-rows: 1fr;
   grid-template-columns: minmax(0, 1fr) 300px;
   gap: var(--page-gap);
   align-items: start;
+  width: 100%;
+  max-width: 1280px;
+  margin-inline: auto;
 }
 .create-layout.solo {
   grid-template-columns: minmax(0, 1fr);
@@ -1402,6 +1476,7 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
 }
 @media (max-width: 1100px) {
   .create-layout {
+    grid-template-rows: auto;
     grid-template-columns: minmax(0, 1fr);
   }
   .summary {
@@ -1409,34 +1484,45 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   }
 }
 .task-form {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
   min-width: 0;
+  /* EP el-card 默认 overflow:hidden 会废掉操作条的 sticky，这里放开（卡片底色与 body 同色，圆角不露馅） */
+  overflow: visible;
 }
 .task-form :deep(.el-card__body) {
-  padding: 24px 28px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  padding: 24px 28px 0;
+  /* EP 默认 overflow:auto 会把 body 变成不滚动的 scrollport、废掉操作条 sticky；卡片随内容长高，放开不裁切 */
+  overflow: visible;
 }
+/* #74 箭头②：步骤条铺满卡片内容宽（去 960 居中），六步由 el-steps align-center 均衡分布，左右与卡片内边对齐 */
 .steps {
-  max-width: 960px;
-  margin: 4px auto 32px;
+  flex-shrink: 0;
+  margin: 0 0 24px;
 }
 .steps :deep(.jump) {
   cursor: pointer;
 }
 /*
- * R27 常驻采样箱栏：和步骤条同宽、贴在它上面，只用一行小字＋标签＋一条虚线分隔。
- * 不铺底色做成独立横条（那种在页头和表单之间太突兀，先例 R20 的收尾口径是融入而不是加块）。
+ * #74 箭头①：R27 常驻采样箱栏改正规信息条——与步骤卡同体同宽、1px 边框＋浅底＋圆角容器，
+ * 空态是容器内的内联灰字（不再漂浮微灰字）；已选＝chips＋台数＋修改（跳步逻辑不变）。
  */
 .box-strip {
   display: flex;
+  flex-shrink: 0;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  max-width: 960px;
-  padding-bottom: 10px;
-  margin: 0 auto 2px;
-  border-bottom: 1px dashed var(--el-border-color-lighter);
-}
-.box-strip.idle {
-  min-height: 22px;
+  min-height: 40px;
+  padding: 8px 12px;
+  margin: 0 0 16px;
+  background: var(--page-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
 }
 .box-strip-label,
 .box-strip-count,
@@ -1445,6 +1531,10 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   color: var(--el-text-color-secondary);
 }
 .box-strip-empty {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.box-strip-hint {
   font-size: 12px;
   color: var(--el-text-color-placeholder);
 }
@@ -1461,9 +1551,11 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   }
 }
 .body {
-  min-height: 320px;
+  flex: 1;
+  min-width: 0;
 }
-.body:not(.wide) :deep(.el-form-item__content) {
+/* 任务名称/备注等输入字段收 720，与其他步一致；类型面板（.kind-item）例外铺满内容列 */
+.body:not(.wide) :deep(.el-form-item:not(.kind-item) .el-form-item__content) {
   max-width: 720px;
 }
 .preview {
@@ -1496,26 +1588,31 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
 }
-/* R23 三类型卡片：选中主色描边＋对勾，禁用灰显；流预览小字 */
+/* R23 三类型卡片：选中主色描边＋对勾，禁用灰显；流预览小字。
+   #74：单卡（#73 暂只留合并）时改横向信息面板铺满内容列——类型名｜流程预览／说明横排，不再留孤卡；
+   恢复三类型后 solo 自动失效回三列网格。间距/圆角走 ov token 与 4px 网格。 */
 .kind-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
   width: 100%;
+}
+.kind-cards.solo {
+  grid-template-columns: 1fr;
 }
 .kind-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 12px 16px;
   text-align: left;
   cursor: pointer;
-  background: var(--el-fill-color-lighter);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  background: var(--page-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
   transition:
-    border-color 0.15s,
-    background 0.15s;
+    border-color var(--motion-fast),
+    background var(--motion-fast);
 }
 .kind-card:hover:not(.disabled) {
   border-color: var(--el-color-primary-light-5);
@@ -1528,6 +1625,26 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   cursor: not-allowed;
   opacity: 0.5;
 }
+.kind-cards.solo .kind-card {
+  display: grid;
+  grid-template-areas:
+    "head flow"
+    "desc desc";
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 16px;
+  align-items: center;
+}
+.kind-cards.solo .kind-head {
+  grid-area: head;
+  gap: 8px;
+  justify-content: flex-start;
+}
+.kind-cards.solo .kind-flow {
+  grid-area: flow;
+}
+.kind-cards.solo .kind-desc {
+  grid-area: desc;
+}
 .kind-head {
   display: flex;
   align-items: center;
@@ -1539,12 +1656,12 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
 .kind-desc {
   font-size: 12px;
   line-height: 1.6;
-  color: var(--el-text-color-regular);
+  color: var(--el-text-color-secondary);
 }
 .kind-flow {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-regular);
 }
 @media (max-width: 900px) {
   .kind-cards {
@@ -1556,13 +1673,20 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   gap: 8px;
   align-items: center;
 }
+/* #74 箭头③：操作条收进卡片底边——负 margin bleed 到卡片左右边、不透明底＋上分隔线；
+   内容高于视口整页滚动时 sticky 吸底（scrollport＝.page-container）；放弃＝左 ghost，上一步/下一步靠右。 */
 .actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
   display: flex;
+  flex-shrink: 0;
   gap: 8px;
   align-items: center;
-  padding-top: 16px;
-  margin-top: 8px;
-  border-top: 1px solid var(--el-border-color-lighter);
+  padding: 12px 28px;
+  margin: 16px -28px 0;
+  background: var(--content-bg);
+  border-top: 1px solid var(--card-border);
 }
 .grow {
   flex: 1;
@@ -1623,7 +1747,11 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
     grid-template-columns: 64px 1fr;
   }
   .task-form :deep(.el-card__body) {
-    padding: 16px;
+    padding: 16px 16px 0;
+  }
+  .actions {
+    padding: 12px 16px;
+    margin: 16px -16px 0;
   }
 }
 </style>

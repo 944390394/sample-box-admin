@@ -229,15 +229,9 @@ export const TASK_PERMS = [
     "do",
     TASK_ENTER
   ),
-  item(
-    9421,
-    "task:transfer:revoke",
-    "撤销划拨",
-    "整单退回原公司；任一箱子已进入任务/已开箱/已检测则整单禁撤",
-    "task",
-    "do",
-    TASK_ENTER
-  ),
+  // R24（#70）撤销划拨下线：原 item(9421, "task:transfer:revoke", "撤销划拨") 已从目录移除，
+  // 角色页不再出现该勾选项，新角色也无法被授予。历史 9421 行与存量授权行留在库里不动
+  //（不新增迁移），前端门与后端路由都不再读它，等同 inert。
   item(
     9412,
     "task:policy",
@@ -1217,8 +1211,9 @@ const LEGACY_DEFAULTS = {
     // 组织简化（B4a，B3 遗留②）：分公司内部调度岗建合并采样单是主路径，显式钉死建单码
     //（policyTask 经 045 拆分已含此码，这里显式列出防拆链变动；存量库由 056 幂等补码）。
     "task:create:sample",
-    // R12 门禁裁决：调度员可撤自己建的划拨单（存量库由 057 幂等补码）。
-    "task:transfer:revoke",
+    // R24（#70）撤销下线：调度员模板不再持有 task:transfer:revoke（原 R12 裁决「可撤自己建的划拨单」
+    // 随功能一起退出）。调度员的 task:create:transfer 由 policyTask 拆分链带出（实测仍 true），
+    // 所以调拨单页可见性不受影响，只是撤不动了。存量库由 057 补的授权行留在库里（inert），不新增迁移清理。
     // R13 公司策略中心：调度员可改本公司默认策略（manageOrgIds 闸门限本公司；存量库由 058 幂等补码）。
     "device:box:policyCompany",
     "task:sign",
@@ -1248,10 +1243,10 @@ const LEGACY_DEFAULTS = {
     // 组织简化（B4a/P11，B3 遗留②）：分公司自采建单是主路径——BRANCH_ADMIN 默认补
     // task:create:sample（存量库由 056 幂等补码步补齐，角色页保存过的以保存为准）。
     "task:create:sample",
-    // R12 门禁裁决：调拨单仅划拨权限者可见；分公司管理员是划拨主责角色，补两码
+    // R12 门禁裁决：调拨单仅划拨权限者可见；分公司管理员是划拨主责角色，补建单码
     //（存量库由 057 幂等补码；角色页保存过的以保存为准）。
+    // R24（#70）撤销下线：本模板不再补 task:transfer:revoke，只留 task:create:transfer。
     "task:create:transfer",
-    "task:transfer:revoke",
     // R13 公司策略中心：分公司管理员是本公司策略主责角色（存量库由 058 幂等补码；
     // manageOrgIds 闸门限本公司子树，总部管理员可改各分公司）。
     "device:box:policyCompany",

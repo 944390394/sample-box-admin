@@ -3,7 +3,12 @@ import request from "@/utils/request";
 /**
  * 划拨单（批量归属划拨，AL-）接口。提交即生效、无物流；状态只有 已划拨/已撤销。
  * 契约见 reports/plan-transfer-inspect.md §6.1/§6.2/§6.5 与 reports/impl-b1-core.md。
- * 提交/撤销的 409 会把逐台拦截原因放在 error.data 里（silent 调用，由页面渲染弹窗）。
+ * 提交的 409 会把逐台拦截原因放在 error.data 里（silent 调用，由页面渲染弹窗）。
+ *
+ * R24（#70）撤销划拨下线：revoke 方法与 RevokeBlocked/RevokeResult 类型一起删除，
+ * 路由 POST /transfers/:id/revoke 现在直接回 410＋「撤销已下线：如需退回或改派请重新划拨」。
+ * 提交（create）新增必填 password：服务端在 clientToken 幂等命中之前校验当前登录账号口令，
+ * 缺→400、错→403。口令只走这一次请求体，不进日志、不进审计 detail。
  */
 
 /** 来源公司聚合（跨公司批量时多条，权威来源是建单快照）。 */
@@ -78,7 +83,8 @@ export interface TransferDetail {
   steps: string[];
   revokedAt?: string;
   revokeReason?: string;
-  abilities: { revoke: boolean; cancel: boolean };
+  /** R24 撤销下线：服务端不再下发 revoke，只保留历史占位的 cancel。 */
+  abilities: { cancel: boolean };
   logs: TransferLog[];
   /** 创建响应里回吐的备注（body.note）。 */
   note?: string;
@@ -132,6 +138,8 @@ export interface CreateTransferInput {
   boxIds: string[];
   note?: string;
   clientToken?: string;
+  /** 当前登录账号口令（R24 二次确认）。必填：服务端先校验它，再谈 clientToken 幂等。 */
+  password: string;
 }
 /** 提交 409 的 data：逐台 blocked。 */
 export interface CreateBlocked {
@@ -147,42 +155,8 @@ export interface CreateBlocked {
   totalCount: number;
   blockedCount: number;
 }
-/** 撤销 409 的 data：整单禁撤 + 逐台 ok/restoreTo 或 reasonCode/reason。 */
-export interface RevokeBlocked {
-  canRevoke: false;
-  banner: string;
-  confirmLabel: string;
-  totalCount: number;
-  blockedCount: number;
-  okCount: number;
-  boxes: {
-    boxId: string;
-    code: string;
-    name: string;
-    ok: boolean;
-    restoreTo?: { orgId: string; orgName: string; ownerName: string };
-    reasonCode?: string;
-    reason?: string;
-    opensDelta?: number;
-  }[];
-}
-/** 撤销成功响应。 */
-export interface RevokeResult {
-  id: string;
-  status: string;
-  revokedAt: string;
-  restoredCount: number;
-  restored: {
-    boxId: string;
-    code: string;
-    name: string;
-    toOrgId: string;
-    toOrg: string;
-    ownerId: string;
-    owner: string;
-  }[];
-  log: { action: string; actorName: string; at: string };
-}
+// R24（#70）撤销下线：原 RevokeBlocked（撤销 409 的整单禁撤 data）与 RevokeResult（撤销成功响应）
+// 两个类型随 revoke 方法一起删除。领域层的整单禁撤四守卫仍在（历史单审计要读），只是接口不再暴露。
 
 const base = "/api/v1/sample/transfers";
 const enc = encodeURIComponent;
@@ -192,15 +166,8 @@ export default {
   detail: (id: string) => request<unknown, TransferDetail>({ url: `${base}/${enc(id)}` }),
   candidates: (params: CandidateQuery = {}) =>
     request<unknown, CandidateResult>({ url: `${base}/candidate-boxes`, params }),
-  /** 提交即生效。silent：409 的逐台 blocked 由向导弹窗渲染，不弹全局 toast。 */
+  /** 提交即生效。silent：409 的逐台 blocked 由向导弹窗渲染，不弹全局 toast。
+   * 400＝没填口令、403＝口令不对，两种都由向导内的红字呈现，不跳登录。 */
   create: (data: CreateTransferInput) =>
     request<unknown, TransferDetail>({ url: base, method: "post", data, silent: true }),
-  /** 撤销。silent：409 的整单禁撤 data 由撤销弹窗渲染。 */
-  revoke: (id: string, reason: string) =>
-    request<unknown, RevokeResult>({
-      url: `${base}/${enc(id)}/revoke`,
-      method: "post",
-      data: { reason },
-      silent: true,
-    }),
 };

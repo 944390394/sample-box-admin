@@ -48,6 +48,8 @@ import {
   notVisible,
 } from "../domain/AppError.js";
 import { logSystem } from "../log/systemLog.js";
+// R24（#70）划拨二次确认：口令比对用登录同一套 hash 口径（scrypt，salt:hex），不另造一套。
+import { verifyPassword } from "../../auth.js";
 import { buildDeptTree, collectDeptIds } from "../../../shared/org.js";
 import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 
@@ -56,6 +58,9 @@ const T = {
   createTransfer: "task:create:transfer",
   createSample: "task:create:sample",
   createInspect: "task:create:inspect",
+  // R24（#70）撤销下线：本码已从 permCatalog 的 item 与角色模板里移除，不再授予、不再进任何门。
+  // 存量角色授权行（053/057 补的）留在库里当历史数据（inert），不新增迁移清理。
+  // 只剩已下线的 revokeTransfer 方法体还在读它，保住那组归属退回回归用例的单码语义。
   transferRevoke: "task:transfer:revoke",
   policy: "task:policy",
   send: "task:send",
@@ -917,6 +922,56 @@ export class ReportPolicyController {
   }
 
   /**
+   * 划拨提交的口令再认证（R24 #70，PM 裁决「划拨需要二次确认和输入密码」）。
+   * 写法照 auth/AccountSecurity.js:29-40：按 ctx.user.id 重查 sys_user，用 verifyPassword 比 hash。
+   * 三条刻意选择，别顺手「优化」：
+   * 1. 不复用 AccountSecurity.attempts 计数——那套锁定是给改密入口用的，错口令把改密一起锁掉不合适；
+   *    划拨走的是已登录态，防爆破由登录与口令策略管（安全设置里的锁定阈值不该被这里改动）。
+   * 2. 缺口令 400、口令错 403，两条都不回显任何口令信息。
+   * 3. 失败也留一条审计（result 显式写「失败」——operationLog.js:39 只认这个值，其余一律归「成功」），
+   *    detail 只记原因文本，绝不带 password / ctx.body / password_hash。
+   * 会话有效性不在这里重复判：index.js 的 currentUser() 每条请求都重读 sys_user 并核 sessionMatches。
+   */
+  async #confirmPassword(ctx) {
+    const password = (ctx.body || {}).password;
+    if (typeof password !== "string" || !password) {
+      await this.#auditTransferConfirm(ctx, "缺少确认口令");
+      throw badRequest("请输入登录密码以确认划拨");
+    }
+    if (password.length > 1024) {
+      await this.#auditTransferConfirm(ctx, "确认口令超长");
+      throw badRequest("登录密码格式不正确");
+    }
+    const current = await this.db.get("SELECT status, password_hash FROM sys_user WHERE id = ?", [
+      String(ctx.user?.id ?? ""),
+    ]);
+    if (!current || Number(current.status) !== 1) {
+      await this.#auditTransferConfirm(ctx, "账号不可用");
+      throw noPermission("账号已停用或不存在，请联系管理员");
+    }
+    if (!verifyPassword(password, current.password_hash)) {
+      await this.#auditTransferConfirm(ctx, "确认口令不正确");
+      throw noPermission("密码不正确");
+    }
+  }
+
+  /** 口令再认证失败的审计留痕：只记「谁、什么时候、没过」，不记口令本身（见 #confirmPassword 第 3 条）。 */
+  async #auditTransferConfirm(ctx, reason) {
+    await audit(this.db, {
+      orgId: String(ctx.user?.dept_id || ""),
+      orgName: "",
+      actorId: String(ctx.user?.id ?? ""),
+      actorName: ctx.user?.nickname || ctx.user?.username || "",
+      action: "提交划拨",
+      targetType: "report-policy",
+      targetId: "",
+      result: "失败",
+      detail: { 二次确认: false, 原因: reason },
+      ip: ctx.ip || "",
+    });
+  }
+
+  /**
    * 创建划拨单（POST /sample/transfers）：提交即生效，归属在单据同一事务里转移。
    * 箱子可见性沿用 targets（不存在/范围外同一个 404）；提交守卫与 candidate-boxes 同一函数。
    */
@@ -934,6 +989,10 @@ export class ReportPolicyController {
       (typeof input.clientToken !== "string" || input.clientToken.length > 64)
     )
       throw badRequest("clientToken 格式不正确");
+    // R24（#70）划拨二次确认：口令必须在 clientToken 幂等命中之前校验——幂等查询在
+    // policies.createTransfer 里，先命中就直接返回原单，等于让「重复提交」绕过再认证。
+    // 放在名称/目标/备注这些纯格式校验之后：格式错本来就该先提示，且不影响这条安全顺序。
+    await this.#confirmPassword(ctx);
     const boxes = await this.targets(ctx, input.boxIds);
     if (boxes.length > 500) throw badRequest("一张划拨单最多 500 台箱子，请分批提交");
     const result = await this.policies.createTransfer(
@@ -950,19 +1009,28 @@ export class ReportPolicyController {
     this.boxes.summaryCache?.clear();
     const data = await this.policies.transferView(result.id);
     if (!data) throw notVisible("划拨单不存在或不在你的管理范围内");
-    await this.log(
-      ctx,
-      result.idempotent ? "提交划拨（重复提交，返回原单）" : "提交划拨",
-      result.id
-    );
+    // R24（#70）：提交成功的审计带一条 detail={二次确认:true}，说明这单过了口令再认证。
+    // 口径与 this.log 一致（同 action/targetType/targetId），只是多一个不含敏感信息的 detail；
+    // 绝不把 input / ctx.body / password 塞进来（audit→insertOperationLog 只落固定列，见 #confirmPassword 第 3 条）。
+    await audit(this.db, {
+      orgId: String(ctx.user.dept_id || ""),
+      orgName: "",
+      actorId: String(ctx.user.id),
+      actorName: ctx.user.nickname || ctx.user.username,
+      action: result.idempotent ? "提交划拨（重复提交，返回原单）" : "提交划拨",
+      targetType: "report-policy",
+      targetId: result.id,
+      result: "成功",
+      detail: { 二次确认: true },
+      ip: ctx.ip || "",
+    });
     ctx.ok(
       {
         ...data,
         idempotent: result.idempotent,
-        abilities: {
-          revoke: data.status === "已划拨" && ctx.access.perms.has(T.transferRevoke),
-          cancel: false,
-        },
+        // R24（#70）撤销下线：不再下发 revoke 旗标——列表/详情两处撤销入口已删，
+        // 留着只会让前端误以为还有可撤动作。cancel 是历史占位，形状保持不变。
+        abilities: { cancel: false },
       },
       result.idempotent
         ? "已提交过，返回原划拨单"
@@ -970,7 +1038,11 @@ export class ReportPolicyController {
     );
   }
 
-  /** 撤销划拨（POST /sample/transfers/:id/revoke）：整单禁撤守卫在服务端事务内实时判定。 */
+  /**
+   * 撤销划拨（R24 已下线，不再挂路由：POST /sample/transfers/:id/revoke 直接回 410）。
+   * 方法本体连同领域层 policies.revokeTransfer、整单禁撤四守卫保留，只服务回归用例直调与
+   * 历史已撤销单的审计口径；要恢复撤销功能就是把 index.js 那一行接回来。
+   */
   async revokeTransfer(ctx) {
     this.#requireTransferFeature();
     this.require(ctx, T.transferRevoke);
@@ -1093,12 +1165,13 @@ export class ReportPolicyController {
   /**
    * 划拨列表（GET /sample/transfers，kind=划拨）：counts 与列表同口径（同一 WHERE 去掉 status），
    * boxCountTotal 是箱次累计口径（同一箱子出现在多单计多次，§6.2）。
-   * R12 门禁：调拨单页仅划拨权限者可见——some(task:create:transfer, task:transfer:revoke)，
-   * 与前端 local-menus 注入 gate、menus.js 预览镜像同口径；无两码 403 A0301（旧 device:box:task 太宽）。
+   * R12 门禁（R24 收紧）：调拨单页仅「新建划拨」权限者可见——撤销码随撤销功能下线退出门禁，
+   * 不再 some(task:transfer:revoke)；与前端 local-menus 注入 gate、menus.js 预览镜像同口径，
+   * 无该码 403 A0301（旧 device:box:task 太宽）。
    */
   async transfers(ctx) {
     this.#requireTransferFeature();
-    if (!ctx.access?.perms?.has(T.createTransfer)) this.require(ctx, T.transferRevoke);
+    this.require(ctx, T.createTransfer);
     const visible = this.#visible(ctx);
     const clauses = ["t.kind='划拨'", ...(visible.sql ? [visible.sql] : [])];
     const params = [...visible.params];
@@ -1220,11 +1293,11 @@ export class ReportPolicyController {
     });
   }
 
-  /** 划拨详情（GET /sample/transfers/:id）：逐台快照 + 实时撤销守卫结论 + 审计线。
-   * R12 门禁同 transfers 列表：some(新建划拨, 撤销划拨)，无两码 403 A0301。 */
+  /** 划拨详情（GET /sample/transfers/:id）：逐台快照 + 历史撤销信息 + 审计线。
+   * R24 门禁同 transfers 列表：只看「新建划拨」码，撤销码已随功能下线退出门禁。 */
   async transferDetail(ctx) {
     this.#requireTransferFeature();
-    if (!ctx.access?.perms?.has(T.createTransfer)) this.require(ctx, T.transferRevoke);
+    this.require(ctx, T.createTransfer);
     const row = await this.#visibleTask(ctx);
     if (row.kind !== "划拨") throw notVisible("划拨单不存在或不在你的管理范围内");
     const data = await this.policies.transferView(row.id);
@@ -1234,10 +1307,9 @@ export class ReportPolicyController {
     );
     ctx.ok({
       ...data,
-      abilities: {
-        revoke: row.status === "已划拨" && ctx.access.perms.has(T.transferRevoke),
-        cancel: false,
-      },
+      // R24（#70）撤销下线：详情不再下发 revoke 旗标（入口已删）；boxes[].revocable 仍由领域层
+      // 逐台算，历史已撤销单的「已退回 xxx」展示要用，只是不再作为可点动作呈现。
+      abilities: { cancel: false },
       logs: logs.map((log) => ({
         status: log.status,
         action: log.action,

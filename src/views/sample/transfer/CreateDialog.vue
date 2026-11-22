@@ -11,7 +11,9 @@
     <p class="lead">
       选目标公司，再勾选一批箱子。
       <b>提交即生效</b>
-      ：箱子归属立刻转到目标公司，不寄出、不签收。
+      ：箱子归属立刻转到目标公司，不寄出、不签收。提交前需输入登录密码二次确认，
+      <b>提交后不可撤销</b>
+      （退回/改派请用列表的「重新划拨」）。
     </p>
 
     <el-form label-width="90px" @submit.prevent>
@@ -189,6 +191,51 @@
       </el-button>
     </template>
   </el-dialog>
+
+  <!-- R24（#70）二次确认：摘要 N 台·来源→目标·不可撤销提示＋登录密码。
+       红字占位恒定高度（visibility 切换），出错前后布局不跳动（R18 登录页同款口径）。 -->
+  <el-dialog
+    v-model="confirmOpen"
+    title="二次确认：提交划拨"
+    width="480px"
+    style="max-width: 94vw"
+    :close-on-click-modal="false"
+    append-to-body
+  >
+    <div class="confirm-summary">
+      <p>
+        即将划拨
+        <b>{{ selected.size }}</b>
+        台采样箱：
+      </p>
+      <p class="route-line">
+        <b>{{ sourceText }}</b>
+        <span class="arrow">→</span>
+        <b>{{ targetName || "目标公司" }}</b>
+      </p>
+      <p class="warn-line">提交后不可撤销；如需退回或改派，请在列表使用「重新划拨」。</p>
+    </div>
+    <el-form label-width="90px" @submit.prevent>
+      <el-form-item label="登录密码" required>
+        <el-input
+          v-model="password"
+          type="password"
+          show-password
+          autocomplete="new-password"
+          placeholder="当前登录账号的密码"
+          style="width: 280px"
+          @keyup.enter="confirmSubmit"
+        />
+      </el-form-item>
+    </el-form>
+    <p class="pw-error" :class="{ on: pwError }">{{ pwError || " " }}</p>
+    <template #footer>
+      <el-button @click="confirmOpen = false">取消</el-button>
+      <el-button type="primary" :loading="saving" :disabled="!password" @click="confirmSubmit">
+        确认提交
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -201,7 +248,15 @@ import DataPager from "@/components/biz/DataPager.vue";
 import { lifeTone } from "@/utils/tone";
 import type { ApiError } from "@/utils/request";
 
-defineProps<{ modelValue: boolean }>();
+/**
+ * R24（#70）prefill：列表「重新划拨」带进来的原单箱集（重放语义）。
+ * 箱集先整体选中，名称用原单快照兜底；当前归属/可选性仍由服务端候选集逐页回填判定，
+ * 已属目标/被占用的箱子提交时会被服务端同一守卫整单拦下——预填不是绕过守卫。
+ */
+const props = defineProps<{
+  modelValue: boolean;
+  prefill?: { boxIds: string[]; names: Record<string, string>; fromName: string } | null;
+}>();
 const emit = defineEmits<{ "update:modelValue": [value: boolean]; saved: [] }>();
 
 const LIVES = ["待激活", "未使用", "在途", "停用"];
@@ -222,12 +277,27 @@ const saving = ref(false);
 const selected = ref<Set<string>>(new Set());
 /** 名字查表：跨页选中的箱子也能显示名称。 */
 const nameMap = ref<Record<string, string>>({});
+/** 当前归属查表（候选集回填）：二次确认摘要的「来源」按箱子当前归属聚合，不是原单快照。 */
+const orgMap = ref<Record<string, string>>({});
 const blocked = ref<CreateBlocked["blocked"]>([]);
 const blockedTotal = ref(0);
+/** R24（#70）二次确认弹框：密码每次打开清空；红字只在这个弹框里呈现。 */
+const confirmOpen = ref(false);
+const password = ref("");
+const pwError = ref("");
 /** 打开向导时生成一次，重复提交幂等（服务端 transfer_request 唯一约束）。 */
 let clientToken = "";
 
 const targetName = computed(() => findLabel(orgOptions.value, toOrgId.value));
+/** 摘要来源：已选箱子的当前归属去重聚合；候选集还没回填到的显示「原公司」兜底。 */
+const sourceText = computed(() => {
+  const names = new Set<string>();
+  for (const id of selected.value) {
+    const org = orgMap.value[id];
+    if (org) names.add(org);
+  }
+  return names.size ? [...names].join("、") : "原公司";
+});
 function findLabel(list: OptionItem[], value: string): string {
   for (const item of list) {
     if (String(item.value) === value) return item.label;
@@ -268,7 +338,10 @@ async function loadCandidates() {
     rows.value = result.list;
     total.value = result.total;
     selectableCount.value = result.selectableCount;
-    for (const r of result.list) nameMap.value[r.boxId] = r.name;
+    for (const r of result.list) {
+      nameMap.value[r.boxId] = r.name;
+      orgMap.value[r.boxId] = r.org || "总公司";
+    }
   } finally {
     if (mine === seq) loading.value = false;
   }
@@ -313,6 +386,7 @@ async function selectAll() {
       });
       for (const r of result.list) {
         nameMap.value[r.boxId] = r.name;
+        orgMap.value[r.boxId] = r.org || "总公司";
         if (r.selectable) selected.value.add(r.boxId);
       }
       if (p * 100 >= result.total || !result.list.length) break;
@@ -323,9 +397,22 @@ async function selectAll() {
   }
 }
 
-async function submit() {
+/**
+ * R24（#70）：主弹框「提交划拨」不再直接发请求，先开二次确认弹框（摘要＋登录密码）。
+ * 真正提交在 confirmSubmit；clientToken 沿用打开向导时生成的那一个，
+ * 确认弹框里重试（含输错密码后重输）不会重复建单——服务端幂等命中前仍会再验密码。
+ */
+function submit() {
   if (!selected.value.size || !toOrgId.value || !name.value.trim()) return;
+  password.value = "";
+  pwError.value = "";
+  confirmOpen.value = true;
+}
+
+async function confirmSubmit() {
+  if (!password.value || saving.value) return;
   saving.value = true;
+  pwError.value = "";
   blocked.value = [];
   try {
     const result = await TransferAPI.create({
@@ -334,22 +421,27 @@ async function submit() {
       boxIds: [...selected.value],
       note: note.value.trim() || undefined,
       clientToken,
+      password: password.value,
     });
     ElMessage.success(
       result.idempotent
         ? "已提交过，返回原划拨单"
         : `已提交，${result.boxCount} 台箱子归属已转到 ${result.toOrg.name}`
     );
+    confirmOpen.value = false;
     emit("saved");
     emit("update:modelValue", false);
   } catch (error) {
     const err = error as ApiError;
     const data = err.data as CreateBlocked | undefined;
     if (data?.blocked?.length) {
+      // 逐台拦截：回主弹框渲染被拦清单（原口径），确认弹框收起
       blocked.value = data.blocked;
       blockedTotal.value = data.totalCount ?? selected.value.size;
+      confirmOpen.value = false;
     } else {
-      ElMessage.error(err.message || "提交失败");
+      // 400 缺口令 / 403 口令错 / 其它：红字恒定占位呈现，不跳登录、不弹全局 toast
+      pwError.value = err.message || "提交失败";
     }
   } finally {
     saving.value = false;
@@ -370,7 +462,19 @@ async function onOpen() {
   page.value = 1;
   selected.value = new Set();
   nameMap.value = {};
+  orgMap.value = {};
   blocked.value = [];
+  confirmOpen.value = false;
+  password.value = "";
+  pwError.value = "";
+  // R24（#70）重新划拨：原单箱集整体预选＋单名预填（可改）；名称先用原单快照兜底，
+  // 当前归属由 harvestPrefill 逐页回填，摘要「来源」按箱子当前归属聚合。
+  const prefill = props.prefill;
+  if (prefill?.boxIds?.length) {
+    name.value = prefill.fromName || "";
+    selected.value = new Set(prefill.boxIds);
+    for (const [id, label] of Object.entries(prefill.names || {})) nameMap.value[id] = label;
+  }
   if (!orgOptions.value.length) {
     try {
       orgOptions.value = await DeptAPI.getOptions();
@@ -379,7 +483,34 @@ async function onOpen() {
     }
   }
   void loadCandidates();
+  if (prefill?.boxIds?.length) void harvestPrefill(prefill.boxIds);
 }
+/**
+ * 预填箱集跨页补齐名称/当前归属：逐页取候选（服务端 pageSize 上限 100），
+ * 找齐即停；用户改了筛选（seq 变化）就放弃，不与当前页加载抢状态。
+ */
+async function harvestPrefill(ids: string[]) {
+  const want = new Set(ids);
+  const mine = seq;
+  let p = 1;
+  for (;;) {
+    const result = await TransferAPI.candidates({ page: p, pageSize: 100 });
+    if (mine !== seq) return;
+    for (const r of result.list) {
+      nameMap.value[r.boxId] = r.name;
+      orgMap.value[r.boxId] = r.org || "总公司";
+      want.delete(r.boxId);
+    }
+    if (!want.size || p * 100 >= result.total || !result.list.length) break;
+    p += 1;
+  }
+}
+watch(
+  () => props.modelValue,
+  (open) => {
+    if (!open) confirmOpen.value = false;
+  }
+);
 watch(
   () => [page.value, pageSize.value],
   () => void loadCandidates()
@@ -441,5 +572,31 @@ onBeforeUnmount(() => window.clearTimeout(typing));
   float: left;
   font-size: 12px;
   line-height: 32px;
+}
+.confirm-summary p {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.route-line {
+  font-size: 14px;
+}
+.route-line .arrow {
+  margin: 0 6px;
+  color: var(--el-color-primary);
+}
+.warn-line {
+  color: var(--el-color-warning);
+}
+/* 红字恒定占位：固定高度＋visibility 切换，出错前后 bbox 不变（不跳动） */
+.pw-error {
+  visibility: hidden;
+  height: 20px;
+  margin: 0 0 0 90px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--el-color-danger);
+}
+.pw-error.on {
+  visibility: visible;
 }
 </style>

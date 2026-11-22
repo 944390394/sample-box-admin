@@ -76,24 +76,6 @@
                     </div>
                   </template>
                 </TodoCard>
-                <TodoCard
-                  v-else-if="card.boxes"
-                  :title="card.title"
-                  :hint="card.hint"
-                  :tone="card.tone"
-                  :bucket="card.boxes"
-                  more
-                  @open="(id) => router.push(`/device/boxes/${id}`)"
-                  @more="router.push(card.more)"
-                >
-                  <template #default="{ item }">
-                    <div class="line">
-                      <b>{{ item.name }}</b>
-                      <span class="text-muted">{{ item.org || "总公司" }}</span>
-                    </div>
-                    <div class="text-muted">{{ boxLine(item, card.key) }}</div>
-                  </template>
-                </TodoCard>
               </template>
             </div>
             <div v-else class="todo-empty">
@@ -147,6 +129,58 @@
                 <el-icon :size="14"><component :is="link.icon" /></el-icon>
                 {{ link.label }}
               </button>
+            </div>
+          </section>
+
+          <!-- #75：提醒区——监控信号类卡（低电量/告警/离线/开着盖/待激活/开箱超限），与「待我处理」同级；
+               不是待办，去掉待办红顶、语义色走 warning/info 系；零条整区隐藏。落地链接沿用现状（行数==卡数）。 -->
+          <section v-if="activeReminders.length" class="block reminder-block">
+            <div class="card-head section-head">
+              <span class="card-head__title">提醒</span>
+              <span class="reminder-total">共 {{ reminderTotal }} 条</span>
+            </div>
+            <div class="cards reminder-cards">
+              <template v-for="card in activeReminders" :key="card.key">
+                <TodoCard
+                  v-if="card.boxes"
+                  :title="card.title"
+                  :hint="card.hint"
+                  :bucket="card.boxes"
+                  :class="`reminder-${reminderAccent(card.key)}`"
+                  more
+                  @open="(id) => router.push(`/device/boxes/${id}`)"
+                  @more="router.push(card.more)"
+                >
+                  <template #default="{ item }">
+                    <div class="line">
+                      <b>{{ item.name }}</b>
+                      <span class="text-muted">{{ item.org || "总公司" }}</span>
+                    </div>
+                    <div class="text-muted">{{ boxLine(item, card.key) }}</div>
+                  </template>
+                </TodoCard>
+                <TodoCard
+                  v-else-if="card.tasks"
+                  :title="card.title"
+                  :hint="card.hint"
+                  :bucket="card.tasks"
+                  :class="`reminder-${reminderAccent(card.key)}`"
+                  more
+                  @open="(id) => router.push(`/task/detail/${id}`)"
+                  @more="router.push(card.more)"
+                >
+                  <template #default="{ item }">
+                    <div class="line">
+                      <b>{{ item.name }}</b>
+                      <el-tag size="small" :type="taskTone(item.status)">{{ item.status }}</el-tag>
+                    </div>
+                    <div class="text-muted">
+                      {{ routeOf(item) }} · {{ item.boxes }} 台 ·
+                      <TimeText :value="item.createdAt" />
+                    </div>
+                  </template>
+                </TodoCard>
+              </template>
             </div>
           </section>
 
@@ -640,8 +674,45 @@ const cards = computed<Card[]>(() => {
   return list;
 });
 const totalOf = (card: Card) => card.tasks?.total ?? card.boxes?.total ?? 0;
-const activeCards = computed(() => cards.value.filter((card) => totalOf(card) > 0));
-const quietCards = computed(() => cards.value.filter((card) => totalOf(card) === 0));
+/**
+ * #75：监控信号类卡归「提醒」区，与「待我处理」的可推进任务动作桶分开（用户：系统管理员下低电量等应是提醒不是待处理）。
+ * 归类以现状卡清单为准：箱子状态信号 pending 待激活 / alert 告警 / offline 离线 / low 低电量 / lid 开着盖，
+ * 加上任务侧的开箱超限 overLimit（含只能取消的单、非可推进动作）——共 6 类入提醒；
+ * 待我处理仅留 send/arrive/sign/returning/sampling/inspect 六个任务动作桶（R22 bucket 链接与 mine 口径不动）。
+ */
+const REMINDER_KEYS = new Set(["pending", "alert", "offline", "low", "lid", "overLimit"]);
+/** 提醒卡语义色（落在数字与标题点，不再用待办红顶）：低电量/开箱超限/开着盖 warning、离线/待激活 info、告警 danger（提醒语义）。 */
+const REMINDER_ACCENT: Record<string, "warning" | "danger" | "info"> = {
+  low: "warning",
+  alert: "danger",
+  offline: "info",
+  overLimit: "warning",
+  lid: "warning",
+  pending: "info",
+};
+const reminderAccent = (key: string) => REMINDER_ACCENT[key] || "info";
+/** 提醒按严重度排：danger→warning→info（同级保持现状顺序），强信号（告警/低电量）排首行。 */
+const REMINDER_SEVERITY: Record<"warning" | "danger" | "info", number> = {
+  danger: 0,
+  warning: 1,
+  info: 2,
+};
+const activeAll = computed(() => cards.value.filter((card) => totalOf(card) > 0));
+const quietAll = computed(() => cards.value.filter((card) => totalOf(card) === 0));
+/** 待我处理：仅可推进的任务动作桶（非零）；零组折叠 chip 与全零空态沿用 R12。 */
+const activeCards = computed(() => activeAll.value.filter((card) => !REMINDER_KEYS.has(card.key)));
+const quietCards = computed(() => quietAll.value.filter((card) => !REMINDER_KEYS.has(card.key)));
+/** 提醒：监控信号类非零卡，按严重度排；零条整区隐藏（v-if activeReminders.length）。 */
+const activeReminders = computed(() =>
+  activeAll.value
+    .filter((card) => REMINDER_KEYS.has(card.key))
+    .sort(
+      (a, b) => REMINDER_SEVERITY[reminderAccent(a.key)] - REMINDER_SEVERITY[reminderAccent(b.key)]
+    )
+);
+const reminderTotal = computed(() =>
+  activeReminders.value.reduce((n, card) => n + totalOf(card), 0)
+);
 const todoTotal = computed(() => activeCards.value.reduce((n, card) => n + totalOf(card), 0));
 /** 零组明细的展开状态：默认收起，点 chip 展开/再点收起。 */
 const quietOpen = ref(false);
@@ -796,6 +867,48 @@ onBeforeUnmount(() => window.clearInterval(poll));
 }
 .cards.two {
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+/* #75 提醒区：监控信号卡——去掉待办红顶（3px 彩顶→1px 统一浅边框），语义色落在数字与标题点（warning/info 系） */
+.reminder-total {
+  padding: 1px 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-lighter);
+  border-radius: 999px;
+}
+.reminder-cards :deep(.todo-card) {
+  border-top-color: var(--el-border-color-lighter);
+  border-top-width: 1px;
+}
+.reminder-cards :deep(.title) {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.reminder-cards :deep(.title)::before {
+  width: 6px;
+  height: 6px;
+  content: "";
+  background: var(--el-color-info);
+  border-radius: 50%;
+}
+.reminder-warning :deep(.count) {
+  color: var(--el-color-warning);
+}
+.reminder-warning :deep(.title)::before {
+  background: var(--el-color-warning);
+}
+.reminder-danger :deep(.count) {
+  color: var(--el-color-danger);
+}
+.reminder-danger :deep(.title)::before {
+  background: var(--el-color-danger);
+}
+.reminder-info :deep(.count) {
+  color: var(--el-color-info);
+}
+.reminder-info :deep(.title)::before {
+  background: var(--el-color-info);
 }
 .line {
   display: flex;

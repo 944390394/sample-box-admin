@@ -11,12 +11,16 @@
  * 5. 功能常开（组织简化后无开关）：旧 off 配置写入被忽略、读取恒 true，新端点恒可用；tasks 默认采样（D-1）、
  *    合并单 TK- + is_inspect=1、划拨走错端点被拒。
  * 6. P8 划拨目标类型闸门（组织简化 B1c）：检测站拒绝、总部/分公司（公司类型）允许、非公司类型拒绝。
+ * R24（#70）：createTransfer 需 body.password 二次确认（先于 clientToken 幂等命中）——夹具用户落真实
+ * scrypt hash，提交统一带夹具口令（仅测试值，非真实凭据）；abilities 不再含 revoke（撤销路由已封 410，
+ * 领域层 revokeTransfer 与四守卫保留，本文件直调用例不动）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { hashPassword } from "../auth.js";
 import { upgradeCodes } from "../src/auth/permCatalog.js";
 import { openDatabase, migrate } from "../db.js";
 import { MemoryStateCache } from "../src/cache/MemoryStateCache.js";
@@ -61,6 +65,10 @@ const ORG_NAMES = {
   5: "第三方公司",
 };
 
+/** R24 二次确认夹具口令（仅测试用，非真实凭据）：所有夹具用户共用一个 hash。 */
+const CONFIRM_PW = "Alloc-Fixture-2026";
+const CONFIRM_HASH = hashPassword(CONFIRM_PW);
+
 /** enabled 模拟存量配置里的旧开关值：常开后写入被忽略、读取恒 true（false 用于钉死兼容契约）。 */
 async function setup({ enabled = true } = {}) {
   applyBoxSettings({
@@ -96,8 +104,8 @@ async function setup({ enabled = true } = {}) {
   };
   for (const p of Object.values(people))
     await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES (?,?,?,'x',?,1)",
-      [p.id, `u${p.id}`, p.nickname, p.deptId]
+      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES (?,?,?,?,?,1)",
+      [p.id, `u${p.id}`, p.nickname, CONFIRM_HASH, p.deptId]
     );
   const boxes = new SqlBoxStore(db);
   const policies = new ReportPolicy(db);
@@ -181,13 +189,13 @@ async function setup({ enabled = true } = {}) {
   };
 }
 
-/** 提交一张划拨单（2→3），返回响应 data。 */
+/** 提交一张划拨单（2→3），返回响应 data。R24：统一带二次确认口令（extra 可覆盖以测负例）。 */
 async function submit(s, boxIds, extra = {}, actor = null) {
   const res = await s.run(
     s.controller.createTransfer.bind(s.controller),
     actor || s.ctx(s.people.a, ["2", "3"]),
     {
-      body: { name: "华南区开工补给", toOrgId: "3", boxIds, ...extra },
+      body: { name: "华南区开工补给", toOrgId: "3", boxIds, password: CONFIRM_PW, ...extra },
     }
   );
   assert.ok(res.ok, `${res.code} ${res.message}`);
@@ -208,7 +216,8 @@ test("划拨提交即生效：单据+快照+归属同一事务，AL- 前缀，�
     assert.equal(d.boxCount, 2);
     assert.deepEqual(d.steps, []);
     assert.equal(d.idempotent, false);
-    assert.deepEqual(d.abilities, { revoke: true, cancel: false });
+    // R24（#70）撤销下线：abilities 不再下发 revoke（cancel 历史占位保留）
+    assert.deepEqual(d.abilities, { cancel: false });
     assert.equal(d.boxes.find((b) => b.boxId === b2).fromOwner, "陈默");
     // 单据行：kind/status/to_org_id；from_org_id 单值列表达不了批量来源，存 NULL（D-12）
     const task = await s.taskRow(d.id);
@@ -268,7 +277,7 @@ test("P8 划拨目标类型闸门（B1c）：检测站拒绝、总部允许（�
     const actor = s.ctx(s.people.a, ["1", "2", "3", "4", "5"]);
     const transfer = (toOrgId, extra = {}) =>
       s.run(s.controller.createTransfer.bind(s.controller), actor, {
-        body: { name: "P8 类型闸门", toOrgId, boxIds: [b1], ...extra },
+        body: { name: "P8 类型闸门", toOrgId, boxIds: [b1], password: CONFIRM_PW, ...extra },
       });
     // 检测站：友好拒绝——单据/归属/幂等行都不落
     const toStation = await transfer("4", { clientToken: "tok-p8" });
@@ -330,7 +339,15 @@ test("划拨守卫拒绝全回滚：第二台被未结束任务占用，第一�
     const res = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
-      { body: { name: "批量划拨", toOrgId: "3", boxIds: [b1, b2], clientToken: "tok-guard" } }
+      {
+        body: {
+          name: "批量划拨",
+          toOrgId: "3",
+          boxIds: [b1, b2],
+          clientToken: "tok-guard",
+          password: CONFIRM_PW,
+        },
+      }
     );
     assert.equal(res.ok, false);
     assert.equal(res.code, "A0409");
@@ -402,7 +419,13 @@ test("划拨失败注入全回滚：第二台归属写入中途抛错，单据/�
       controller.createTransfer.bind(controller),
       s.ctx(s.people.a, ["2", "3"]),
       {
-        body: { name: "注入测试", toOrgId: "3", boxIds: [b1, b2], clientToken: "tok-fault" },
+        body: {
+          name: "注入测试",
+          toOrgId: "3",
+          boxIds: [b1, b2],
+          clientToken: "tok-fault",
+          password: CONFIRM_PW,
+        },
       }
     );
     assert.equal(res.ok, false);
@@ -427,7 +450,15 @@ test("划拨 client_token 幂等：重复提交返回原单不重复转移；无
     const again = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
-      { body: { name: "华南区开工补给", toOrgId: "3", boxIds: [b1], clientToken: "tok-idem" } }
+      {
+        body: {
+          name: "华南区开工补给",
+          toOrgId: "3",
+          boxIds: [b1],
+          clientToken: "tok-idem",
+          password: CONFIRM_PW,
+        },
+      }
     );
     assert.ok(again.ok, again.message);
     assert.equal(again.data.id, first.id);
@@ -439,7 +470,7 @@ test("划拨 client_token 幂等：重复提交返回原单不重复转移；无
     const dup = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
-      { body: { name: "再来一张", toOrgId: "3", boxIds: [b1] } }
+      { body: { name: "再来一张", toOrgId: "3", boxIds: [b1], password: CONFIRM_PW } }
     );
     assert.equal(dup.code, "A0409");
     assert.equal(dup.data.blocked[0].reasonCode, "ALREADY_TARGET");
@@ -701,7 +732,7 @@ test("candidate-boxes：服务端下发可选箱集，与提交守卫同一结�
     const rejected = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
-      { body: { name: "试提交", toOrgId: "3", boxIds: [busy] } }
+      { body: { name: "试提交", toOrgId: "3", boxIds: [busy], password: CONFIRM_PW } }
     );
     assert.equal(rejected.code, "A0409");
     assert.equal(rejected.data.blocked[0].reasonCode, "IN_ACTIVE_TASK");
@@ -832,7 +863,7 @@ test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒
     const created = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
-      { body: { name: "常开划拨", toOrgId: "3", boxIds: [b3] } }
+      { body: { name: "常开划拨", toOrgId: "3", boxIds: [b3], password: CONFIRM_PW } }
     );
     assert.ok(created.ok, `${created.code} ${created.message}`);
     assert.match(created.data.id, /^AL-/);
@@ -1050,7 +1081,8 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
     assert.equal(detail.data.boxes[0].fromOrgId, "2");
     assert.equal(detail.data.logs.length, 1);
     assert.equal(detail.data.logs[0].action, "提交划拨");
-    assert.deepEqual(detail.data.abilities, { revoke: true, cancel: false });
+    // R24（#70）撤销下线：abilities 不再下发 revoke；boxes[].revocable 仍由领域层逐台算（历史审计口径）
+    assert.deepEqual(detail.data.abilities, { cancel: false });
     // 撤销后列表/详情回 revokedAt/revokeReason，counts 同步
     const revoke = await s.run(
       s.controller.revokeTransfer.bind(s.controller),
@@ -1080,7 +1112,8 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
       }
     );
     assert.equal(detailAfter.data.boxes[0].revocable, false);
-    assert.equal(detailAfter.data.abilities.revoke, false);
+    // R24：撤销后 abilities 同样不含 revoke 键（原断言 abilities.revoke===false 随旗标下线改为键不存在）
+    assert.ok(!("revoke" in detailAfter.data.abilities));
     assert.equal(detailAfter.data.logs.length, 2);
   } finally {
     await s.teardown();

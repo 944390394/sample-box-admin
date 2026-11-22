@@ -521,8 +521,10 @@ export async function applyChargeOnlyPolicy(admin, imei) {
  * 组织简化（B4a）：通用建单端点只收 kind=采样（合并单，接收方固定唯一检测站）；
  * 划拨走 POST /sample/transfers（AL-，提交即生效）。调拨/送检新建已被服务端拒绝，
  * 旧「kind=调拨 绕成送检」的写法全部替换为真合并流推进。
+ * R24（#70）：划拨提交需二次确认口令（先于 clientToken 幂等命中）——confirmPassword 传
+ * 建单账号（admin）的登录口令，只进请求体，不落证据/日志（accounts.local.json 在仓库外）。
  */
-export async function createFixtureTasks(api) {
+export async function createFixtureTasks(api, confirmPassword) {
   const created = {};
   const errors = [];
   const add = async (name, body) => {
@@ -538,7 +540,7 @@ export async function createFixtureTasks(api) {
   };
   const addTransfer = async (name, body) => {
     try {
-      const res = await api.post("/api/v1/sample/transfers", body);
+      const res = await api.post("/api/v1/sample/transfers", { ...body, password: confirmPassword });
       if (res.body?.code !== "00000") throw new Error(`HTTP ${res.status} ${JSON.stringify(res.body)}`);
       created[name] = res.body.data.id;
       return created[name];
@@ -1273,12 +1275,16 @@ async function check() {
 
   // —— 越权签收链（L-P0-1 回归口径）
   // 两件事分开验，别混成一条：
-  //   1) 角色不够的人（现场组管理员 BRANCH_ADMIN 没有划拨建单码）→ 403 A0301；
+  //   1) 非参与方角色（值班员 DUTY 无任何建单码）发起划拨 → 403 A0301；
   //   2) 有资格建单的人把签收人设成别的单位的人 → 400 A0400（建单校验，不落库）。
-  const crossOrgActor = await api("agency").post("/api/v1/sample/transfers", {
-    name: "验收-划拨越权（现场组管理员发起）",
+  // R24（#70）：划拨提交需二次确认口令且先于幂等/范围判定——探针带口令穿过口令层落到授权层。
+  // 探针角色用 duty 不用 agency：新库模板 BRANCH_ADMIN 含建单码（agency 会过 require 落到范围 404），
+  // 旧证据的 403 来自角色页保存过码集的存量库；duty 在两种库态下都无建单码，403 期望与库态无关。
+  const crossOrgActor = await api("duty").post("/api/v1/sample/transfers", {
+    name: "验收-划拨越权（值班员发起）",
     boxIds: [BOXES.spare2.imei],
     toOrgId: "3",
+    password: passwords.duty,
   });
   evidence.authz.crossOrgActor = { status: crossOrgActor.status, code: crossOrgActor.body?.code, msg: crossOrgActor.body?.msg };
   record("非参与方角色发起划拨 → 403 + 业务错误码", crossOrgActor.status === 403, evidence.authz.crossOrgActor);
@@ -1373,7 +1379,7 @@ async function up({ fresh = true } = {}) {
   log(`   ${JSON.stringify(onlineAck)}`);
 
   log("4/6 接口建单并推进到目标状态");
-  const { created: tasks, errors: taskErrors } = await createFixtureTasks(admin);
+  const { created: tasks, errors: taskErrors } = await createFixtureTasks(admin, passwords.admin);
   log(`   建单 ${Object.keys(tasks).length - 1} 张 + 一张接口拒绝的探针：${JSON.stringify(Object.fromEntries(Object.entries(tasks).map(([k, v]) => [k, typeof v === "object" ? v.code : v])))}`);
   for (const error of taskErrors) log(`   建单/推进异常：${JSON.stringify(error)}`);
   const chargeOnlyPolicy = await applyChargeOnlyPolicy(admin, BOXES.chargeOnly.imei);

@@ -5,12 +5,7 @@
       subtitle="批量划拨箱子给公司：提交即生效，归属立即转移；不寄出、不签收，无物流步骤。"
     >
       <template #actions>
-        <el-button
-          v-if="can(TRANSFER_CREATE)"
-          type="primary"
-          :icon="Plus"
-          @click="createOpen = true"
-        >
+        <el-button v-if="can(TRANSFER_CREATE)" type="primary" :icon="Plus" @click="openCreate">
           批量划拨箱子
         </el-button>
       </template>
@@ -107,16 +102,18 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <div class="ops" @click.stop>
+              <!-- R24（#70）撤销划拨下线：这里换成「重新划拨」，走同一张建单向导、预填这单的箱子。
+                   空箱单（boxCount=0，历史脏数据）没有可重放的箱子，不显示入口。 -->
               <el-button
-                v-if="row.status === '已划拨' && can(TRANSFER_REVOKE)"
+                v-if="row.status === '已划拨' && row.boxCount > 0 && can(TRANSFER_CREATE)"
                 link
-                type="danger"
-                @click="openRevoke(row.id)"
+                type="primary"
+                @click="openRecreate(row as TransferListItem)"
               >
-                撤销划拨
+                重新划拨
               </el-button>
               <el-button link type="primary" @click="router.push(`/sample/transfers/${row.id}`)">
                 查看
@@ -135,11 +132,10 @@
 
     <p class="rule-note text-muted">
       划拨规则：提交即生效，箱子归属立刻转到目标公司（保管人清空）；状态只有「已划拨 / 已撤销」。
-      撤销守卫：箱子不在未结束任务、划拨后未开箱、未检测、归属未改挂，任一不合格则整单禁撤。
+      撤销已下线：退回/改派请重新划拨。提交前需输入当前登录账号密码做二次确认。
     </p>
 
-    <CreateDialog v-model="createOpen" @saved="load" />
-    <RevokeDialog :id="revokeId" v-model="revokeOpen" @saved="load" />
+    <CreateDialog v-model="createOpen" :prefill="prefill" @saved="load" />
   </div>
 </template>
 
@@ -161,13 +157,14 @@ import DataPager from "@/components/biz/DataPager.vue";
 import { usePerm } from "@/composables/usePerm";
 import { hasActiveFilter, useUrlQuery } from "@/composables/useUrlQuery";
 import { transferTone } from "@/utils/tone";
-import { TRANSFER_CREATE, TRANSFER_REVOKE } from "../data";
+import { TRANSFER_CREATE } from "../data";
 import CreateDialog from "./CreateDialog.vue";
-import RevokeDialog from "./RevokeDialog.vue";
 
 /**
  * 划拨单列表：批量归属划拨，提交即生效、无物流。页签 全部/已划拨/已撤销 + KPI（单数/箱次双口径）。
- * 新建走服务端 candidate-boxes 下发的箱子集（替换预览页 16 台 POOL 副本）；撤销整单禁撤守卫在服务端实时判定。
+ * 新建走服务端 candidate-boxes 下发的箱子集（替换预览页 16 台 POOL 副本）。
+ * R24（#70）撤销划拨下线：列表不再有撤销入口，「已划拨」行改给「重新划拨」——
+ * 拿这张单的箱子集回填向导重放一次；已撤销页签/KPI/历史单的撤销时间与原因保留展示。
  */
 const router = useRouter();
 const can = usePerm();
@@ -193,8 +190,14 @@ const orgOptions = ref<OptionItem[]>([]);
 const dates = ref<string[] | null>(query.from && query.to ? [query.from, query.to] : null);
 const tab = ref(query.status || "全部");
 const createOpen = ref(false);
-const revokeOpen = ref(false);
-const revokeId = ref("");
+/**
+ * 「重新划拨」带进向导的预填。箱集取原单详情的逐台快照（列表行只有 boxCount，没有 boxId），
+ * 名称取原单名，向导里按箱子当前归属重新判定可选性——已经属目标的会标「已属目标」，
+ * 所以「重新划拨」是重放箱集，不是绕过服务端守卫。
+ */
+const prefill = ref<{ boxIds: string[]; names: Record<string, string>; fromName: string } | null>(
+  null
+);
 const filtered = computed(() => hasActiveFilter(query, ["orgId", "from", "to", "q"]));
 
 const tabs = computed(() => [
@@ -291,9 +294,30 @@ function resetAll() {
   tab.value = "全部";
   void load();
 }
-function openRevoke(id: string) {
-  revokeId.value = id;
-  revokeOpen.value = true;
+/** 顶栏「批量划拨箱子」：不带预填。 */
+function openCreate() {
+  prefill.value = null;
+  createOpen.value = true;
+}
+/**
+ * 「重新划拨」：拉这张单的逐台快照，把箱集回填到同一个建单向导。
+ * 详情接口按当前数据范围鉴权，拿不到就提示重试，不静默开一个空向导。
+ */
+async function openRecreate(row: TransferListItem) {
+  try {
+    const detail = await TransferAPI.detail(row.id);
+    const boxIds = detail.boxes.map((box) => box.boxId);
+    if (!boxIds.length) {
+      ElMessage.warning("这张划拨单没有箱子，无法重新划拨");
+      return;
+    }
+    const names: Record<string, string> = {};
+    for (const box of detail.boxes) names[box.boxId] = box.name || box.code;
+    prefill.value = { boxIds, names, fromName: detail.name };
+    createOpen.value = true;
+  } catch (error) {
+    ElMessage.error((error as Error).message || "取不到这张单的箱子，请稍后再试");
+  }
 }
 watch(
   () => [query.page, query.pageSize],

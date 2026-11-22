@@ -11,6 +11,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_ROLE_PERMS } from "../src/auth/permCatalog.js";
+import { hashPassword } from "../auth.js";
 import { openDatabase, migrate } from "../db.js";
 import { MemoryStateCache } from "../src/cache/MemoryStateCache.js";
 import { UplinkParser } from "../src/domain/UplinkParser.js";
@@ -23,6 +24,9 @@ import { packet } from "./fixture.js";
 
 const ORG_NAMES = { 1: "总公司", 2: "华南分公司", 13: "总部检测站", 21: "调度室" };
 const permsOf = (code) => new Set(DEFAULT_ROLE_PERMS[code]);
+/** R24（#70）二次确认夹具口令（仅测试用，非真实凭据）。 */
+const CONFIRM_PW = "Layout-Fixture-2026";
+const CONFIRM_HASH = hashPassword(CONFIRM_PW);
 
 async function setup() {
   applyBoxSettings({
@@ -51,8 +55,8 @@ async function setup() {
     { id: "21", nickname: "调度寄件人", deptId: "21" },
   ])
     await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES (?,?,?,'x',?,1)",
-      [p.id, `u${p.id}`, p.nickname, p.deptId]
+      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES (?,?,?,?,?,1)",
+      [p.id, `u${p.id}`, p.nickname, CONFIRM_HASH, p.deptId]
     );
   const boxes = new SqlBoxStore(db);
   const policies = new ReportPolicy(db);
@@ -72,6 +76,9 @@ async function setup() {
   });
   const all = { all: true, orgIds: [], ownerIds: [], manageOrgIds: [] };
   const admin = ctx("20", "华南寄件人", "2", "ADMIN", all);
+  // R24（#70）：ADMIN 模板（ALL_PERMS 派生）已不含 revoke；夹具显式补存量 inert 授权行语义，
+  // 让下面直调 revokeTransfer 造「已撤销」历史单仍过单码校验（路由已封 410，不影响线上）。
+  admin.access.perms.add("task:transfer:revoke");
   const duty = ctx("9101", "验收值班员", "14", "DUTY", all);
   const branch = ctx("9103", "华南管理员", "2", "BRANCH_ADMIN", {
     all: false,
@@ -206,11 +213,11 @@ async function seed(s) {
   // 划拨两态：提交即生效一张＋撤销一张
   const b8 = await s.makeBox("21");
   const al = await s.run(s.controller.createTransfer.bind(s.controller), s.admin, {
-    body: { name: "划拨已生效", toOrgId: "2", boxIds: [b8.id] },
+    body: { name: "划拨已生效", toOrgId: "2", boxIds: [b8.id], password: CONFIRM_PW },
   });
   const b9 = await s.makeBox("21");
   const alRev = await s.run(s.controller.createTransfer.bind(s.controller), s.admin, {
-    body: { name: "划拨已撤销", toOrgId: "2", boxIds: [b9.id] },
+    body: { name: "划拨已撤销", toOrgId: "2", boxIds: [b9.id], password: CONFIRM_PW },
   });
   await s.run(s.controller.revokeTransfer.bind(s.controller), s.admin, {
     params: { id: alRev.data.id },

@@ -294,9 +294,9 @@ export function menusFor(perms) {
 
 /**
  * #26 m-06：调拨单由前端 local-menus 注入（src/router/local-menus.ts，
- * R12 gate = some(task:create:transfer, task:transfer:revoke)，插在「任务单」组之后），
+ * R24 gate = task:create:transfer 单码，撤销码已随功能下线退出；插在「任务单」组之后），
  * server menuRoutes 不含这一组。预览在这里镜像同一口径，保证「预览 = 真实侧栏」：
- * 功能常开（组织简化后无开关）恒列出这一组，on 按两码任一判；无两码列出但 off。
+ * 功能常开（组织简化后无开关）恒列出这一组，on 按建单码判；无该码列出但 off。
  * 组名/子项标题/hidden 与 local-menus.ts 保持一致；那边改菜单时这里要同步。
  * 组织简化（B4a/P9）：送检单独立页退役——local-menus 只剩调拨单组，送检旧链接
  * /sample/inspections 是一条隐藏重定向（不是侧栏菜单项），预览不镜像它。
@@ -316,13 +316,15 @@ const LOCAL_TRANSFER_INSPECT = [
  * 前端不再自抄一份菜单+权限表。列出全部菜单项（含隐藏的详情/创建页），on=侧栏实际可见。
  * 分组被 menusFor 整组裁掉时，组内隐藏项也标 off（侧栏确实进不去）。
  * #26 m-06：另镜像前端 local-menus 的调拨单注入（见 LOCAL_TRANSFER_INSPECT；送检单已退役，P9）。
- * R12：on 与 local-menus 注入 gate 同口径＝some(新建划拨, 撤销划拨)，不再看开关/device:box:task。
+ * R12/R24：on 与 local-menus 注入 gate 同口径＝只看新建划拨（撤销码已下线），不看开关/device:box:task。
  */
 export function menuPreviewFor(perms) {
   const visible = new Set(
     menusFor(perms).flatMap((group) => group.children.map((item) => item.name))
   );
-  const canTransfer = perms.has("task:create:transfer") || perms.has("task:transfer:revoke");
+  // R24（#70）撤销下线：撤销码退出门禁，调拨单可见性只看「新建划拨」，与 local-menus.ts
+  // TRANSFER_VIEW_PERMS、服务端 transfers/transferDetail handler 三处同口径。
+  const canTransfer = perms.has("task:create:transfer");
   const local = LOCAL_TRANSFER_INSPECT.flatMap((g) =>
     g.items.map((item) => ({
       title: item.title === g.group ? item.title : `${g.group} · ${item.title}`,

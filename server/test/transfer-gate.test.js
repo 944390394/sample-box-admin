@@ -1,13 +1,15 @@
 /**
- * R12 调拨门禁：调拨单页面只有有划拨权限的人才能看到。
- * gate = some(task:create:transfer, task:transfer:revoke)，三层单源同口径：
- * 1) 服务端 transfers/transferDetail handler 开头 require（无两码 403 A0301，先于可见性 404）；
- * 2) 前端 local-menus 注入（无两码不注入调拨单组 → 侧栏无、直链落 404）；
- * 3) menus.js menuPreviewFor 镜像（无两码列出但 off，预览可见项=真实侧栏）。
- * 角色码集按实际模板 DEFAULT_ROLE_PERMS（实测：ADMIN=两码；DISPATCH=仅 create（policyTask 045 拆分，
- * 053 补 revoke 只在迁移跑、新库种子在迁移后）；BRANCH_ADMIN/DUTY/VERIFY/LEADER/ASSET=无两码但有
- * device:box:task（旧 gate 会放行，R12 收紧）；SAMPLER=无两码且无 box:task）。
- * createTransfer/revokeTransfer 保留单码校验（各自 create/revoke 码），不被列表门禁连带放宽。
+ * R12 调拨门禁（R24 #70 收紧）：调拨单页面只有有「新建划拨」权限的人才能看到。
+ * gate = task:create:transfer 单码（撤销码随撤销功能下线退出门禁），三层单源同口径：
+ * 1) 服务端 transfers/transferDetail handler 开头 require（无建单码 403 A0301，先于可见性 404）；
+ * 2) 前端 local-menus 注入（无建单码不注入调拨单组 → 侧栏无、直链落 404）；
+ * 3) menus.js menuPreviewFor 镜像（无建单码列出但 off，预览可见项=真实侧栏）。
+ * 角色码集按实际模板 DEFAULT_ROLE_PERMS（R24 实测：ADMIN/DISPATCH/BRANCH_ADMIN=有 create 无 revoke；
+ * DUTY/VERIFY/LEADER/ASSET=无建单码但有 device:box:task（旧 gate 会放行，R12 收紧）；SAMPLER=无且无 box:task）。
+ * createTransfer 保留单码校验；revokeTransfer 方法本体保留（路由已封 410，见 transfer-revoke-retire.test.js），
+ * 直调仍按 revoke 单码校验——存量库 inert 授权行（053/057）只在这里还有语义。
+ * R24 起 createTransfer 需 body.password 二次确认：夹具用户落真实 scrypt hash（hashPassword），
+ * 提交带夹具口令；口令只是测试夹具值，不是任何真实账号凭据。
  * 一次性临时库（mkdtemp，同 transfer-allocation.test.js 写法），不碰开发库/线上库，不占任何服务端口。
  */
 import test from "node:test";
@@ -16,6 +18,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { registerHooks } from "node:module";
+import { hashPassword } from "../auth.js";
 import { DEFAULT_ROLE_PERMS } from "../src/auth/permCatalog.js";
 import { openDatabase, migrate } from "../db.js";
 import { MemoryStateCache } from "../src/cache/MemoryStateCache.js";
@@ -44,8 +47,11 @@ const { buildLocalMenus, mergeLocalMenus, TRANSFER_VIEW_PERMS } =
 const CREATE = "task:create:transfer";
 const REVOKE = "task:transfer:revoke";
 const BOX_TASK = "device:box:task";
+/** R24 二次确认夹具口令（仅测试用，非真实凭据）：所有夹具用户共用一个 hash。 */
+const CONFIRM_PW = "Gate-Fixture-2026";
+const CONFIRM_HASH = hashPassword(CONFIRM_PW);
 
-/** 无两码的实际模板（DUTY/VERIFY/LEADER/ASSET 有 box:task，SAMPLER 没有）；BRANCH_ADMIN 经 057 补两码。 */
+/** 无建单码的实际模板（DUTY/VERIFY/LEADER/ASSET 有 box:task，SAMPLER 没有）。 */
 const NO_TRANSFER_ROLES = ["DUTY", "VERIFY", "LEADER", "ASSET", "SAMPLER"];
 
 async function setup() {
@@ -81,8 +87,8 @@ async function setup() {
   };
   for (const p of Object.values(people))
     await db.run(
-      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES (?,?,?,'x',?,1)",
-      [p.id, `u${p.id}`, p.nickname, p.deptId]
+      "INSERT INTO sys_user (id,username,nickname,password_hash,dept_id,status) VALUES (?,?,?,?,?,1)",
+      [p.id, `u${p.id}`, p.nickname, CONFIRM_HASH, p.deptId]
     );
   const boxes = new SqlBoxStore(db);
   const policies = new ReportPolicy(db);
@@ -153,13 +159,13 @@ async function setup() {
   return { db, controller, ctx, run, makeBox, list, detail, people, teardown };
 }
 
-/** admin 建一张划拨单（2→3），返回单 id。 */
+/** admin 建一张划拨单（2→3），返回单 id。R24：提交带二次确认口令。 */
 async function seedTransfer(s) {
   const boxId = await s.makeBox("2");
   const res = await s.run(
     s.controller.createTransfer.bind(s.controller),
     s.ctx(DEFAULT_ROLE_PERMS.ADMIN),
-    { body: { name: "门禁夹具划拨", toOrgId: "3", boxIds: [boxId] } }
+    { body: { name: "门禁夹具划拨", toOrgId: "3", boxIds: [boxId], password: CONFIRM_PW } }
   );
   assert.ok(res.ok, `${res.code} ${res.message}`);
   return res.data.id;
@@ -236,18 +242,17 @@ test("R12 LEADER 只读无两码 → 不可见：403＋侧栏/预览/注入全�
   }
 });
 
-test("R12 有码角色可见可列：ADMIN/BRANCH_ADMIN/DISPATCH 两码 / 自定义仅 revoke —— 200＋预览 on＋注入调拨单组（meta.perm 同口径）", async () => {
+test("R12/R24 有建单码角色可见可列：ADMIN/BRANCH_ADMIN/DISPATCH —— 200＋预览 on＋注入调拨单组（meta.perm 同口径）；abilities 不再含 revoke", async () => {
   const s = await setup();
   try {
     const id = await seedTransfer(s);
     const cases = [
-      { name: "ADMIN", codes: DEFAULT_ROLE_PERMS.ADMIN, revoke: true },
-      { name: "DISPATCH", codes: DEFAULT_ROLE_PERMS.DISPATCH, revoke: true },
-      { name: "BRANCH_ADMIN", codes: DEFAULT_ROLE_PERMS.BRANCH_ADMIN, revoke: true },
-      { name: "REVOKE_ONLY", codes: [BOX_TASK, REVOKE], revoke: true },
+      { name: "ADMIN", codes: DEFAULT_ROLE_PERMS.ADMIN },
+      { name: "DISPATCH", codes: DEFAULT_ROLE_PERMS.DISPATCH },
+      { name: "BRANCH_ADMIN", codes: DEFAULT_ROLE_PERMS.BRANCH_ADMIN },
     ];
     for (const c of cases) {
-      assert.ok(c.codes.includes(CREATE) || c.codes.includes(REVOKE), `${c.name} 应至少有一码`);
+      assert.ok(c.codes.includes(CREATE), `${c.name} 应含建单码`);
       const actor = s.ctx(c.codes);
       const l = await s.list(actor);
       assert.ok(l.ok, `${c.name} 列表 ${l.code} ${l.message}`);
@@ -257,7 +262,8 @@ test("R12 有码角色可见可列：ADMIN/BRANCH_ADMIN/DISPATCH 两码 / 自定
       const d = await s.detail(actor, id);
       assert.ok(d.ok, `${c.name} 详情 ${d.code} ${d.message}`);
       assert.equal(d.data.id, id);
-      assert.equal(d.data.abilities.revoke, c.revoke, `${c.name} 撤销能力按 revoke 码`);
+      // R24（#70）撤销下线：详情不再下发 revoke 旗标（入口已删，cancel 历史占位保留）
+      assert.deepEqual(d.data.abilities, { cancel: false }, `${c.name} abilities 无 revoke`);
       // 预览 on；本地注入调拨单组（插在任务单后），meta.perm 与 gate 同口径
       for (const item of previewTransfer(c.codes)) assert.equal(item.on, true, `${c.name} 预览`);
       const local = buildLocalMenus({ perms: c.codes });
@@ -269,32 +275,40 @@ test("R12 有码角色可见可列：ADMIN/BRANCH_ADMIN/DISPATCH 两码 / 自定
       assert.ok(titles.includes("调拨单"), `${c.name} 侧栏应含调拨单`);
       assert.ok(titles.indexOf("调拨单") === titles.indexOf("任务单") + 1, "调拨单紧跟任务单");
     }
-    // R12 裁决补码后：DISPATCH/BRANCH_ADMIN 模板均含两码（存量库 057 幂等补）
+    // R24 裁决后：DISPATCH/BRANCH_ADMIN 模板含 create、不再含 revoke（存量库 057 补的行留库 inert）
     for (const code of ["DISPATCH", "BRANCH_ADMIN"]) {
       assert.ok(DEFAULT_ROLE_PERMS[code].includes(CREATE), code + " 应含 create");
-      assert.ok(DEFAULT_ROLE_PERMS[code].includes(REVOKE), code + " 应含 revoke");
+      assert.ok(!DEFAULT_ROLE_PERMS[code].includes(REVOKE), code + " 不应再含 revoke");
     }
+    // R24（#70）：仅存量撤销码（无建单码）不再可见——列表/详情 403、预览 off、不注入
+    const revokeOnly = s.ctx([BOX_TASK, REVOKE]);
+    const rl = await s.list(revokeOnly);
+    assert.equal(rl.code, "A0301");
+    assert.equal(rl.status, 403);
+    assert.equal((await s.detail(revokeOnly, id)).code, "A0301");
+    for (const item of previewTransfer([BOX_TASK, REVOKE])) assert.equal(item.on, false);
+    assert.ok(!sidebarTitles([BOX_TASK, REVOKE]).includes("调拨单"));
   } finally {
     await s.teardown();
   }
 });
 
-test("R12 createTransfer/revokeTransfer 保留单码校验：仅 revoke 不能建、仅 create 不能撤（A0301），两码可撤", async () => {
+test("R12/R24 createTransfer 单码校验＋revokeTransfer 领域直调保留单码：仅 revoke 不能建也不能看、仅 create 不能撤（A0301），存量两码直调可撤", async () => {
   const s = await setup();
   try {
     const boxId = await s.makeBox("2");
     const createOnly = s.ctx([BOX_TASK, CREATE]);
     const revokeOnly = s.ctx([BOX_TASK, REVOKE]);
-    // 仅 revoke：列表/详情可见，但建单被单码门禁拒
-    assert.ok((await s.list(revokeOnly)).ok);
+    // R24：仅 revoke 列表/详情也被拒（门禁单码化）；建单仍被单码门禁拒
+    assert.equal((await s.list(revokeOnly)).code, "A0301");
     const denied = await s.run(s.controller.createTransfer.bind(s.controller), revokeOnly, {
-      body: { name: "越权建单", toOrgId: "3", boxIds: [boxId] },
+      body: { name: "越权建单", toOrgId: "3", boxIds: [boxId], password: CONFIRM_PW },
     });
     assert.equal(denied.ok, false);
     assert.equal(denied.code, "A0301");
-    // 仅 create（DISPATCH 同码集）：建单成功，撤销被单码门禁拒
+    // 仅 create（DISPATCH 同码集）：建单成功（带二次确认口令），撤销被单码门禁拒
     const created = await s.run(s.controller.createTransfer.bind(s.controller), createOnly, {
-      body: { name: "调度建单", toOrgId: "3", boxIds: [boxId] },
+      body: { name: "调度建单", toOrgId: "3", boxIds: [boxId], password: CONFIRM_PW },
     });
     assert.ok(created.ok, `${created.code} ${created.message}`);
     const revokeDenied = await s.run(s.controller.revokeTransfer.bind(s.controller), createOnly, {
@@ -303,15 +317,13 @@ test("R12 createTransfer/revokeTransfer 保留单码校验：仅 revoke 不能�
     });
     assert.equal(revokeDenied.ok, false);
     assert.equal(revokeDenied.code, "A0301");
-    // 两码（ADMIN）：撤销成功（守卫全合格——箱未进任务/未开箱/未检测/未改挂）
-    const revoked = await s.run(
-      s.controller.revokeTransfer.bind(s.controller),
-      s.ctx(DEFAULT_ROLE_PERMS.ADMIN),
-      {
-        params: { id: created.data.id },
-        body: { reason: "划错了" },
-      }
-    );
+    // R24：ADMIN 模板已不含 revoke（ALL_PERMS 派生）。存量库 inert 授权行语义用显式两码模拟：
+    // 路由已封 410，这里直调领域方法验证守卫与归属退回仍完整（恢复撤销=接回路由即可用）。
+    const legacyBoth = s.ctx([BOX_TASK, CREATE, REVOKE]);
+    const revoked = await s.run(s.controller.revokeTransfer.bind(s.controller), legacyBoth, {
+      params: { id: created.data.id },
+      body: { reason: "划错了" },
+    });
     assert.ok(revoked.ok, `${revoked.code} ${revoked.message}`);
     assert.equal(revoked.data.restoredCount, 1);
   } finally {
@@ -319,16 +331,23 @@ test("R12 createTransfer/revokeTransfer 保留单码校验：仅 revoke 不能�
   }
 });
 
-test("R12 local-menus 注入 gate 纯函数：some(两码) 与开关无关；box:task-only/空码不注入；重定向恒在", async () => {
+test("R12/R24 local-menus 注入 gate 纯函数：仅建单码（撤销码单独不注入）与开关无关；box:task-only/空码不注入；重定向恒在", async () => {
   // 常开：gate 不再接收 enabled——旧开关字段不存在于接口，perms 唯一变量
-  for (const perms of [[CREATE], [REVOKE], [CREATE, REVOKE], [BOX_TASK, CREATE]]) {
+  for (const perms of [[CREATE], [CREATE, REVOKE], [BOX_TASK, CREATE]]) {
     const local = buildLocalMenus({ perms });
     assert.ok(
       local.some((g) => g.name === "SampleTransferGroup"),
       perms.join(",")
     );
   }
-  for (const perms of [[], [BOX_TASK], ["device:box:list", BOX_TASK], ["task:create:sample"]]) {
+  // R24：仅撤销码不再注入（撤销下线，码退出门禁）
+  for (const perms of [
+    [],
+    [BOX_TASK],
+    [REVOKE],
+    ["device:box:list", BOX_TASK],
+    ["task:create:sample"],
+  ]) {
     const local = buildLocalMenus({ perms });
     assert.ok(!local.some((g) => g.name === "SampleTransferGroup"), perms.join(","));
     assert.ok(

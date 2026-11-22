@@ -23,8 +23,8 @@ export const usePermissionStore = defineStore("permission", () => {
     try {
       const routeData = await MenuAPI.getRoutes();
       const serverRoutes = transformRoutes(routeData);
-      // 划拨独立页菜单在前端注入：功能常开（无开关），gate = some(新建划拨, 撤销划拨)，
-      // 与服务端 transfers/transferDetail 门禁同口径（R12：仅划拨权限者可见）。
+      // 划拨独立页菜单在前端注入：功能常开（无开关），gate = task:create:transfer 单码（create-only），
+      // 与服务端 transfers/transferDetail 门禁同口径（R24 撤销下线：仅新建划拨权限者可见）。
       const perms = useUserStoreHook().userInfo.perms || [];
       const local = buildLocalMenus({ perms });
       const menuRoutes = mergeLocalMenus(serverRoutes, local);

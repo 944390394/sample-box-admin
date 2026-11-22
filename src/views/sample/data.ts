@@ -730,8 +730,8 @@ export const IMEI_PERMS = [BOX_PERM.iccid, BOX_PERM.imsi, BOX_PERM.firmware];
 export const TASK_CREATE = ["task:create:sample", "task:create:inspect"];
 /** 批量划拨入口授权（提交即生效，独立页）。 */
 export const TRANSFER_CREATE = "task:create:transfer";
-/** 撤销划拨授权。 */
-export const TRANSFER_REVOKE = "task:transfer:revoke";
+// R24（#70）撤销划拨下线：TRANSFER_REVOKE 常量随两处撤销入口一起删除——权限码已从 permCatalog
+// 移除、路由回 410，前端再留一个永远为 false 的门只会误导后来人。
 
 export const reports = [
   {

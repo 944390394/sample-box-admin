@@ -29,15 +29,10 @@
               </div>
             </div>
           </div>
-          <div class="ops">
-            <el-button
-              v-if="detail.status === '已划拨' && detail.abilities.revoke"
-              type="danger"
-              @click="revokeOpen = true"
-            >
-              撤销划拨
-            </el-button>
-            <span v-else-if="detail.status === '已划拨'" class="text-muted">整单不可撤销</span>
+          <!-- R24（#70）撤销划拨下线：这里原来的「撤销划拨」按钮与「整单不可撤销」占位一并删除。
+               退回/改派走列表页的「重新划拨」，详情页只留一行说明，避免用户找不到入口后反复刷新。 -->
+          <div v-if="detail.status === '已划拨'" class="ops text-muted">
+            撤销已下线：如需退回或改派请重新划拨
           </div>
         </div>
 
@@ -79,14 +74,6 @@
         </dl>
       </el-card>
 
-      <el-alert
-        v-if="detail.status === '已划拨' && blockedCount"
-        type="warning"
-        :closable="false"
-        class="block"
-        :title="`存在 ${blockedCount} 台不可撤销箱子，整单禁止撤销。先处理被拦箱子或改用新划拨单。`"
-      />
-
       <el-card shadow="never" class="block" :header="`逐台快照 ${detail.boxes.length}`">
         <el-table :data="detail.boxes" class="box-table">
           <el-table-column label="采样箱" min-width="200">
@@ -106,20 +93,9 @@
               <el-tag size="small" :type="lifeTone(row.life)">{{ row.life || "—" }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="撤销守卫" min-width="240">
-            <template #default="{ row }">
-              <template v-if="detail.status === '已撤销'">
-                <span class="text-muted">已退回 {{ row.fromOrg }}</span>
-              </template>
-              <template v-else-if="row.revocable">
-                <span class="ok">可撤销</span>
-              </template>
-              <template v-else>
-                <span class="blocked">{{ reasonLabel(row.reasonCode) }}</span>
-                <div class="text-muted reason">{{ row.reason }}</div>
-              </template>
-            </template>
-          </el-table-column>
+          <!-- R24（#70）撤销下线：原「撤销守卫」列（可撤销/任务中/已开箱/已检测/归属已改挂）删除。
+               服务端 boxes[].revocable 仍下发——领域层四守卫保留是为了读历史已撤销单的审计口径，
+               只是撤销入口没了，这列对用户不再有意义。 -->
         </el-table>
       </el-card>
 
@@ -139,8 +115,6 @@
         </el-timeline>
       </el-card>
     </template>
-
-    <RevokeDialog :id="id" v-model="revokeOpen" @saved="load" />
   </div>
 </template>
 
@@ -152,14 +126,12 @@ import TransferAPI, { type TransferDetail } from "@/api/sample/transfer";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import { fullTime } from "@/utils/time";
 import { lifeTone, transferTone } from "@/utils/tone";
-import RevokeDialog from "./RevokeDialog.vue";
 
 const route = useRoute();
 const id = computed(() => String(route.params.id || ""));
 const detail = ref<TransferDetail | null>(null);
 const loading = ref(false);
 const error = ref("");
-const revokeOpen = ref(false);
 
 const headTone = computed(() => (detail.value?.status === "已划拨" ? "done" : "error"));
 const fromText = computed(() => {
@@ -167,14 +139,6 @@ const fromText = computed(() => {
   if (!from.length) return "—";
   return from.map((f) => `${f.orgName}（${f.count} 台）`).join("、");
 });
-const blockedCount = computed(() => (detail.value?.boxes || []).filter((b) => !b.revocable).length);
-function reasonLabel(code?: string) {
-  if (code === "IN_ACTIVE_TASK") return "任务中";
-  if (code === "OPENED_AFTER") return "已开箱";
-  if (code === "INSPECTED") return "已检测";
-  if (code === "ORG_MOVED") return "归属已改挂";
-  return "不可撤销";
-}
 
 let seq = 0;
 async function load() {
@@ -298,14 +262,9 @@ onActivated(() => void load());
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
-.ok {
-  color: var(--el-color-success);
-}
-.blocked {
-  color: var(--el-color-danger);
-}
-.reason {
-  font-size: 12px;
+.ops {
+  font-size: 13px;
+  text-align: right;
 }
 .log-note {
   margin: 4px 0 0;

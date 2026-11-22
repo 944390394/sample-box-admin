@@ -853,7 +853,10 @@ const routes = [
     method: "POST",
     path: "/api/v1/sample/transfers/:id/revoke",
     auth: true,
-    handler: (ctx) => useSample(ctx, (api) => api.policy.revokeTransfer(ctx)),
+    // R24（#70）撤销划拨下线：只封这一条路由，回 410 给可执行下一步（重新划拨）。
+    // 领域层 policies.revokeTransfer 与整单禁撤四守卫保留不删——历史已撤销单的审计口径要靠它读，
+    // 将来要恢复撤销也是把这一行接回去；控制器 revokeTransfer 同理由回归用例直调，不再挂路由。
+    handler: (ctx) => ctx.fail("撤销已下线：如需退回或改派请重新划拨", "A0409", 410),
   },
   {
     method: "GET",
