@@ -44,8 +44,8 @@
         class="group-gap"
       />
       <el-alert
-        v-else-if="company && !canWrite"
-        title="当前账号可查看本公司策略；修改需要「修改公司默认策略」权限，且只能改本公司（数据范围闸门）。"
+        v-else-if="company && readOnlyTip"
+        :title="readOnlyTip"
         type="info"
         :closable="false"
         class="group-gap"
@@ -115,48 +115,55 @@
           </span>
         </div>
         <SectionCard v-loading="companyLoading">
-          <el-form label-width="140px">
-            <el-form-item label="电量预留">
-              <el-checkbox v-model="reserveInherit" :disabled="!canWrite">继承系统默认</el-checkbox>
-              <el-input-number
-                v-model="reserveValue"
-                :min="0"
-                :max="80"
-                :disabled="!canWrite || reserveInherit"
-              />
-              <span class="unit">%</span>
-              <span class="inherit-hint">系统默认 {{ company.system.batteryReserve }}%</span>
-            </el-form-item>
-            <el-form-item label="任务到达半径">
-              <el-checkbox v-model="radiusInherit" :disabled="!canWrite">继承系统默认</el-checkbox>
-              <el-input-number
-                v-model="radiusValue"
-                :min="100"
-                :max="50000"
-                :step="500"
-                :disabled="!canWrite || radiusInherit"
-              />
-              <span class="unit">米</span>
-              <span class="inherit-hint">系统默认 {{ company.system.arriveRadiusM }} 米</span>
-            </el-form-item>
-            <el-form-item label="建单后未上线宽限">
-              <el-checkbox v-model="graceInherit" :disabled="!canWrite">继承系统默认</el-checkbox>
-              <el-input-number
-                v-model="graceValue"
-                :min="1"
-                :max="1440"
-                :step="5"
-                :disabled="!canWrite || graceInherit"
-              />
-              <span class="unit">分钟</span>
-              <span class="inherit-hint">
-                系统默认 {{ Math.round(company.system.taskOfflineGraceSec / 60) }} 分钟
-              </span>
-            </el-form-item>
-            <div class="form-extra">
-              箱子在检测站期间，策略与判定阈值按寄出分公司生效（建单快照）；划拨/分配改挂后自动切换到新公司。
-            </div>
-          </el-form>
+          <!-- R21（062）：阈值三列按 can.judge（policyCompanyJudge）单独 gating；无码整块锁定＋tooltip -->
+          <el-tooltip content="需要「修改公司判定阈值」权限" placement="top" :disabled="canJudge">
+            <el-form label-width="140px">
+              <el-form-item label="电量预留">
+                <el-checkbox v-model="reserveInherit" :disabled="!canJudge">
+                  继承系统默认
+                </el-checkbox>
+                <el-input-number
+                  v-model="reserveValue"
+                  :min="0"
+                  :max="80"
+                  :disabled="!canJudge || reserveInherit"
+                />
+                <span class="unit">%</span>
+                <span class="inherit-hint">系统默认 {{ company.system.batteryReserve }}%</span>
+              </el-form-item>
+              <el-form-item label="任务到达半径">
+                <el-checkbox v-model="radiusInherit" :disabled="!canJudge">
+                  继承系统默认
+                </el-checkbox>
+                <el-input-number
+                  v-model="radiusValue"
+                  :min="100"
+                  :max="50000"
+                  :step="500"
+                  :disabled="!canJudge || radiusInherit"
+                />
+                <span class="unit">米</span>
+                <span class="inherit-hint">系统默认 {{ company.system.arriveRadiusM }} 米</span>
+              </el-form-item>
+              <el-form-item label="建单后未上线宽限">
+                <el-checkbox v-model="graceInherit" :disabled="!canJudge">继承系统默认</el-checkbox>
+                <el-input-number
+                  v-model="graceValue"
+                  :min="1"
+                  :max="1440"
+                  :step="5"
+                  :disabled="!canJudge || graceInherit"
+                />
+                <span class="unit">分钟</span>
+                <span class="inherit-hint">
+                  系统默认 {{ Math.round(company.system.taskOfflineGraceSec / 60) }} 分钟
+                </span>
+              </el-form-item>
+              <div class="form-extra">
+                箱子在检测站期间，策略与判定阈值按寄出分公司生效（建单快照）；划拨/分配改挂后自动切换到新公司。
+              </div>
+            </el-form>
+          </el-tooltip>
         </SectionCard>
 
         <!-- 分组三：只读说明（PM 裁决：深睡/在线低功耗只放说明；固件不支持项不做控件） -->
@@ -186,7 +193,7 @@
         </SectionCard>
       </template>
 
-      <!-- ADMIN 折叠区：系统默认（全局兜底）沿用 BoxPolicySettings，字段级三码 gating 不变 -->
+      <!-- ADMIN 折叠区：系统默认（全局兜底）沿用 BoxPolicySettings，字段级四码 gating（R21/062 station 拆出） -->
       <el-collapse v-if="canSystem" v-model="systemOpen" class="system-collapse group-gap">
         <el-collapse-item name="system">
           <template #title>
@@ -232,10 +239,12 @@ import { formatDuration } from "@/utils/duration";
 
 /**
  * 采样箱 › 默认策略 → 公司策略中心（R13，任务 #46）。
- * 菜单对 policyCompany/policyDefault/battery-reserve/arrive-radius 四码 some 可见（server/menus.js）。
+ * 菜单对 policyCompany/policyCompanyJudge/policyDefault/battery-reserve/arrive-radius/station
+ * 六码 some 可见（server/menus.js，R21/062 扩两新码）。
  * 公司层：idle/task 两份完整策略（继承＝整层 NULL）＋判定阈值三列（null＝继承）；
- * 写闸门 device:box:policyCompany＋manageOrgIds（服务端 can.write 权威），无码只读。
- * ADMIN 折叠区沿用 BoxPolicySettings（系统默认全局兜底，字段级三码 gating）。
+ * 写闸门 device:box:policyCompany＋manageOrgIds（服务端 can.write 权威），无码只读；
+ * 阈值三列 R21（062）起按 can.judge（policyCompanyJudge）单独 gating，无码锁定＋tooltip。
+ * ADMIN 折叠区沿用 BoxPolicySettings（系统默认全局兜底，字段级四码 gating，station 已拆出）。
  * 脏标记/保存条/放弃/离开守卫复用原默认策略页口径：放弃＝重新 load，离开前确认，关页前 beforeunload。
  */
 defineOptions({ name: "SampleBoxPolicy" });
@@ -250,10 +259,11 @@ const can = computed(() => ({
   box: false,
   batteryReserve: false,
   arriveRadius: false,
+  station: false,
   ...(settings.value?.can || {}),
 }));
 const canSystem = computed(() =>
-  Boolean(can.value.box || can.value.batteryReserve || can.value.arriveRadius)
+  Boolean(can.value.box || can.value.batteryReserve || can.value.arriveRadius || can.value.station)
 );
 
 async function load() {
@@ -317,6 +327,20 @@ const companySnap = ref("");
 const saving = ref(false);
 
 const canWrite = computed(() => Boolean(company.value?.can.write));
+/**
+ * R21（062）：阈值三列单独可写＝服务端 can.judge（policyCompanyJudge 码＋manageOrgIds 闸门）。
+ * 老服务端无 judge 键时回落 can.write（旧口径：company 码管全部），部署同批后恒有键。
+ */
+const canJudge = computed(() => Boolean(company.value?.can.judge ?? company.value?.can.write));
+/** 只读/半只读提示：两码都无＝全只读；仅阈值码＝上报策略只读（阈值分组可改）。 */
+const readOnlyTip = computed(() => {
+  if (!company.value) return "";
+  if (!canWrite.value && !canJudge.value)
+    return "当前账号可查看本公司策略；修改上报策略需要「修改公司默认策略」权限，修改判定阈值需要「修改公司判定阈值」权限，且只能改本公司（数据范围闸门）。";
+  if (!canWrite.value)
+    return "当前账号可修改本公司判定阈值；修改上报策略需要「修改公司默认策略」权限（只能改本公司，数据范围闸门）。";
+  return "";
+});
 
 function snapshot() {
   return JSON.stringify({
@@ -424,7 +448,7 @@ function pickPolicy(form: Policy): Policy {
 }
 
 async function saveCompany() {
-  if (!company.value || !canWrite.value) return;
+  if (!company.value || (!canWrite.value && !canJudge.value)) return;
   const data: CompanyPolicyInput = {
     idle: idleCustom.value ? pickPolicy(idleForm.value) : null,
     task: taskCustom.value ? pickPolicy(taskForm.value) : null,

@@ -63,19 +63,25 @@
         </div>
       </el-form-item>
       <el-form-item label="唯一检测站">
-        <el-select
-          v-model="form.stationDeptId"
-          :disabled="!can.box"
-          clearable
-          placeholder="未指定（总公司下恰一个启用检测站时自动认定）"
+        <el-tooltip
+          content="需要「设置唯一检测站」权限"
+          placement="top"
+          :disabled="Boolean(can.station)"
         >
-          <el-option
-            v-for="opt in stationOptions"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
+          <el-select
+            v-model="form.stationDeptId"
+            :disabled="!can.station"
+            clearable
+            placeholder="未指定（总公司下恰一个启用检测站时自动认定）"
+          >
+            <el-option
+              v-for="opt in stationOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-tooltip>
         <div v-if="autoStationName" class="form-extra">自动认定：{{ autoStationName }}</div>
         <div class="form-extra">
           合并采样单（任务单）的接收方固定为该检测站，建单页不再手选接收方。未指定时，总公司下恰有一个启用的检测站会自动认定；零个或多个时建单会提示先在这里指定。
@@ -100,15 +106,16 @@ import DurationInput from "@/components/biz/DurationInput.vue";
 
 /**
  * 采样箱默认策略与任务表单（IA 迁移：原系统设置 sec-box 分区整体迁入，现挂采样箱 › 默认策略页）。
- * 字段级授权：上报周期/定时上报/宽限/唯一检测站走 can.box（device:box:policyDefault），
- * 电量预留、到达半径各自授权；有任意一项就能保存（服务端按改了哪样再查）。
+ * 字段级授权：上报周期/定时上报/宽限走 can.box（device:box:policyDefault），
+ * 电量预留、到达半径各自授权；唯一检测站走 can.station（sys:settings:station，R21/062 从 box 拆出，
+ * 老服务端无此键时 fail-closed 锁定）；有任意一项就能保存（服务端按改了哪样再查）。
  * 划拨/送检功能常开（组织简化后合并采样单/划拨是主流程）：无开关，旧 enableTransferInspect 写入被服务端忽略。
  * 脏状态向父级 emit（dirty），保存成功 emit saved（父级刷新全站宽限缓存）；expose save 供保存条调用。
  * 放弃更改由父级重新 load() 后 value 变化触发回填（与设置页 discardDirty 同口径）。不含任何密钥字段。
  */
 const props = defineProps<{
   value?: BoxSettings;
-  can: { box: boolean; batteryReserve: boolean; arriveRadius: boolean };
+  can: { box: boolean; batteryReserve: boolean; arriveRadius: boolean; station?: boolean };
   loading?: boolean;
 }>();
 const emit = defineEmits<{
@@ -136,7 +143,7 @@ const saving = ref(false);
 /** 已保存快照：回填/保存成功时刷新，判脏＝当前表单与之比对（秒→分钟换算后口径稳定）。 */
 const savedSnap = ref("");
 const canSetPolicy = computed(() =>
-  Boolean(props.can.box || props.can.batteryReserve || props.can.arriveRadius)
+  Boolean(props.can.box || props.can.batteryReserve || props.can.arriveRadius || props.can.station)
 );
 /**
  * 唯一检测站自动认定提示（灰字「自动认定：{name}」）：服务端在配置未指定且自动认定成功时

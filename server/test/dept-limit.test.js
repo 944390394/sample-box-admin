@@ -6,6 +6,8 @@ import test from "node:test";
 
 import { migrate, openDatabase } from "../db.js";
 import { up as detailMigration } from "../migrations/045_perm_points_detail.js";
+import { up as up061 } from "../migrations/061_perm_status_split.js";
+import { up as up062 } from "../migrations/062_perm_p1_split.js";
 import * as org from "../org-api.js";
 import { BOX, maskBox, resolveAccess } from "../src/auth/boxAccess.js";
 import { ALL_PERMS, cardsFor, grantsAll, upgradeCodes } from "../src/auth/permCatalog.js";
@@ -423,6 +425,11 @@ test("迁移 045：每个角色拆开后的权限正好等于老码换算的结�
         perm,
       ]);
     await detailMigration(db);
+    // R21（062）：upgradeCodes 链已含 061/062——045 把 policyTask 拆出 create:sample 后，
+    // 062 再补 create:inspect 并集。等价断言要跑完整迁移链（061 对本码集 no-op），
+    // 钉死「DB 迁移链 ≡ upgradeCodes 换算」这一不变量（原断言口径随链延伸，非放宽）。
+    await up061(db);
+    await up062(db);
     const rows = await db.all(
       "SELECT perm, grantable FROM sys_role_perm WHERE role_id = '60' ORDER BY perm"
     );

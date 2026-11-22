@@ -42,6 +42,7 @@ export const SETTINGS = [
   "device:box:policyDefault",
   "sys:settings:battery-reserve",
   "sys:settings:arrive-radius",
+  "sys:settings:station",
 ];
 const BOX = ["device:box:list"];
 
@@ -102,7 +103,11 @@ export const menuRoutes = [
         "创建任务单",
         "el-icon-Plus",
         true,
-        { activeMenu: "/task/tasks", perm: ["task:create:transfer", "task:create:sample"] }
+        {
+          activeMenu: "/task/tasks",
+          // R21（062）：送检严格要 create:inspect（去 create:sample 兜底），仅持送检码也要能进创建页
+          perm: ["task:create:transfer", "task:create:sample", "task:create:inspect"],
+        }
       ),
       menu(
         "detail/:id",
@@ -126,7 +131,9 @@ export const menuRoutes = [
         perm: BOX,
       }),
       // 上报记录独立页（远端维护的报文查询入口）。保留远端路由路径 /monitor/reports 以兼容深链；
-      // 页面先拉箱子列表再查单箱报文，故按「采样箱列表」权限 gating，报文/原文仍由后端逐条鉴权。
+      // R21（062）：菜单门与内容门对齐＝some(查看上报记录, 开关箱/上电/充电记录)——
+      // 持 list 无 log/event 的角色（如现场采样员）不再「菜单可见但报文 403」；
+      // 持 log/event 无 list 的角色箱选择器走轻量 report-options（仅 id+name），报文/原文仍由后端逐条鉴权。
       menu(
         "/monitor/reports",
         "sample/reports/index",
@@ -134,11 +141,20 @@ export const menuRoutes = [
         "上报记录",
         "el-icon-List",
         false,
-        { perm: BOX }
+        {
+          perm: [
+            "device:box:log",
+            "device:box:event-lid",
+            "device:box:event-boot",
+            "device:box:event-charge",
+          ],
+        }
       ),
       // 默认策略独立页（IA 迁移）：原系统设置「采样箱默认策略与任务」分区迁到采样箱组。
       // R13 扩为公司策略中心：公司默认策略码＋原三码任意一个即可见（some），
       // 与页面内分组 gating 一致；无码的角色（如现场采样员）菜单不显示。
+      // R21（062）：＋判定阈值码（公司层阈值分组）＋唯一检测站码（系统默认折叠区），
+      // 仅持新码（+各自前置）的角色也能进页操作对应分组。
       menu(
         "policy",
         "device/policy/index",
@@ -149,9 +165,11 @@ export const menuRoutes = [
         {
           perm: [
             "device:box:policyCompany",
+            "device:box:policyCompanyJudge",
             "device:box:policyDefault",
             "sys:settings:battery-reserve",
             "sys:settings:arrive-radius",
+            "sys:settings:station",
           ],
         }
       ),

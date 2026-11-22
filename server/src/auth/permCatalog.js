@@ -215,7 +215,7 @@ export const TASK_PERMS = [
     9411,
     "task:create:sample",
     "新建采样任务",
-    "分公司带箱子去计划地点采样，封箱后直寄唯一检测站（采样＋送检合并一张单）",
+    "分公司带箱子去计划地点采样（仅本地），或采样后封箱直寄唯一检测站（合并一张单）；送检单（仅寄送）另按「新建送检单」授权",
     "task",
     "do",
     TASK_ENTER
@@ -224,7 +224,7 @@ export const TASK_PERMS = [
     9420,
     "task:create:inspect",
     "新建送检单",
-    "送检已并入采样任务（历史权限码保留）：把采样箱送唯一检测站，签收后逐台开始检测",
+    "把采样箱送唯一检测站（仅寄送、无采样段），签收后逐台开始检测；R21 起送检严格要本码，不再由「新建采样任务」兜底",
     "task",
     "do",
     TASK_ENTER
@@ -534,13 +534,24 @@ export const BOX_PERMS = [
     "do",
     ["device:box:policyRead"]
   ),
-  // R13 公司级策略中心：公司默认策略（双频/灯/定位/判定阈值）单独一码，
+  // R13 公司级策略中心：公司默认策略（双频/灯/定位）单独一码，
   // 与全局语义的 device:box:policyDefault 分开（一项只管一件事）；数据范围闸门 manageOrgIds 只能改本公司。
   item(
     9148,
     "device:box:policyCompany",
     "修改公司默认策略",
-    "设本公司箱子的非任务/任务期间上报策略、指示灯、卫星定位和判定阈值；只影响没有单箱、批量或任务设置的箱子，任务策略只作新建任务单的初始值",
+    "设本公司箱子的非任务/任务期间上报策略、指示灯、卫星定位；只影响没有单箱、批量或任务设置的箱子，任务策略只作新建任务单的初始值。判定阈值另按「修改公司判定阈值」",
+    "box",
+    "do",
+    ["device:box:policyRead"]
+  ),
+  // R21（062）：公司判定阈值从 policyCompany 拆出——阈值影响全公司低电/到达/离线判定，
+  // 与上报节奏（idle/task 双频）是不同决策；对齐系统层 battery-reserve/arrive-radius 独立先例。
+  item(
+    9149,
+    "device:box:policyCompanyJudge",
+    "修改公司判定阈值",
+    "设本公司电量预留、任务到达半径、建单后未上线宽限，留空继承系统默认；上报策略仍按「修改公司默认策略」",
     "box",
     "do",
     ["device:box:policyRead"]
@@ -857,7 +868,7 @@ export const SYS_PERMS = [
     9118,
     "device:box:policyDefault",
     "修改默认上报策略",
-    "新箱子和没单独设策略的箱子用的上报周期、是否只在充电时上报",
+    "新箱子和没单独设策略的箱子用的上报周期、是否只在充电时上报、建单后未上线宽限；唯一检测站另按「设置唯一检测站」",
     "settings",
     "do",
     ["sys:settings:view"]
@@ -876,6 +887,17 @@ export const SYS_PERMS = [
     "sys:settings:arrive-radius",
     "修改到达判定半径",
     "离目标地址多近算到达",
+    "settings",
+    "do",
+    ["sys:settings:view"]
+  ),
+  // R21（062）：唯一检测站从 policyDefault 拆出——检测站配置是组织路由决策（影响全部任务流），
+  // 与遥测节奏不同类；配置入口在采样箱›默认策略页「系统默认（全局兜底）」折叠区。
+  item(
+    9618,
+    "sys:settings:station",
+    "设置唯一检测站",
+    "指定合并采样单接收方的唯一检测站；清空后按「总公司下恰一个启用检测站」自动认定",
     "settings",
     "do",
     ["sys:settings:view"]
@@ -1084,6 +1106,20 @@ export const SPLIT_061 = {
 };
 
 /**
+ * 迁移 062（R21 / 任务 #64）：权限 P1 四项细化（用户全选）里的三组拆码，老码保留（parts 含 old）：
+ * - policyCompany → +policyCompanyJudge：公司判定阈值三列从公司默认策略拆出（§3.3）；
+ * - policyDefault → +sys:settings:station：唯一检测站从默认上报策略拆出（§3.5）；
+ * - create:sample → +create:inspect：送检严格要「新建送检单」（去兜底，§3.4），存量持有者补并集，
+ *   之后管理员可单独收回送检而保留采样。
+ * 第四项「上报记录菜单门对齐」（§3.6）是菜单 gate 精化（some(log/event-*)），不是码拆分，不进拆分表。
+ */
+export const SPLIT_062 = {
+  "device:box:policyCompany": ["device:box:policyCompany", "device:box:policyCompanyJudge"],
+  "device:box:policyDefault": ["device:box:policyDefault", "sys:settings:station"],
+  "task:create:sample": ["task:create:sample", "task:create:inspect"],
+};
+
+/**
  * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
  * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
  */
@@ -1099,10 +1135,10 @@ export function grant055(current) {
   return [...add];
 }
 
-/** 老码列表升级成现在的码：043、045、061 拆分，去掉卡片组，补逐张卡片，055 补导出码。新库默认值、模板都走这里。 */
+/** 老码列表升级成现在的码：043、045、061、062 拆分，去掉卡片组，补逐张卡片，055 补导出码。新库默认值、模板都走这里。 */
 export function upgradeCodes(codes) {
   let current = [...new Set(codes)];
-  for (const table of [SPLIT_043, SPLIT_045, SPLIT_061]) {
+  for (const table of [SPLIT_043, SPLIT_045, SPLIT_061, SPLIT_062]) {
     const { add, remove } = applySplits(current, table);
     current = current.filter((code) => !remove.includes(code)).concat(add);
   }

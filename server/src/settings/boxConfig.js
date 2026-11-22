@@ -249,6 +249,35 @@ export function mergeBoxSettings(current, input) {
   };
 }
 
+/**
+ * saveBox 字段级授权（R21/062：唯一检测站从 policyDefault 拆出 sys:settings:station）：
+ * 改了哪一块就查哪一项码，未变更的回显值不查；缺码返回友好报错文案，全过返回 null。
+ * before/after 都是 publicBox 形状；perms＝当前账号权限集（auth 路由恒有 access，
+ * 缺失时按无权限拒，与原 saveBox 内联口径一致）。抽成纯函数供 saveBox 调用与单测行为断言。
+ */
+export function boxSettingsDenied(before, after, perms) {
+  const has = (code) => Boolean(perms?.has(code));
+  if (
+    (before.reportPeriodSec !== after.reportPeriodSec ||
+      Boolean(before.reportOnlyWhenCharging) !== after.reportOnlyWhenCharging) &&
+    !has("device:box:policyDefault")
+  )
+    return "没有「修改默认上报策略」权限";
+  if (
+    Number(before.batteryReserve) !== after.batteryReserve &&
+    !has("sys:settings:battery-reserve")
+  )
+    return "没有「修改电量预留比例」权限";
+  if (Number(before.arriveRadiusM) !== after.arriveRadiusM && !has("sys:settings:arrive-radius"))
+    return "没有「修改到达判定半径」权限";
+  if (
+    String(before.stationDeptId ?? "") !== String(after.stationDeptId ?? "") &&
+    !has("sys:settings:station")
+  )
+    return "没有修改唯一检测站配置的权限";
+  return null;
+}
+
 /** 1.0.2 起，确认行可以在 ok 后面带 p= 和 c=。更早的固件只认单独的 ok。 */
 export function firmwareAcceptsConfig(firmware) {
   const parts = String(firmware || "")

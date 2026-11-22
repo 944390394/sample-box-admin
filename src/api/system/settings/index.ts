@@ -80,6 +80,8 @@ export interface TcpSettings {
     security: boolean;
     integration: boolean;
     box: boolean;
+    /** R21（062）：唯一检测站从 box（policyDefault）拆出；老服务端无此键 */
+    station?: boolean;
   };
 }
 

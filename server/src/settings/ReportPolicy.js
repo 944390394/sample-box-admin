@@ -39,6 +39,8 @@ export const POLICY_PERMS = {
   defaults: "device:box:policyDefault",
   /** R13 公司级策略中心：修改本公司默认策略（manageOrgIds 闸门限本公司）。 */
   company: "device:box:policyCompany",
+  /** R21（062）：公司判定阈值三列从 company 拆出（电量预留/到达半径/离线宽限）。 */
+  companyJudge: "device:box:policyCompanyJudge",
 };
 
 export function validatePolicy(input) {

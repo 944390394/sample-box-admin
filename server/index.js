@@ -38,6 +38,7 @@ import { mergeMapSettings, publicMap } from "./src/settings/mapConfig.js";
 import {
   applyBoxSettings,
   assertStationSavable,
+  boxSettingsDenied,
   mergeBoxSettings,
   publicBox,
   resolveStation,
@@ -398,9 +399,10 @@ const routes = [
     perm: "sys:dept:limit",
     handler: org.saveDeptLimit,
   },
-  // R13 公司策略中心：公司默认策略（双频/灯/定位/判定阈值）。
+  // R13 公司策略中心：公司默认策略（双频/灯/定位）＋判定阈值（R21/062 拆码）。
   // 读＝policyRead/policyCompany 任一（handler 内再按 view 口径 orgIds 闸门）；
-  // 写＝policyCompany（handler 内 manageOrgIds 闸门只能改本公司＋type=公司校验）。
+  // 写＝policyCompany 或 policyCompanyJudge 任一（handler 内 manageOrgIds 闸门只能改本公司
+  // ＋type=公司校验；改了哪块再各查各码：idle/task→company，阈值三列→judge）。
   {
     method: "GET",
     path: "/api/v1/depts/:id/policy",
@@ -412,7 +414,7 @@ const routes = [
     method: "PUT",
     path: "/api/v1/depts/:id/policy",
     auth: true,
-    perm: "device:box:policyCompany",
+    perm: ["device:box:policyCompany", "device:box:policyCompanyJudge"],
     handler: (ctx) => useSample(ctx, (api) => api.policy.companyPolicySave(ctx)),
   },
   {
@@ -658,6 +660,20 @@ const routes = [
     path: "/api/v1/sample/boxes/export",
     auth: true,
     handler: (ctx) => useSample(ctx, (api) => api.export(ctx)),
+  },
+  // R21（062）上报记录页箱选择器：some(log/event-*) 门，仅回范围内 id+name；
+  // 注册在 /boxes/:id 之前（matchRoute 顺序匹配，防被 :id 吞掉）。内容鉴权不变。
+  {
+    method: "GET",
+    path: "/api/v1/sample/boxes/report-options",
+    auth: true,
+    perm: [
+      "device:box:log",
+      "device:box:event-lid",
+      "device:box:event-boot",
+      "device:box:event-charge",
+    ],
+    handler: (ctx) => useSample(ctx, (api) => api.reportOptions(ctx)),
   },
   {
     method: "GET",
@@ -971,11 +987,12 @@ const routes = [
     method: "PUT",
     path: "/api/v1/system/settings/box",
     auth: true,
-    // 默认上报策略、电量预留、到达半径各自授权，saveBox 里按改了哪样再查
+    // 默认上报策略、电量预留、到达半径、唯一检测站（R21/062 拆码）各自授权，saveBox 里按改了哪样再查
     perm: [
       "device:box:policyDefault",
       "sys:settings:battery-reserve",
       "sys:settings:arrive-radius",
+      "sys:settings:station",
     ],
     handler: saveBox,
   },
@@ -1337,6 +1354,8 @@ async function systemSettings(ctx) {
     box: has("device:box:policyDefault"),
     batteryReserve: has("sys:settings:battery-reserve"),
     arriveRadius: has("sys:settings:arrive-radius"),
+    // R21（062）：唯一检测站从 policyDefault 拆出，选择器按它单独 gating
+    station: has("sys:settings:station"),
   };
   const anySetting = view || Object.values(can).some(Boolean);
   const map = publicMap(state.config);
@@ -1527,31 +1546,16 @@ async function saveBox(ctx) {
   } catch (error) {
     return ctx.fail(error instanceof Error ? error.message : "采样箱设置不正确");
   }
-  // 默认上报策略、电量预留、到达半径各自授权：改了哪一块就查哪一项
+  // 默认上报策略、电量预留、到达半径、唯一检测站各自授权：改了哪一块就查哪一项
+  //（R21/062：station 改查 sys:settings:station；gate 抽在 boxConfig.boxSettingsDenied 供单测）
   const before = publicBox(state.config);
   const after = next.box;
-  const perms = ctx.access?.perms;
-  if (
-    (before.reportPeriodSec !== after.reportPeriodSec ||
-      Boolean(before.reportOnlyWhenCharging) !== after.reportOnlyWhenCharging) &&
-    !perms?.has("device:box:policyDefault")
-  )
-    return ctx.fail("没有「修改默认上报策略」权限");
-  if (
-    Number(before.batteryReserve) !== after.batteryReserve &&
-    !perms?.has("sys:settings:battery-reserve")
-  )
-    return ctx.fail("没有「修改电量预留比例」权限");
-  if (
-    Number(before.arriveRadiusM) !== after.arriveRadiusM &&
-    !perms?.has("sys:settings:arrive-radius")
-  )
-    return ctx.fail("没有「修改到达判定半径」权限");
+  const denied = boxSettingsDenied(before, after, ctx.access?.perms);
+  if (denied) return ctx.fail(denied);
   // 划拨/送检功能常开（键恒 true）：不再因该键做权限差异；旧客户端写入被 mergeBoxSettings 忽略。
-  // 唯一检测站（组织简化 B1b/P5）：改配置同样沿用箱子设置写权限；
-  // 配置时校验存在/启用/类型检测站/属总公司子树/全局唯一（友好报错），清空不校验。
+  // 唯一检测站（组织简化 B1b/P5）：配置时校验存在/启用/类型检测站/属总公司子树/全局唯一
+  //（友好报错），清空不校验。
   if (String(before.stationDeptId ?? "") !== String(after.stationDeptId ?? "")) {
-    if (!perms?.has("device:box:policyDefault")) return ctx.fail("没有修改唯一检测站配置的权限");
     try {
       await assertStationSavable(state.db, after.stationDeptId);
     } catch (error) {

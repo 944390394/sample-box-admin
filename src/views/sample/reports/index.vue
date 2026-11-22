@@ -340,7 +340,8 @@ const router = useRouter();
 const loading = ref(false);
 const exporting = ref(false);
 const error = ref("");
-const boxes = ref<SampleBox[]>([]);
+/** 箱选择器数据：list 角色拿完整列表；仅 log/event 角色走 report-options（只有 id+name，R21/062）。 */
+const boxes = ref<Pick<SampleBox, "id" | "name">[]>([]);
 const boxId = ref("");
 const rows = ref<BoxLogItem[]>([]);
 const kind = ref("");
@@ -364,7 +365,18 @@ const lastLiveAt = ref("");
 const freshKeys = ref<Set<string>>(new Set());
 const tableArea = ref<HTMLElement | null>(null);
 
-const kindChips = [
+/**
+ * R21（062）：事件-only 角色（无 device:box:log）只能查持码的事件种类——服务端 #logPerm 口径不变，
+ * 页内把类型 chips 收窄到持码项并默认选第一项，避免默认「全部」撞 403；持 log 角色全种类照旧。
+ * chgs（充电状态）/timer/unknown 不在事件码口径里，要 log 码。
+ */
+const EVENT_CHIP_PERMS: Record<string, string> = {
+  pad: BOX_PERM.eventLid,
+  shut: BOX_PERM.eventLid,
+  boot: BOX_PERM.eventBoot,
+  chg: BOX_PERM.eventCharge,
+};
+const ALL_KIND_CHIPS = [
   { value: "", label: "全部" },
   { value: "timer", label: "定时上报" },
   { value: "pad", label: "开箱" },
@@ -374,6 +386,15 @@ const kindChips = [
   { value: "chgs", label: "充电状态" },
   { value: "unknown", label: "其他" },
 ];
+const kindChips = computed(() =>
+  can(BOX_PERM.log)
+    ? ALL_KIND_CHIPS
+    : ALL_KIND_CHIPS.filter(
+        (chip) => EVENT_CHIP_PERMS[chip.value] && can(EVENT_CHIP_PERMS[chip.value])
+      )
+);
+// 事件-only 角色默认选第一个持码事件种类（「全部」要 log 码，默认查会 403）
+if (!can(BOX_PERM.log)) kind.value = kindChips.value[0]?.value ?? "";
 const presetChips: { value: Preset; label: string }[] = [
   { value: "1h", label: "1 小时" },
   { value: "6h", label: "6 小时" },
@@ -425,7 +446,9 @@ function voltStyle(volts: number) {
 }
 
 async function loadBoxes() {
-  boxes.value = await SampleBoxAPI.list();
+  // R21（062）：持 log/event 无 list 的角色走轻量 report-options（仅范围内 id+name）；
+  // 持 list 的角色保持原列表端点，行为不变。
+  boxes.value = can(BOX_PERM.list) ? await SampleBoxAPI.list() : await SampleBoxAPI.reportOptions();
   if (!boxId.value && boxes.value[0]) boxId.value = boxes.value[0].id;
 }
 

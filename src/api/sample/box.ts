@@ -163,6 +163,16 @@ const SampleBoxAPI = {
   list() {
     return request<unknown, SampleBox[]>({ url: "/api/v1/sample/boxes", method: "get" });
   },
+  /**
+   * R21（062）上报记录页箱选择器：some(log/event-*) 门，仅回数据范围内 id+name
+   * （name 按设备标识权限脱敏），供持记录权限但无 device:box:list 的角色用。
+   */
+  reportOptions() {
+    return request<unknown, { id: string; name: string }[]>({
+      url: "/api/v1/sample/boxes/report-options",
+      method: "get",
+    });
+  },
   page(params: BoxQuery) {
     return request<unknown, BoxPage>({
       url: "/api/v1/sample/boxes",

@@ -197,6 +197,28 @@ export class SampleController {
     ctx.ok({ list, missing, skipped, truncated });
   }
 
+  /**
+   * R21（062）上报记录页箱选择器：菜单门＝some(log, event-lid/boot/charge)，
+   * 兼容持记录权限但无 device:box:list 的角色。仅回数据范围内 id+name
+   * （name 走设备标识脱敏口径，与 maskBox 清名一致），不带工况/标识字段；
+   * 报文内容鉴权（#logPerm/raw/logExport）一律不动。
+   */
+  async reportOptions(ctx) {
+    const perms = ctx.access?.perms;
+    if (
+      perms &&
+      ![BOX.log, BOX.eventLid, BOX.eventBoot, BOX.eventCharge].some((code) => perms.has(code))
+    )
+      return ctx.fail("没有这项权限", "A0301", 403);
+    const rows = (await this.boxes.list()).filter((box) => canSee(ctx.access, box));
+    ctx.ok(
+      rows.map((box) => {
+        const json = box.toJSON();
+        return { id: String(json.id), name: boxNameCell(json, perms, false) };
+      })
+    );
+  }
+
   async detail(ctx) {
     const box = await this.#visible(ctx, BOX.detail);
     if (!box) return;

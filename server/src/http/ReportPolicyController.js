@@ -271,13 +271,20 @@ export class ReportPolicyController {
   /**
    * R13 公司策略中心的目标公司校验（GET/PUT 共用）：
    * 存在＋启用＋type=公司（检测站拒绝，沿划拨 P8 文案口径）；
-   * 读闸门＝policyRead＋view 口径（orgIds，含祖先）；写闸门＝policyCompany＋manage 口径
-   * （manageOrgIds 不含祖先——分公司管理员天然只能改本公司，总部管理员 all 可改各分公司）。
+   * 读闸门＝policyRead＋view 口径（orgIds，含祖先）；写闸门＝policyCompany 或 policyCompanyJudge
+   * 任一（R21/062 阈值拆码：仅持阈值码也能保存阈值变更，改了哪块在 companyPolicySave 里再各查各码）
+   * ＋manage 口径（manageOrgIds 不含祖先——分公司管理员天然只能改本公司，总部管理员 all 可改各分公司）。
    */
   async #companyTarget(ctx, { write = false } = {}) {
     const orgId = String(ctx.params.id ?? "").slice(0, 32);
     if (!orgId) throw badRequest("请选择公司");
-    this.require(ctx, write ? P.company : P.read);
+    if (write) {
+      const perms = ctx.access?.perms;
+      if (!perms?.has(P.company) && !perms?.has(P.companyJudge))
+        throw noPermission("没有这项操作权限");
+    } else {
+      this.require(ctx, P.read);
+    }
     const dept = await this.db.get("SELECT id, name, type, status FROM sys_dept WHERE id=?", [
       orgId,
     ]);
@@ -308,16 +315,17 @@ export class ReportPolicyController {
     const dept = await this.#companyTarget(ctx);
     const policy = await readCompanyPolicy(this.db, dept.id);
     const scope = ctx.access?.scope;
-    const canWrite =
-      Boolean(ctx.access?.perms?.has(P.company)) &&
-      (!scope || scope.all || (scope.manageOrgIds ?? []).includes(String(dept.id)));
+    const inManage = !scope || scope.all || (scope.manageOrgIds ?? []).includes(String(dept.id));
+    const canWrite = Boolean(ctx.access?.perms?.has(P.company)) && inManage;
+    // R21（062）：阈值三列单独可写标识（码＋同一 manage 闸门），前端阈值控件按它锁定
+    const canJudge = Boolean(ctx.access?.perms?.has(P.companyJudge)) && inManage;
     const boxCount = (await companyBoxIds(this.db, String(dept.id))).length;
     ctx.ok({
       orgId: String(dept.id),
       orgName: dept.name,
       ...policy,
       system: systemJudgmentDefaults(),
-      can: { write: canWrite },
+      can: { write: canWrite, judge: canJudge },
       boxCount,
     });
   }
@@ -326,6 +334,8 @@ export class ReportPolicyController {
    * PUT /api/v1/depts/:id/policy：保存公司策略（idle/task 完整策略或 null＝整层继承；
    * 判定阈值三列 null＝继承系统默认）。事务内保存＋refresh 该公司全部箱子（含检测站里
    * 由该公司寄出的箱子），提交后沿既有 policy 下发＋ACK 通道推送（不新建命令队列）。
+   * R21（062）字段级授权（saveBox/saveSecurity 同款「改了哪块查哪码」）：
+   * idle/task 变更查 policyCompany；阈值三列变更查 policyCompanyJudge；未变更的回显值不查。
    * 审计（PM 裁决）：orgId 记目标公司，detail={before,after,affectedBoxCount}；先写库后审计。
    */
   async companyPolicySave(ctx) {
@@ -335,6 +345,20 @@ export class ReportPolicyController {
     const task = body.task == null ? null : validatePolicy(body.task);
     const numbers = validateCompanyNumbers(body);
     const before = await readCompanyPolicy(this.db, dept.id);
+    // 库里策略带 revision 戳、可选键有无不一：两边都过 validatePolicy 归一后再比，避免回显误判「变更」
+    const samePolicy = (a, b) =>
+      JSON.stringify(a == null ? null : validatePolicy(a)) ===
+      JSON.stringify(b == null ? null : validatePolicy(b));
+    if (!samePolicy(idle, before.idle) || !samePolicy(task, before.task))
+      this.require(ctx, P.company);
+    if (
+      numbers.batteryReserve !== before.batteryReserve ||
+      numbers.arriveRadiusM !== before.arriveRadiusM ||
+      numbers.taskOfflineGraceSec !== before.taskOfflineGraceSec
+    ) {
+      if (!ctx.access?.perms?.has(P.companyJudge))
+        throw noPermission("没有「修改公司判定阈值」权限");
+    }
     const after = { idle, task, ...numbers };
     const ids = await companyBoxIds(this.db, String(dept.id));
     let meta;
@@ -363,7 +387,10 @@ export class ReportPolicyController {
         ...after,
         ...meta,
         system: systemJudgmentDefaults(),
-        can: { write: true },
+        can: {
+          write: Boolean(ctx.access?.perms?.has(P.company)),
+          judge: Boolean(ctx.access?.perms?.has(P.companyJudge)),
+        },
         boxCount: ids.length,
         affectedBoxCount: ids.length,
       },
@@ -381,10 +408,10 @@ export class ReportPolicyController {
     if (!["采样", "送检", "采样后送检"].includes(kind)) throw badRequest("请填写任务名称和类型");
     const inspectKind = kind === "送检";
     const localOnly = kind === "采样" && input.localOnly === true;
-    // 权限码：采样/采样后送检＝新建采样任务；送检＝新建送检单（历史码 9420）或新建采样任务兜底
-    //（057 教训：默认角色未补 create:inspect，复用 create:sample 避免把主责角色挡在外面）。
+    // 权限码：采样/采样后送检＝新建采样任务；送检＝严格要「新建送检单」（R21/062 去兜底：
+    // 存量 create:sample 持有者由 062 补 create:inspect 并集，之后管理员可单独收回送检）。
     if (inspectKind) {
-      if (!ctx.access?.perms?.has(T.createInspect)) this.require(ctx, T.createSample);
+      this.require(ctx, T.createInspect);
     } else {
       this.require(ctx, T.createSample);
     }
@@ -1106,7 +1133,10 @@ export class ReportPolicyController {
 
   /** 创建页的候选：所有启用单位（含有效位置、是否在自己范围内），选了单位再取人员。 */
   async taskOptions(ctx) {
-    if (!ctx.access?.perms?.has(T.createTransfer)) this.require(ctx, T.createSample);
+    // R21（062）：送检严格要 create:inspect 后，仅持送检码（无 sample/transfer）也要能取建单选项
+    const perms = ctx.access?.perms;
+    if (!perms?.has(T.createTransfer) && !perms?.has(T.createInspect))
+      this.require(ctx, T.createSample);
     // 列明白写出来（L-P2-4）：这张表后面还长过 cameras、perm_limited、max_data_scope 这些
     // 只给授权页用的列，SELECT d.* 早晚把它们带到只给创建页的响应里。
     const rows = await this.db.all(

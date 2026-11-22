@@ -36,7 +36,11 @@ export interface CompanyPolicy extends CompanyJudgment {
     taskOfflineGraceSec: number;
   };
   /** 当前账号能不能改本公司（码＋manageOrgIds 闸门，服务端权威） */
-  can: { write: boolean };
+  can: {
+    write: boolean;
+    /** R21（062）：判定阈值三列单独可写（policyCompanyJudge 码＋同一 manage 闸门）；老服务端无此键 */
+    judge?: boolean;
+  };
   /** 生效公司＝本公司的箱子台数（含检测站里由本公司寄出的箱子） */
   boxCount: number;
 }

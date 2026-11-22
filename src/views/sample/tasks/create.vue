@@ -27,12 +27,12 @@
           <template v-if="boxChips.length">
             <span class="box-strip-label">已选采样箱</span>
             <el-tag
-              v-for="chip in boxChipsShown"
+              v-for="(chip, index) in boxChipsShown"
               :key="chip.id"
               size="small"
               effect="plain"
               :class="{ jump: canBackToBoxes }"
-              :data-test="`create-box-chip-${chip.id}`"
+              :data-test="`create-box-chip-${index}`"
               @click="backToBoxes"
             >
               {{ chip.text }}
@@ -733,15 +733,16 @@ type StepKey = "basic" | "boxes" | "from" | "sample" | "to" | "send" | "review";
 const router = useRouter(),
   route = useRoute(),
   user = useUserStore();
-// R23 三类型：采样/采样后送检按「新建采样任务」授权；送检按「新建送检单」或「新建采样任务」兜底。
+// R23 三类型：采样/采样后送检按「新建采样任务」授权；送检严格按「新建送检单」（R21/062 去兜底，
+// 存量 create:sample 持有者由 062 补 create:inspect 并集，之后管理员可单独收回送检）。
 const canSample = computed(() => Boolean(user.userInfo.perms?.includes("task:create:sample")));
 const canInspect = computed(() => Boolean(user.userInfo.perms?.includes("task:create:inspect")));
 const canPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.task)));
 const canReadPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.read)));
 const canManage = computed(() => canSample.value || canInspect.value);
-/** 某类型当前账号能不能建（送检双码兜底，与服务器同口径）。 */
+/** 某类型当前账号能不能建（送检严格要 inspect 码，与服务器同口径；R21/062 去 sample 兜底）。 */
 function kindAllowed(kind: string) {
-  return kind === "送检" ? canInspect.value || canSample.value : canSample.value;
+  return kind === "送检" ? canInspect.value : canSample.value;
 }
 const previewFailed = ref(false);
 let previewRequest = 0;
@@ -1005,6 +1006,7 @@ function goto(key: StepKey) {
  * R27 常驻采样箱栏（步骤条上方那一行）：每一步都要看得见当前绑了哪几台，不用回第 2 步核对。
  * 称谓沿用 boxTitle / imeiText 的权限口径——没有「设备标识」权限的角色看到的是打码串或「无权查看」，
  * 整串 IMEI 不会从这一行漏出去（和列表页、核对页同一套规则）。
+ * R21 脱敏：data-test 钩子用序号（create-box-chip-0/1/…），不再把 box id（＝IMEI 串）写进 DOM 属性。
  */
 const boxChips = computed(() =>
   form.boxIds.map((id) => {
