@@ -123,7 +123,21 @@
                   <span class="kind-flow">{{ meta.flow }}</span>
                 </button>
               </div>
-              <p class="tip">{{ kindFlowTip }}</p>
+              <!-- #82：原约 150 字方向派生长段整段下线→一行灰字＋行尾 info 气泡承载原文全文 -->
+              <p class="tip" data-test="create-kind-tip">
+                {{ kindFlowTip }}
+                <el-tooltip
+                  v-if="kindFlowTipFull"
+                  placement="top"
+                  effect="light"
+                  :content="kindFlowTipFull"
+                  :popper-style="{ maxWidth: '360px' }"
+                >
+                  <el-icon class="tip-info" tabindex="0" data-test="create-kind-tip-info">
+                    <QuestionFilled />
+                  </el-icon>
+                </el-tooltip>
+              </p>
             </el-form-item>
             <el-form-item label="任务名称" required :error="errors.name">
               <el-input
@@ -173,7 +187,19 @@
               <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
                 {{ trip }}
               </el-tag>
-              <p class="tip">{{ tripText }}</p>
+              <p class="tip" data-test="create-trip-from-hint">
+                {{ directionHint }}
+                <el-tooltip
+                  placement="top"
+                  effect="light"
+                  :content="MERGED_FLOW_TEXT"
+                  :popper-style="{ maxWidth: '360px' }"
+                >
+                  <el-icon class="tip-info" tabindex="0" data-test="create-trip-from-hint-info">
+                    <QuestionFilled />
+                  </el-icon>
+                </el-tooltip>
+              </p>
             </el-form-item>
             <el-form-item
               v-if="form.kind !== '采样'"
@@ -195,10 +221,8 @@
                   :disabled="!o.inScope"
                 />
               </el-select>
-              <p class="tip">
-                采样单位可选分公司，默认箱归属分公司（箱在检测站时默认本单位）。单向＝本地采样后寄检测站；
-                双向＝检测站把箱子寄到采样单位，采样封箱后寄回检测站。
-              </p>
+              <!-- #82：单向/双向解释与上方寄送方向气泡全文重复，收敛删除；保留选单位默认口径 -->
+              <p class="tip">采样单位可选分公司，默认箱归属分公司（箱在检测站时默认本单位）。</p>
             </el-form-item>
             <el-form-item
               v-if="form.kind !== '采样'"
@@ -472,7 +496,19 @@
               <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
                 {{ trip }}
               </el-tag>
-              <p class="tip">{{ tripText }}方向按箱子当前归属自动派生，不可手选。</p>
+              <p class="tip" data-test="create-trip-hint">
+                {{ directionHint }}
+                <el-tooltip
+                  placement="top"
+                  effect="light"
+                  :content="MERGED_FLOW_TEXT"
+                  :popper-style="{ maxWidth: '360px' }"
+                >
+                  <el-icon class="tip-info" tabindex="0" data-test="create-trip-hint-info">
+                    <QuestionFilled />
+                  </el-icon>
+                </el-tooltip>
+              </p>
             </el-form-item>
           </template>
 
@@ -525,7 +561,7 @@
                   </dd>
                   <template v-if="form.kind === '采样后送检'">
                     <dt>方向</dt>
-                    <dd>
+                    <dd data-test="create-review-direction">
                       <el-tag
                         v-if="trip"
                         size="small"
@@ -534,7 +570,17 @@
                       >
                         {{ trip }}
                       </el-tag>
-                      {{ tripText || "选箱后按归属派生" }}
+                      <span class="dir-hint">{{ trip ? directionHint : "选箱后按归属派生" }}</span>
+                      <el-tooltip
+                        placement="top"
+                        effect="light"
+                        :content="MERGED_FLOW_TEXT"
+                        :popper-style="{ maxWidth: '360px' }"
+                      >
+                        <el-icon class="tip-info" tabindex="0" data-test="create-review-dir-info">
+                          <QuestionFilled />
+                        </el-icon>
+                      </el-tooltip>
                     </dd>
                     <dt>采样单位</dt>
                     <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
@@ -733,7 +779,7 @@
 </template>
 <script setup lang="ts">
 import { ElMessage } from "element-plus";
-import { Check } from "@element-plus/icons-vue";
+import { Check, QuestionFilled } from "@element-plus/icons-vue";
 import type { Ref } from "vue";
 import API, {
   policyPerm,
@@ -751,7 +797,7 @@ import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
 import { formatDuration } from "@/utils/duration";
-import { KIND_META, MERGED_FLOW_TEXT, MERGED_TRIP_TEXT } from "./status";
+import { KIND_META, MERGED_FLOW_TEXT } from "./status";
 import { kindLabel, kindTone } from "../doc-flow";
 import { useUserStore } from "@/stores/user";
 import SampleBoxAPI from "@/api/sample/box";
@@ -781,8 +827,17 @@ function kindAllowed(kind: string) {
 /**
  * 暂时下线（#73）：类型卡只渲染「采样后送检」，单独的「采样」「送检」隐藏（模板原循环已注释保留）。
  * 恢复点：删掉本过滤，模板恢复 KIND_META 全量循环，kindAllowed 同步放行。
+ * #82：desc 收敛为 ≤20 字短句（原长句不再占版面）；恢复三卡时保留 kindCards 循环、仅删过滤，短句即对三卡生效。
  */
-const kindCards = KIND_META.filter((meta) => meta.kind === "采样后送检");
+const KIND_DESC_SHORT: Record<string, string> = {
+  采样: "仅本地采样，封箱即结束",
+  送检: "已采样封箱，只寄检测站检测",
+  采样后送检: "先本地采样封箱，再寄唯一检测站",
+};
+const kindCards = KIND_META.filter((meta) => meta.kind === "采样后送检").map((meta) => ({
+  ...meta,
+  desc: KIND_DESC_SHORT[meta.kind] || meta.desc,
+}));
 const previewFailed = ref(false);
 let previewRequest = 0;
 const form = reactive({
@@ -811,7 +866,16 @@ function pickKind(kind: string) {
   for (const name of Object.keys(errors)) delete errors[name];
 }
 const kindLabelText = computed(() => kindLabel(form));
+/**
+ * #82 文案精简：方向派生说明统一「一行灰字＋info 气泡全文」。短句单点常量，
+ * step1／选箱／采样单位／核对四处复用；气泡全文复用 status.ts MERGED_FLOW_TEXT（单源防漂移）。
+ */
+const directionHint = "方向按箱当前归属自动派生（只读）";
+/** #82：面板下说明收敛为短句；原长段移入 kindFlowTipFull 气泡（hover/点击可见），不再占版面。 */
 const kindFlowTip = computed(() =>
+  form.kind === "采样后送检" ? directionHint : KIND_DESC_SHORT[form.kind] || ""
+);
+const kindFlowTipFull = computed(() =>
   form.kind === "采样后送检"
     ? MERGED_FLOW_TEXT
     : KIND_META.find((m) => m.kind === form.kind)?.desc || ""
@@ -883,7 +947,6 @@ const trip = computed<"单向" | "双向" | null>(() => {
     ? "双向"
     : "单向";
 });
-const tripText = computed(() => (trip.value ? MERGED_TRIP_TEXT[trip.value] : ""));
 const boxNames = computed(() =>
   form.boxIds
     .map((id) => {
@@ -1572,6 +1635,19 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
   margin: 6px 0 0;
   font-size: 12px;
   line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+/* #82 文案精简：灰字行尾 info 图标（沿用 tasks/index.vue .qmark 字阶/配色）；
+   气泡全文限宽走 popper-style，不新增装饰。核对页行内短句同 .tip 字阶。 */
+.tip-info {
+  margin-left: 4px;
+  font-size: 14px;
+  vertical-align: -2px;
+  color: var(--el-text-color-placeholder);
+  cursor: help;
+}
+.dir-hint {
+  font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 .init-alert {
