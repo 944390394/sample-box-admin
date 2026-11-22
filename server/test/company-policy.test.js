@@ -678,7 +678,7 @@ test("公司化判定：低电/宽限按公司（内存 flagMatch/boxOnline 与 
   }
 });
 
-test("划拨/撤销划拨：公司默认层随归属切换，同事务刷新生效值快照", async () => {
+test("R25 划拨接受/历史撤销：公司默认层随归属切换，同事务刷新生效值快照", async () => {
   const env = await fresh("company-transfer-");
   const { db } = env;
   try {
@@ -692,6 +692,12 @@ test("划拨/撤销划拨：公司默认层随归属切换，同事务刷新生�
       { name: "划拨到华东", toOrgId: "3", boxIds: ["BT"], clientToken: "tok-r13" },
       { id: "90", name: "分公司管理员" }
     );
+    // R25：创建落待接受，归属不转移、公司层不切换（仍 120）
+    const pending = await db.get("SELECT * FROM sample_box WHERE id='BT'");
+    assert.equal(pending.org_id, "2");
+    assert.equal((await policies.get(pending)).effective.reportPeriodSec, 120);
+    // 接受 → 归属转移到华东，公司层切到 300（同事务刷新）
+    await policies.acceptTransfer(result.id, { actor: { id: "91", name: "华东管理员" } });
     const moved = await db.get("SELECT * FROM sample_box WHERE id='BT'");
     assert.equal(moved.org_id, "3");
     const got = await policies.get(moved);
@@ -705,7 +711,8 @@ test("划拨/撤销划拨：公司默认层随归属切换，同事务刷新生�
     );
     assert.equal(again.id, result.id);
     assert.equal(again.idempotent, true);
-    // 撤销 → 退回华南，公司层切回 120
+    // 历史撤销（还原 R24 前已划拨形态）→ 退回华南，公司层切回 120
+    await db.run("UPDATE sample_task SET status='已划拨' WHERE id=?", [result.id]);
     await policies.revokeTransfer(result.id, {
       reason: "测试退回",
       actor: { id: "90", name: "测试" },

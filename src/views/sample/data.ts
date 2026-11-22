@@ -369,8 +369,8 @@ export function shortStamp(value: string) {
  */
 export type TaskType = "采样" | "送检" | "划拨" | "调拨";
 
-/** 划拨单持久状态：恰好两个终态（提交即生效、无物流）。口径同 shared/taskFlow.js ENDED_OK/ENDED_VOID 的划拨两态。 */
-export type TransferStatus = "已划拨" | "已撤销";
+/** 划拨单持久状态（R25 三态）：待接受→已完成＋接受前出口已取消/已拒收；历史已划拨/已撤销只读别名。口径同 shared/taskFlow.js。 */
+export type TransferStatus = "待接受" | "已完成" | "已取消" | "已拒收" | "已撤销" | "已划拨";
 
 /**
  * 送检单 9 个持久状态；「已签收」不是持久状态（待签收上签收直接落待检测）。
@@ -728,8 +728,10 @@ export const EVENT_PERMS = [BOX_PERM.eventLid, BOX_PERM.eventBoot, BOX_PERM.even
 export const IMEI_PERMS = [BOX_PERM.iccid, BOX_PERM.imsi, BOX_PERM.firmware];
 /** 新建任务单（采样/送检）入口授权；划拨走独立的划拨页向导（task:create:transfer）。 */
 export const TASK_CREATE = ["task:create:sample", "task:create:inspect"];
-/** 批量划拨入口授权（提交即生效，独立页）。 */
+/** 批量划拨入口授权（R25 三态：创建落待接受，独立页）。 */
 export const TRANSFER_CREATE = "task:create:transfer";
+/** R25（#71/064）接受划拨授权（目标分公司管理员确认，接受时归属转移）。 */
+export const TRANSFER_ACCEPT = "task:transfer:accept";
 // R24（#70）撤销划拨下线：TRANSFER_REVOKE 常量随两处撤销入口一起删除——权限码已从 permCatalog
 // 移除、路由回 410，前端再留一个永远为 false 的门只会误导后来人。
 

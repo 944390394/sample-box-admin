@@ -858,6 +858,32 @@ const routes = [
     // 将来要恢复撤销也是把这一行接回去；控制器 revokeTransfer 同理由回归用例直调，不再挂路由。
     handler: (ctx) => ctx.fail("撤销已下线：如需退回或改派请重新划拨", "A0409", 410),
   },
+  // R25（#71）划拨三态专用端点：接受（目标管理员）/取消（创建方）/拒收（接收方）/补填单号（创建方）。
+  // 权限/参与方/状态门在控制器里按动作查；接受事务内归属转移＋保管人清空。均不加密码（口径⑤仅创建需）。
+  {
+    method: "POST",
+    path: "/api/v1/sample/transfers/:id/accept",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.acceptTransfer(ctx)),
+  },
+  {
+    method: "POST",
+    path: "/api/v1/sample/transfers/:id/cancel",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.cancelTransfer(ctx)),
+  },
+  {
+    method: "POST",
+    path: "/api/v1/sample/transfers/:id/reject",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.rejectTransfer(ctx)),
+  },
+  {
+    method: "POST",
+    path: "/api/v1/sample/transfers/:id/tracking",
+    auth: true,
+    handler: (ctx) => useSample(ctx, (api) => api.policy.trackingTransfer(ctx)),
+  },
   {
     method: "GET",
     path: "/api/v1/sample/workbench",

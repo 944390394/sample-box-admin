@@ -262,8 +262,9 @@ test("R12/R24 有建单码角色可见可列：ADMIN/BRANCH_ADMIN/DISPATCH —�
       const d = await s.detail(actor, id);
       assert.ok(d.ok, `${c.name} 详情 ${d.code} ${d.message}`);
       assert.equal(d.data.id, id);
-      // R24（#70）撤销下线：详情不再下发 revoke 旗标（入口已删，cancel 历史占位保留）
-      assert.deepEqual(d.data.abilities, { cancel: false }, `${c.name} abilities 无 revoke`);
+      // R24（#70）撤销下线：详情不再下发 revoke 旗标；R25 abilities 改按态×角色（创建方可取消）
+      assert.ok(!("revoke" in d.data.abilities), `${c.name} abilities 无 revoke`);
+      assert.equal(d.data.abilities.cancel, true, `${c.name} 创建方可取消`);
       // 预览 on；本地注入调拨单组（插在任务单后），meta.perm 与 gate 同口径
       for (const item of previewTransfer(c.codes)) assert.equal(item.on, true, `${c.name} 预览`);
       const local = buildLocalMenus({ perms: c.codes });
@@ -311,6 +312,12 @@ test("R12/R24 createTransfer 单码校验＋revokeTransfer 领域直调保留单
       body: { name: "调度建单", toOrgId: "3", boxIds: [boxId], password: CONFIRM_PW },
     });
     assert.ok(created.ok, `${created.code} ${created.message}`);
+    // R25：撤销领域本体只服务历史已划拨单——把新单还原成 R24 前「提交即生效」形态供直调回归
+    await s.db.run(
+      "UPDATE sample_box SET org_id='3', org='广州分公司', owner_id='', owner='' WHERE id=?",
+      [boxId]
+    );
+    await s.db.run("UPDATE sample_task SET status='已划拨' WHERE id=?", [created.data.id]);
     const revokeDenied = await s.run(s.controller.revokeTransfer.bind(s.controller), createOnly, {
       params: { id: created.data.id },
       body: { reason: "越权撤销" },

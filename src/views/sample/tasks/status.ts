@@ -163,9 +163,9 @@ export const STATUS_GROUPS: { title: string; historical?: boolean; statuses: str
   { title: "历史态（只读）", historical: true, statuses: ["待核验", "已签收", "已完成"] },
 ];
 
-/** 划拨/调拨两态（预览①：类型选划拨时状态下拉切换口径）。 */
+/** 划拨/调拨状态（R25 三态：类型选划拨时状态下拉切换口径）。 */
 export const TRANSFER_STATUS_GROUP: { title: string; historical?: boolean; statuses: string[] } = {
-  title: "划拨两态",
+  title: "划拨三态",
   statuses: [...TRANSFER_STATUS],
 };
 
@@ -189,6 +189,6 @@ export const KIND_FILTER_OPTIONS: { value: string; label: string; desc: string }
   { value: "采样", label: "采样", desc: "仅本地 · 3 步 · 封箱即结束" },
   { value: "送检", label: "送检", desc: "仅寄送 · 接收方固定唯一检测站" },
   { value: "采样后送检", label: "采样后送检", desc: "合并全流 · 方向按箱归属派生" },
-  { value: "划拨", label: "划拨", desc: "提交即生效 · 无物流（主入口在调拨单）" },
+  { value: "划拨", label: "划拨", desc: "三态接受时转移 · 无物流（主入口在调拨单）" },
   { value: "调拨", label: "调拨（历史只读）", desc: "迁移前旧单 · 只读收尾" },
 ];

@@ -522,11 +522,20 @@ interface Card {
  * 卡片：每张单独授权（monitor:card:*）。服务端只给勾了的卡片数据，这里按固定顺序排：
  * 先任务流转（寄出 → 到达 → 签收 → 接收退回 → 采样 → 检测 → 超限），再箱子（待激活、告警、离线、低电、开盖）。
  */
+/**
+ * D-1（#81）：划拨两桶（transferAccept 接收方待接受／transferCancel 创建方可取消）服务端 todo 已下发，
+ * workbench 类型未列这两键（类型文件不在本批文件面），局部拓宽按可选桶读；
+ * 旧服务端无键＝undefined＝零条隐藏，沿用现状口径。两桶不做 monitor:card:* 门控（服务端 CARD_OF 未列）。
+ */
+type TransferTodoBuckets = {
+  transferAccept?: Bucket<TaskBrief>;
+  transferCancel?: Bucket<TaskBrief>;
+};
 const cards = computed<Card[]>(() => {
   const d = data.value;
   if (!d) return [];
   const list: Card[] = [];
-  const t = d.taskTodo;
+  const t = d.taskTodo as (NonNullable<Workbench["taskTodo"]> & TransferTodoBuckets) | null;
   // D1（R22 批2）：一卡一筛——more 带 mine=1＋bucket，落地行数==卡片数字（服务端 bucketsOf 与 todo 同谓词）。
   const bucketMore = (bucket: string) => ({
     path: "/task/tasks",
@@ -604,6 +613,30 @@ const cards = computed<Card[]>(() => {
         more: { path: "/task/tasks", query: { status: "待检测" } },
       },
       t.inspect
+    );
+    // D-1（#81）：划拨两卡（R25 三态），label 与 mp 统一「划拨待接受/划拨可取消」，顺序同 mp GROUPS。
+    // 计数取 workbench 两桶；more 走任务页桶深链（mine=1&bucket=…，与 todo 共用 bucketsOf 谓词＋同窗口，
+    // 落地行数==卡片数字；调拨页「待接受」页签是全局视图、不按我的接受/取消能力收窄，故选桶路径）。
+    // 零条隐藏/零组折叠沿用现状口径；提醒区不动。
+    push(
+      {
+        key: "transferAccept",
+        title: "划拨待接受",
+        hint: "你是目标方：接受后箱子归属转移，拒收需填原因",
+        tone: "warning",
+        more: bucketMore("transferAccept"),
+      },
+      t.transferAccept
+    );
+    push(
+      {
+        key: "transferCancel",
+        title: "划拨可取消",
+        hint: "你创建的划拨单还没被接受，可取消（箱不动）",
+        tone: "primary",
+        more: bucketMore("transferCancel"),
+      },
+      t.transferCancel
     );
     push(
       {

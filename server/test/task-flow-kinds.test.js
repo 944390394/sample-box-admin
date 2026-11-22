@@ -114,12 +114,16 @@ test("B1a 合并状态机：退回路径与终态语义（ENDED_OK/ENDED_VOID）
   assert.ok(!states.has("已签收") && !states.has("待核验"));
 });
 
-test("B1a 划拨两终态、无步骤、不走通用 transition（回归锁）", () => {
+test("B1a/R25 划拨三态、无物流步骤、不走通用 transition（回归锁）", () => {
+  // 通用进度条不渲染划拨（详情页用 TRANSFER_TRACK 三步条）；专用端点推进，nextOf 恒空
   assert.deepEqual(stepsOf({ kind: "划拨" }), []);
-  assert.deepEqual(nextOf({ kind: "划拨" }, "已划拨"), []);
-  assert.deepEqual(nextOf({ kind: "划拨" }, "已撤销"), []);
-  assert.equal(initialOf({ kind: "划拨" }), "已划拨");
-  assert.ok(ENDED.includes("已划拨") && ENDED.includes("已撤销"));
+  for (const s of ["待接受", "已完成", "已取消", "已拒收", "已划拨", "已撤销"])
+    assert.deepEqual(nextOf({ kind: "划拨" }, s), [], `划拨 ${s} 不走通用 transition`);
+  // R25：创建落待接受（进行中态，占用箱子）；接受落已完成
+  assert.equal(initialOf({ kind: "划拨" }), "待接受");
+  assert.ok(!ENDED.includes("待接受"), "待接受是进行中态");
+  assert.ok(ENDED.includes("已完成") && ENDED.includes("已取消") && ENDED.includes("已拒收"));
+  assert.ok(ENDED.includes("已划拨") && ENDED.includes("已撤销"), "历史别名仍终态");
   assert.equal(prefixOf("划拨"), "AL-");
 });
 

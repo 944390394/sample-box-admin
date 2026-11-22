@@ -56,6 +56,8 @@ import { ESCAPE_SQL, likePattern } from "../store/sqlText.js";
 /** 任务相关的新权限码，见 permCatalog TASK_PERMS。 */
 const T = {
   createTransfer: "task:create:transfer",
+  // R25（#71/064）划拨三态：接受划拨＝目标分公司管理员确认（manageOrgIds 门＋本码）。
+  transferAccept: "task:transfer:accept",
   createSample: "task:create:sample",
   createInspect: "task:create:inspect",
   // R24（#70）撤销下线：本码已从 permCatalog 的 item 与角色模板里移除，不再授予、不再进任何门。
@@ -107,6 +109,7 @@ import {
   SAMPLE_OUTBOUND_STEPS,
   signTargetOf,
   stepsOf,
+  transferStatusOf,
 } from "../settings/taskFlow.js";
 
 /** 签收人以外的人代签：流转里记成「已签收」，动作名记「强制签收」。 */
@@ -733,9 +736,13 @@ export class ReportPolicyController {
     }
     // R23：任务单页默认放三类任务单（采样/送检/采样后送检），划拨有独立页、旧调拨只读不混入。
     // kind 白名单含旧 调拨/划拨，供迁移前过滤历史行；allKinds=1 兜底回全部。
-    if (["采样", "送检", "采样后送检", "划拨", "调拨"].includes(ctx.query.kind)) {
+    // R25：划拨两桶（transferAccept/transferCancel）落地自动 kind=划拨——todo 窗口含划拨待接受，
+    // 不带 kind 过滤会落 0 行（默认排除划拨），破坏「卡片数字==落地行数」。显式 kind 优先。
+    const transferBucket = ["transferAccept", "transferCancel"].includes(ctx.query.bucket);
+    const kindQuery = transferBucket && !ctx.query.kind ? "划拨" : ctx.query.kind;
+    if (["采样", "送检", "采样后送检", "划拨", "调拨"].includes(kindQuery)) {
       clauses.push("t.kind=?");
-      params.push(ctx.query.kind);
+      params.push(kindQuery);
     } else if (ctx.query.allKinds !== "1") {
       clauses.push("t.kind IN ('采样','送检','采样后送检')");
     }
@@ -908,9 +915,14 @@ export class ReportPolicyController {
       }
       if (Number.isInteger(task.maxOpens))
         task.openOver = overOpenLimit(task, await openCounts(this.db, row.id)).length;
-      task.actions = Object.entries(this.#abilities(ctx, task, row.status, owned))
-        .filter(([, ok]) => ok)
-        .map(([to]) => to);
+      // R25：划拨动作面在调拨单页（accept/cancel/reject/tracking/retransfer），通用任务单页无划拨推进对话框——
+      // 划拨行 actions 恒 []（R24 行为不变），避免把动作键当状态名渲染成坏按钮。
+      task.actions =
+        row.kind === "划拨"
+          ? []
+          : Object.entries(this.#abilities(ctx, task, row.status, owned))
+              .filter(([, ok]) => ok)
+              .map(([to]) => to);
       list.push(task);
     }
     ctx.ok({ list, total, counts });
@@ -972,8 +984,9 @@ export class ReportPolicyController {
   }
 
   /**
-   * 创建划拨单（POST /sample/transfers）：提交即生效，归属在单据同一事务里转移。
+   * 创建划拨单（POST /sample/transfers，R25 三态）：创建后落待接受，归属在接受时转移。
    * 箱子可见性沿用 targets（不存在/范围外同一个 404）；提交守卫与 candidate-boxes 同一函数。
+   * 二次确认口令（R24 #70）沿用：先于 clientToken 幂等命中校验。trackingNo 选填 ≤64（R25③）。
    */
   async createTransfer(ctx) {
     this.#requireTransferFeature();
@@ -984,6 +997,11 @@ export class ReportPolicyController {
     if (input.toOrgId == null || String(input.toOrgId) === "") throw badRequest("请选择目标公司");
     if (input.note != null && (typeof input.note !== "string" || input.note.length > 1000))
       throw badRequest("备注格式不正确");
+    if (
+      input.trackingNo != null &&
+      (typeof input.trackingNo !== "string" || input.trackingNo.length > 64)
+    )
+      throw badRequest("快递单号格式不正确（64 字以内）");
     if (
       input.clientToken != null &&
       (typeof input.clientToken !== "string" || input.clientToken.length > 64)
@@ -1001,12 +1019,11 @@ export class ReportPolicyController {
         toOrgId: String(input.toOrgId),
         boxIds: boxes.map((b) => b.id),
         note: input.note || "",
+        trackingNo: typeof input.trackingNo === "string" ? input.trackingNo : "",
         clientToken: input.clientToken || "",
       },
       { ...actorOf(ctx), scope: ctx.access?.scope }
     );
-    // 事务外副作用：归属变了，箱子汇总缓存清一次（失败不影响单据，口径同 createTask）
-    this.boxes.summaryCache?.clear();
     const data = await this.policies.transferView(result.id);
     if (!data) throw notVisible("划拨单不存在或不在你的管理范围内");
     // R24（#70）：提交成功的审计带一条 detail={二次确认:true}，说明这单过了口令再认证。
@@ -1028,14 +1045,96 @@ export class ReportPolicyController {
       {
         ...data,
         idempotent: result.idempotent,
-        // R24（#70）撤销下线：不再下发 revoke 旗标——列表/详情两处撤销入口已删，
-        // 留着只会让前端误以为还有可撤动作。cancel 是历史占位，形状保持不变。
-        abilities: { cancel: false },
+        abilities: this.#transferAbilities(
+          ctx,
+          { ...data, toOrgId: data.toOrg.id, boxIds: data.boxes.map((b) => b.boxId) },
+          data.status,
+          data.boxCount
+        ),
       },
       result.idempotent
         ? "已提交过，返回原划拨单"
-        : `已提交，${data.boxCount} 台箱子归属已转到 ${data.toOrg.name}`
+        : `已提交，${data.boxCount} 台箱子待 ${data.toOrg.name} 管理员接受`
     );
+  }
+
+  /**
+   * 接受划拨（POST /sample/transfers/:id/accept，R25①）：目标分公司管理员确认。
+   * 门：task:transfer:accept 码＋目标 manageOrgIds 参与方门＋待接受态。接受事务内归属转移＋保管人清空＋审计。
+   * 不加密码（口径⑤仅创建需密码）。
+   */
+  async acceptTransfer(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, T.transferAccept);
+    const row = await this.#visibleTask(ctx);
+    if (row.kind !== "划拨") throw conflict("只有划拨单可以接受");
+    const task = JSON.parse(row.body);
+    if (!inPartyScope(ctx, task.toOrgId)) throw noPermission("只能接受划拨到你自己范围内的单位");
+    const result = await this.policies.acceptTransfer(row.id, { actor: actorOf(ctx) });
+    this.boxes.summaryCache?.clear();
+    await this.log(ctx, "接受划拨", row.id);
+    ctx.ok(result, `已接受，${result.count} 台箱子归属已转到 ${result.toOrg.name}`);
+  }
+
+  /**
+   * 取消划拨（POST /sample/transfers/:id/cancel，R25②创建方出口）：创建方＋待接受。
+   * 接受前箱未动，取消无守卫；备注选填 ≤100。不加密码。
+   */
+  async cancelTransfer(ctx) {
+    this.#requireTransferFeature();
+    const row = await this.#visibleTask(ctx);
+    if (row.kind !== "划拨") throw conflict("只有划拨单可以取消");
+    const task = JSON.parse(row.body);
+    const me = String(ctx.user?.id ?? "");
+    if (String(task.createdById ?? "") !== me && !isAdminRole(ctx))
+      throw noPermission("只有创建方可以取消这张划拨单");
+    const note = typeof ctx.body?.note === "string" ? ctx.body.note.trim() : "";
+    if (note.length > 100) throw badRequest("取消备注 100 字以内");
+    const result = await this.policies.cancelTransfer(row.id, { note, actor: actorOf(ctx) });
+    await this.log(ctx, "取消划拨", row.id);
+    ctx.ok(result, "已取消，箱子归属未动");
+  }
+
+  /**
+   * 拒收划拨（POST /sample/transfers/:id/reject，R25②接收方出口）：目标 manageOrgIds＋task:reject＋待接受。
+   * 原因必填 ≤100（沿用签收拒收模式）。箱不动。不加密码。
+   */
+  async rejectTransfer(ctx) {
+    this.#requireTransferFeature();
+    this.require(ctx, T.reject);
+    const row = await this.#visibleTask(ctx);
+    if (row.kind !== "划拨") throw conflict("只有划拨单可以拒收");
+    const task = JSON.parse(row.body);
+    if (!inPartyScope(ctx, task.toOrgId)) throw noPermission("只能拒收划拨到你自己范围内的单位");
+    const reason = typeof ctx.body?.reason === "string" ? ctx.body.reason.trim() : "";
+    if (!reason || reason.length > 100) throw badRequest("请填写拒收原因（100 字以内）");
+    const result = await this.policies.rejectTransfer(row.id, { reason, actor: actorOf(ctx) });
+    await this.log(ctx, "拒收划拨", row.id);
+    ctx.ok(result, "已拒收，箱子归属未动");
+  }
+
+  /**
+   * 补填/修改快递单号（POST /sample/transfers/:id/tracking，R25③）：创建方＋待接受。
+   * 单号 ≤64（空串＝清空）；接受后只读（领域层 status 门拦）。不加密码。
+   */
+  async trackingTransfer(ctx) {
+    this.#requireTransferFeature();
+    const row = await this.#visibleTask(ctx);
+    if (row.kind !== "划拨") throw conflict("只有划拨单可以补填快递单号");
+    const task = JSON.parse(row.body);
+    const me = String(ctx.user?.id ?? "");
+    if (String(task.createdById ?? "") !== me && !isAdminRole(ctx))
+      throw noPermission("只有创建方可以补填快递单号");
+    if (ctx.body?.trackingNo != null && typeof ctx.body.trackingNo !== "string")
+      throw badRequest("快递单号格式不正确");
+    const trackingNo = typeof ctx.body?.trackingNo === "string" ? ctx.body.trackingNo : "";
+    if (trackingNo.length > 64) throw badRequest("快递单号格式不正确（64 字以内）");
+    const result = await this.policies.trackingTransfer(row.id, {
+      trackingNo,
+      actor: actorOf(ctx),
+    });
+    await this.log(ctx, "补填快递单号", row.id);
+    ctx.ok(result, trackingNo ? "快递单号已保存" : "快递单号已清空");
   }
 
   /**
@@ -1163,15 +1262,16 @@ export class ReportPolicyController {
   }
 
   /**
-   * 划拨列表（GET /sample/transfers，kind=划拨）：counts 与列表同口径（同一 WHERE 去掉 status），
-   * boxCountTotal 是箱次累计口径（同一箱子出现在多单计多次，§6.2）。
-   * R12 门禁（R24 收紧）：调拨单页仅「新建划拨」权限者可见——撤销码随撤销功能下线退出门禁，
-   * 不再 some(task:transfer:revoke)；与前端 local-menus 注入 gate、menus.js 预览镜像同口径，
-   * 无该码 403 A0301（旧 device:box:task 太宽）。
+   * 划拨列表（GET /sample/transfers，kind=划拨，R25 三态）：counts 与列表同口径（同一 WHERE 去掉 status），
+   * boxCountTotal 是箱次累计口径（同一箱子出现在多单计多次）。
+   * 页签 全部/待接受/已结束/已撤销·历史＋状态 chips（已完成/已取消/已拒收多选）：status 参数收伪态
+   * （已结束＝三终态合集、已撤销·历史＝已撤销）或逗号分隔具体态；非法值忽略（与 tasks 同口径）。
+   * 门禁（R25）：新建划拨 或 接受划拨 任一码（接受方可能只持 accept 码）；与 local-menus/menus.js 同口径。
+   * 每行带 abilities（按态×角色）＋快递单号＋终态事实（接受/拒收/取消/撤销人·时间）＋历史标。
    */
   async transfers(ctx) {
     this.#requireTransferFeature();
-    this.require(ctx, T.createTransfer);
+    this.#requireTransferView(ctx);
     const visible = this.#visible(ctx);
     const clauses = ["t.kind='划拨'", ...(visible.sql ? [visible.sql] : [])];
     const params = [...visible.params];
@@ -1202,20 +1302,23 @@ export class ReportPolicyController {
     if (q) {
       const like = likePattern(q);
       clauses.push(
-        `(t.id LIKE ? ${ESCAPE_SQL} OR t.name LIKE ? ${ESCAPE_SQL} OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (m.box_id LIKE ? ${ESCAPE_SQL} OR b.name LIKE ? ${ESCAPE_SQL})))`
+        `(t.id LIKE ? ${ESCAPE_SQL} OR t.name LIKE ? ${ESCAPE_SQL} OR t.body LIKE ? ${ESCAPE_SQL} OR EXISTS (SELECT 1 FROM sample_task_box m LEFT JOIN sample_box b ON b.id=m.box_id WHERE m.task_id=t.id AND (m.box_id LIKE ? ${ESCAPE_SQL} OR b.name LIKE ? ${ESCAPE_SQL})))`
       );
-      params.push(like, like, like, like);
+      params.push(like, like, likePattern(`"trackingNo":"${q}"`), like, like);
     }
     const base = `WHERE ${clauses.join(" AND ")}`;
     const grouped = await this.db.all(
       `SELECT t.status, COUNT(*) AS n FROM sample_task t ${base} GROUP BY t.status`,
       params
     );
-    const counts = { 全部: 0, 已划拨: 0, 已撤销: 0 };
+    // counts 按归一状态累加（历史已划拨→已完成）；已结束＝已完成/已取消/已拒收三终态合集
+    const counts = { 全部: 0, 待接受: 0, 已完成: 0, 已取消: 0, 已拒收: 0, 已撤销: 0, 已结束: 0 };
     for (const row of grouped) {
       const n = Number(row.n);
-      counts[row.status] = n;
+      const status = transferStatusOf(row.status);
+      counts[status] = (counts[status] || 0) + n;
       counts.全部 += n;
+      if (["已完成", "已取消", "已拒收"].includes(status)) counts.已结束 += n;
     }
     counts.boxCountTotal = Number(
       (
@@ -1225,11 +1328,31 @@ export class ReportPolicyController {
         )
       ).n
     );
+    // status 筛选：伪态展开＋具体态多选（逗号）；已完成含历史已划拨别名（读兼容未迁移行）
     const statusClauses = [...clauses],
       statusParams = [...params];
-    if (["已划拨", "已撤销"].includes(ctx.query.status)) {
-      statusClauses.push("t.status=?");
-      statusParams.push(ctx.query.status);
+    const requested = [
+      ...new Set(
+        String(ctx.query.status || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      ),
+    ];
+    const concrete = new Set();
+    for (const key of requested) {
+      if (key === "已结束") ["已完成", "已取消", "已拒收"].forEach((s) => concrete.add(s));
+      else if (key === "已撤销·历史" || key === "已撤销") concrete.add("已撤销");
+      else if (TRANSFER_STATUS_KEYS.includes(key)) concrete.add(key);
+    }
+    if (concrete.size) {
+      const raw = new Set();
+      for (const s of concrete) {
+        raw.add(s);
+        if (s === "已完成") raw.add("已划拨"); // 历史别名读兼容
+      }
+      statusClauses.push(`t.status IN (${[...raw].map(() => "?").join(",")})`);
+      statusParams.push(...raw);
     }
     const where = `WHERE ${statusClauses.join(" AND ")}`;
     const page = Math.max(1, Math.floor(Number(ctx.query.page) || 1));
@@ -1243,6 +1366,19 @@ export class ReportPolicyController {
     );
     const depts = await this.db.all("SELECT id,name FROM sys_dept");
     const orgNameOf = new Map(depts.map((d) => [String(d.id), d.name]));
+    // 终态事实日志一次取回（接受/拒收/取消/撤销），按 task_id+action 归组，避免逐行 N 查询
+    const ids = rows.map((r) => r.id);
+    const factRows = ids.length
+      ? await this.db.all(
+          `SELECT task_id,action,created_at,actor_name,note FROM sample_task_log WHERE task_id IN (${ids.map(() => "?").join(",")}) AND action IN ('接受划拨','拒收划拨','取消划拨','撤销划拨') ORDER BY created_at DESC`,
+          ids
+        )
+      : [];
+    const factOf = new Map();
+    for (const log of factRows) {
+      const key = `${log.task_id}|${log.action}`;
+      if (!factOf.has(key)) factOf.set(key, log); // DESC 序首条＝最近
+    }
     const list = [];
     for (const row of rows) {
       const body = JSON.parse(row.body);
@@ -1260,17 +1396,15 @@ export class ReportPolicyController {
         bucket.count += 1;
         fromMap.set(id, bucket);
       }
-      const revokeLog =
-        row.status === "已撤销"
-          ? await this.db.get(
-              "SELECT created_at,note FROM sample_task_log WHERE task_id=? AND action='撤销划拨' ORDER BY created_at DESC LIMIT 1",
-              [row.id]
-            )
-          : null;
+      const status = transferStatusOf(row.status);
+      const accept = factOf.get(`${row.id}|接受划拨`);
+      const reject = factOf.get(`${row.id}|拒收划拨`);
+      const cancel = factOf.get(`${row.id}|取消划拨`);
+      const revoke = factOf.get(`${row.id}|撤销划拨`);
       list.push({
         id: row.id,
         name: row.name,
-        status: row.status,
+        status,
         createdAt: row.created_at,
         boxCount: links.length,
         from: [...fromMap.values()],
@@ -1280,9 +1414,29 @@ export class ReportPolicyController {
         },
         by: body.createdBy || "",
         byId: body.createdById || "",
-        ...(revokeLog
-          ? { revokedAt: revokeLog.created_at, revokeReason: revokeLog.note || "" }
+        trackingNo: body.trackingNo || "",
+        legacy: body.legacyTransfer === true,
+        abilities: this.#transferAbilities(
+          ctx,
+          {
+            ...body,
+            kind: "划拨",
+            toOrgId: String(row.to_org_id ?? ""),
+            createdById: body.createdById || "",
+          },
+          status,
+          links.length
+        ),
+        ...(accept ? { acceptedAt: accept.created_at, acceptedBy: accept.actor_name || "" } : {}),
+        ...(reject
+          ? {
+              rejectedAt: reject.created_at,
+              rejectedBy: reject.actor_name || "",
+              rejectReason: reject.note || "",
+            }
           : {}),
+        ...(cancel ? { cancelledAt: cancel.created_at, cancelledBy: cancel.actor_name || "" } : {}),
+        ...(revoke ? { revokedAt: revoke.created_at, revokeReason: revoke.note || "" } : {}),
       });
     }
     ctx.ok({
@@ -1293,23 +1447,41 @@ export class ReportPolicyController {
     });
   }
 
-  /** 划拨详情（GET /sample/transfers/:id）：逐台快照 + 历史撤销信息 + 审计线。
-   * R24 门禁同 transfers 列表：只看「新建划拨」码，撤销码已随功能下线退出门禁。 */
+  /** 划拨详情（GET /sample/transfers/:id，R25）：逐台快照（当前归属/保管人/电量/位置）＋终态事实＋审计线＋按态×角色 abilities。
+   * 门禁同 transfers 列表：新建划拨 或 接受划拨 任一码。编号脱敏/电量按权限遮挡（与箱子列表同口径）。 */
   async transferDetail(ctx) {
     this.#requireTransferFeature();
-    this.require(ctx, T.createTransfer);
+    this.#requireTransferView(ctx);
     const row = await this.#visibleTask(ctx);
     if (row.kind !== "划拨") throw notVisible("划拨单不存在或不在你的管理范围内");
     const data = await this.policies.transferView(row.id);
+    const perms = ctx.access.perms;
+    const seePower = perms.has(BOX.power);
+    const seePosition = perms.has(BOX.location);
+    // 编号脱敏（前3后4）：无设备标识权限遮 IMEI；电量/位置按各自权限遮挡（与箱子列表/候选集同口径）
+    const boxes = data.boxes.map((b) => ({
+      ...b,
+      code: identityGranted(perms) ? b.code : maskImei(b.code),
+      batteryMv: seePower ? b.batteryMv : null,
+      batteryUsable: seePower ? b.batteryUsable : null,
+      gpsLng: seePosition ? b.gpsLng : null,
+      gpsLat: seePosition ? b.gpsLat : null,
+      lbsLng: seePosition ? b.lbsLng : null,
+      lbsLat: seePosition ? b.lbsLat : null,
+    }));
     const logs = await this.db.all(
       "SELECT * FROM sample_task_log WHERE task_id=? ORDER BY created_at, id",
       [row.id]
     );
     ctx.ok({
       ...data,
-      // R24（#70）撤销下线：详情不再下发 revoke 旗标（入口已删）；boxes[].revocable 仍由领域层
-      // 逐台算，历史已撤销单的「已退回 xxx」展示要用，只是不再作为可点动作呈现。
-      abilities: { cancel: false },
+      boxes,
+      abilities: this.#transferAbilities(
+        ctx,
+        { ...data, toOrgId: data.toOrg.id, boxIds: data.boxes.map((b) => b.boxId) },
+        data.status,
+        data.boxCount
+      ),
       logs: logs.map((log) => ({
         status: log.status,
         action: log.action,
@@ -1600,6 +1772,41 @@ export class ReportPolicyController {
   }
 
   /**
+   * 划拨三态动作门（R25，任务 #71）：按态×角色下发 accept/cancel/reject/tracking/retransfer。
+   * 待接受：接受/拒收归目标方（manageOrgIds 参与方门＋accept/reject 码）；取消/补单号归创建方
+   * （创建人本人或系统管理员，身份门不另设码）。已完成（含历史已划拨别名）：重新划拨（持建单码＋有箱）。
+   * 已取消/已拒收/已撤销：终态只读，全 false。动作键不与状态名冲突——#receiveMode 不会把划拨误判成签收。
+   */
+  #transferAbilities(ctx, task, status, boxCount = null) {
+    const has = (perm) => ctx.access.perms.has(perm);
+    const view = has(BOX.task);
+    const me = String(ctx.user?.id ?? "");
+    const creator = Boolean(task.createdById) && String(task.createdById) === me;
+    const creatorOrAdmin = creator || isAdminRole(ctx);
+    const target = inPartyScope(ctx, task.toOrgId);
+    const pending = status === "待接受";
+    const endedOk = status === "已完成" || status === "已划拨";
+    const count = boxCount ?? (task.boxIds || []).length;
+    return {
+      accept: pending && view && has(T.transferAccept) && target,
+      reject: pending && view && has(T.reject) && target,
+      cancel: pending && creatorOrAdmin,
+      tracking: pending && creatorOrAdmin,
+      retransfer: endedOk && count > 0 && has(T.createTransfer),
+    };
+  }
+
+  /**
+   * 调拨单页读门（R25）：新建划拨 或 接受划拨 任一码即可见（接受方可能只持 accept 码）。
+   * 与前端 local-menus TRANSFER_VIEW_PERMS、menus.js 预览镜像同口径；candidate-boxes 仍 create-only。
+   */
+  #requireTransferView(ctx) {
+    const perms = ctx.access?.perms;
+    if (!perms?.has(T.createTransfer) && !perms?.has(T.transferAccept))
+      throw noPermission("没有这项操作权限");
+  }
+
+  /**
    * 谁能推进哪一步。调拨单：寄出、取消归寄出单位；确认到达寄出、接收方都可以；签收、拒收只归接收单位。
    * 接收方只需能看任务（device:box:task），不需要上报策略权限。
    * 指定了签收人（系统用户）时只有他能正常签收；接收单位里其他有签收权限的人只能「强制签收」，要写原因。
@@ -1607,6 +1814,8 @@ export class ReportPolicyController {
    * 默认 null＝不放宽（fail-closed），他角色步一律不读它。
    */
   #abilities(ctx, task, status, owned = null) {
+    // R25 划拨三态：专用动作门（accept/cancel/reject/tracking/retransfer），不走通用 nextOf。
+    if (task.kind === "划拨") return this.#transferAbilities(ctx, task, status);
     const has = (perm) => ctx.access.perms.has(perm);
     const view = has(BOX.task);
     const next = nextOf(task, status);
@@ -1767,6 +1976,12 @@ export class ReportPolicyController {
         id: row.id,
         name: task.name,
         kind: task.kind,
+        // R25（E additive）：三态类型显示名，mp #77 消费；不改既有字段
+        displayKind: isLocalSample({ ...task, kind: row.kind })
+          ? "采样"
+          : isMergedSample({ ...task, kind: row.kind })
+            ? "采样后送检"
+            : row.kind,
         status: row.status,
         steps: stepsOf({ ...task, status: row.status }),
         from: task.fromOrg || "",
@@ -1812,6 +2027,9 @@ export class ReportPolicyController {
       overLimit: [],
       mine: [],
       moving: [],
+      // R25 划拨三态：接收方待接受（接受/拒收）＋创建方可取消视角（mp #77 消费；web 工作台冻结面不读）
+      transferAccept: [],
+      transferCancel: [],
     };
     const me = String(ctx.user?.id || ""),
       myName = ctx.user?.nickname || "";
@@ -1915,6 +2133,12 @@ export class ReportPolicyController {
           id: row.id,
           name: task.name,
           kind: task.kind,
+          // R25（E additive）：三态类型显示名，mp #77 消费；不改既有字段
+          displayKind: isLocalSample({ ...task, kind: row.kind })
+            ? "采样"
+            : isMergedSample({ ...task, kind: row.kind })
+              ? "采样后送检"
+              : row.kind,
           status: row.status,
           createdAt: row.created_at,
           active,
@@ -2117,8 +2341,8 @@ export class ReportPolicyController {
     const row = await this.#visibleTask(ctx);
     const id = row.id;
     const task = JSON.parse(row.body);
-    // 划拨单没有物流步骤（§6.3）：只能走撤销端点。nextOf 恒空也会拦，这里给明确文案
-    if (task.kind === "划拨") throw conflict("划拨单没有物流步骤，请使用撤销接口");
+    // 划拨单没有物流步骤（R25）：走专用 accept/cancel/reject/tracking 端点。nextOf 恒空也会拦，这里给明确文案
+    if (task.kind === "划拨") throw conflict("划拨单没有物流步骤，请使用划拨专用接口");
     const signTo = signTargetOf(task);
     const status = force ? signTo : asked;
     const ids = (await this.db.all("SELECT box_id FROM sample_task_box WHERE task_id=?", [id])).map(
@@ -2335,6 +2559,12 @@ export class ReportPolicyController {
 const SIGN_STEPS = ["待签收", "待核验"];
 
 /**
+ * 划拨状态筛选白名单（R25 三态）：待接受＋四终态＋历史已划拨别名（读兼容）。
+ * 伪态（已结束/已撤销·历史）在 transfers() 里展开，不在本表。
+ */
+const TRANSFER_STATUS_KEYS = ["待接受", "已完成", "已取消", "已拒收", "已撤销", "已划拨"];
+
+/**
  * 状态筛选白名单（批4/R-c）：16 个持久态＋划拨两态＋伪态（进行中/已结束/签收）。
  * 从 shared/taskFlow.js 的流程常量派生（与前端 status.ts 的 STATUS_GROUPS 同一份词汇），
  * 不另抄枚举。非法值忽略该筛选（与 kind/bucket 同口径），不再静默 0 行——
@@ -2347,6 +2577,7 @@ const STATUS_KEYS = [
     ...RETURN_STEPS,
     ...ENDED_OK,
     ...ENDED_VOID,
+    "待接受", // R25 划拨三态进行中态（不在全局 ENDED）
     "待核验", // 旧采样核验态（只读兼容，056 映射前的存量行）
     "进行中",
     "已结束",
@@ -2385,16 +2616,32 @@ function actionable(can) {
   return Object.entries(can).some(([to, ok]) => ok && to !== "已取消");
 }
 
-/** 任务单列表支持的桶参数（D1/R22 批2）：与工作台 todo() 同一份谓词，保证「卡片数字==点击落地行数」。 */
-const BUCKET_KEYS = ["sampling", "arrive", "sign", "returning", "send", "overLimit"];
+/** 任务单列表支持的桶参数（D1/R22 批2）：与工作台 todo() 同一份谓词，保证「卡片数字==点击落地行数」。
+ * R25 增划拨两桶：transferAccept（接收方待接受）/transferCancel（创建方可取消），落地自动 kind=划拨。 */
+const BUCKET_KEYS = [
+  "sampling",
+  "arrive",
+  "sign",
+  "returning",
+  "send",
+  "overLimit",
+  "transferAccept",
+  "transferCancel",
+];
 
 /**
  * 工作台分桶谓词（D1/R22 批2）：todo() 与 tasks()?bucket= 共用这一份，避免两处漂移。
  * 返回该任务命中的桶名数组。overLimit 要开箱数（异步），由调用方先算好传入
  * （>0＝命中；null/0＝未算或无超限，不算命中）；其余桶只看 can（与 todo 逐条判定一致）。
+ * R25 划拨：transferAccept＝接收方可接受/拒收；transferCancel＝创建方可取消；不参与物流六桶。
  */
 function bucketsOf(task, status, can, openOver = null) {
   const buckets = [];
+  if (task.kind === "划拨") {
+    if (can.accept || can.reject) buckets.push("transferAccept");
+    if (can.cancel) buckets.push("transferCancel");
+    return buckets;
+  }
   if (can["运送中"]) buckets.push("send");
   if (can["待签收"] || (status === "运送中" && can["待采样"])) buckets.push("arrive");
   if (can["已签收"] || can["待检测"] || can[FORCE_SIGN]) buckets.push("sign");

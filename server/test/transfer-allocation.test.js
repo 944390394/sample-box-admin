@@ -202,31 +202,57 @@ async function submit(s, boxIds, extra = {}, actor = null) {
   return res.data;
 }
 
-test("划拨提交即生效：单据+快照+归属同一事务，AL- 前缀，不写占用、不改 life、审计齐备", async () => {
+/**
+ * R25（#71）：撤销领域本体（policies.revokeTransfer）只服务历史「已划拨」单——新单创建落待接受、
+ * 归属接受时才转移，撤销路由已封 410。为保留撤销四守卫/归属退回回归，把新单还原成 R24 前的
+ * 「提交即生效」形态（status=已划拨＋归属即时转移到目标＋保管人清空），供直调撤销用例使用。
+ */
+async function submitLegacy(s, boxIds, extra = {}, actor = null) {
+  const d = await submit(s, boxIds, extra, actor);
+  const target = await s.db.get("SELECT id,name FROM sys_dept WHERE id=?", [d.toOrg.id]);
+  for (const id of boxIds)
+    await s.db.run("UPDATE sample_box SET org_id=?, org=?, owner_id='', owner='' WHERE id=?", [
+      target.id,
+      target.name,
+      id,
+    ]);
+  await s.db.run("UPDATE sample_task SET status='已划拨' WHERE id=?", [d.id]);
+  return d;
+}
+
+test("R25 划拨创建落待接受：单据+快照同一事务，AL- 前缀，归属不转移（接受时才转移）、不写占用、不改 life、审计齐备", async () => {
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
     const b2 = await s.makeBox("2", { ownerId: "101", owner: "陈默" });
-    const d = await submit(s, [b1, b2], { note: "2 台给广州现场用", clientToken: "tok-1" });
+    const d = await submit(s, [b1, b2], {
+      note: "2 台给广州现场用",
+      clientToken: "tok-1",
+      trackingNo: "SF1234567890",
+    });
     assert.match(d.id, /^AL-\d+-[0-9a-f]{6}$/);
     assert.equal(d.kind, "划拨");
-    assert.equal(d.status, "已划拨");
+    // R25：创建落待接受（不再提交即生效）；三步条显示位 创建划拨→接受划拨→已完成
+    assert.equal(d.status, "待接受");
     assert.deepEqual(d.toOrg, { id: "3", name: "广州分公司" });
     assert.deepEqual(d.from, [{ orgId: "2", orgName: "深圳分公司", count: 2 }]);
     assert.equal(d.boxCount, 2);
-    assert.deepEqual(d.steps, []);
+    assert.deepEqual(d.steps, ["创建划拨", "接受划拨", "已完成"]);
     assert.equal(d.idempotent, false);
-    // R24（#70）撤销下线：abilities 不再下发 revoke（cancel 历史占位保留）
-    assert.deepEqual(d.abilities, { cancel: false });
+    assert.equal(d.trackingNo, "SF1234567890");
+    // R25 abilities：创建方可取消/补单号；接受/重新划拨此时不可（待接受、非目标 accept 码）
+    assert.equal(d.abilities.cancel, true);
+    assert.equal(d.abilities.tracking, true);
+    assert.equal(d.abilities.retransfer, false);
     assert.equal(d.boxes.find((b) => b.boxId === b2).fromOwner, "陈默");
     // 单据行：kind/status/to_org_id；from_org_id 单值列表达不了批量来源，存 NULL（D-12）
     const task = await s.taskRow(d.id);
     assert.equal(task.kind, "划拨");
-    assert.equal(task.status, "已划拨");
+    assert.equal(task.status, "待接受");
     assert.equal(task.to_org_id, "3");
     assert.equal(task.from_org_id, null);
     assert.equal(Number(task.is_inspect), 0);
-    // 快照 = 撤销回滚目标 + 开箱基线
+    // 快照 = 来源公司/保管人/开箱基线（接受时转移的对照来源）
     const links = await s.db.all("SELECT * FROM sample_task_box WHERE task_id=? ORDER BY box_id", [
       d.id,
     ]);
@@ -237,15 +263,15 @@ test("划拨提交即生效：单据+快照+归属同一事务，AL- 前缀，�
     }
     assert.equal(links.find((l) => l.box_id === b2).owner_id, "101");
     assert.equal(links.find((l) => l.box_id === b1).owner_id, "");
-    // 归属即时转移、保管人清空、life 不改
+    // R25：创建不转移归属——箱子仍属来源公司、保管人不动、life 不改（接受时才转移＋清空）
     for (const id of [b1, b2]) {
       const row = await s.boxRow(id);
-      assert.equal(row.org_id, "3");
-      assert.equal(row.org, "广州分公司");
-      assert.equal(row.owner_id, "");
+      assert.equal(row.org_id, "2");
+      assert.equal(row.org, "深圳分公司");
       assert.equal(row.life, "未使用");
     }
-    // 划拨不是任务：不写 box_active_task（已划拨 ∈ ENDED，不占用）
+    assert.equal((await s.boxRow(b2)).owner_id, "101", "创建不清空保管人");
+    // 划拨不是任务：不写 box_active_task（待接受占用走 activeTaskSql，不写占用锚点表）
     assert.equal(await s.count("SELECT COUNT(*) AS n FROM box_active_task"), 0);
     // 幂等行 + 审计（谁/何时/哪些箱子/从哪到哪）
     assert.equal(
@@ -258,13 +284,14 @@ test("划拨提交即生效：单据+快照+归属同一事务，AL- 前缀，�
     );
     assert.equal(log.actor_id, "101");
     assert.equal(log.actor_name, "陈默");
-    assert.equal(log.status, "已划拨");
+    assert.equal(log.status, "待接受");
     assert.equal(log.note, "2 台给广州现场用");
     const detail = JSON.parse(log.detail);
     assert.equal(detail.count, 2);
     assert.equal(detail.toOrgId, "3");
     assert.equal(detail.toOrgName, "广州分公司");
     assert.equal(detail.from.length, 2);
+    assert.equal(detail.trackingNo, "SF1234567890");
   } finally {
     await s.teardown();
   }
@@ -296,18 +323,23 @@ test("P8 划拨目标类型闸门（B1c）：检测站拒绝、总部允许（�
     assert.equal(toHq.data.idempotent, false);
     assert.match(toHq.data.id, /^AL-/);
     assert.deepEqual(toHq.data.toOrg, { id: "1", name: "总公司" });
-    assert.equal((await s.boxRow(b1)).org_id, "1");
-    assert.equal((await s.boxRow(b1)).org, "总公司");
-    // 分公司：允许（总部收回后再分配 1→3）
+    // R25：创建落待接受，归属不转移（接受时才转移）——箱子仍属来源 2
+    assert.equal((await s.boxRow(b1)).org_id, "2");
+    // 分公司：允许。待接受单占用箱子，先取消总部那张（创建方出口，箱不动）再建到分公司的单
+    const cancelHq = await s.run(s.controller.cancelTransfer.bind(s.controller), actor, {
+      params: { id: toHq.data.id },
+      body: { note: "改派分公司" },
+    });
+    assert.ok(cancelHq.ok, `${cancelHq.code} ${cancelHq.message}`);
     const toBranch = await transfer("3");
     assert.ok(toBranch.ok, `${toBranch.code} ${toBranch.message}`);
-    assert.equal((await s.boxRow(b1)).org_id, "3");
-    // 非公司类型（056 归一前的旧采样机构残留）：通用友好报错
+    assert.equal((await s.boxRow(b1)).org_id, "2", "创建不转移归属");
+    // 非公司类型（056 归一前的旧采样机构残留）：通用友好报错（类型闸门先于箱占用判定）
     await s.db.run("UPDATE sys_dept SET type='采样机构' WHERE id='5'");
     const toLegacy = await transfer("5");
     assert.equal(toLegacy.ok, false);
     assert.match(toLegacy.message, /划拨目标必须是公司类型/);
-    assert.equal((await s.boxRow(b1)).org_id, "3", "拒绝不转移归属");
+    assert.equal((await s.boxRow(b1)).org_id, "2", "拒绝不转移归属");
     // 停用目标：仍先报不存在/停用（类型闸门不改变既有前置校验顺序）
     await s.db.run("UPDATE sys_dept SET status=0 WHERE id='3'");
     const disabled = await transfer("3");
@@ -405,44 +437,47 @@ class FaultyDb {
   }
 }
 
-test("划拨失败注入全回滚：第二台归属写入中途抛错，单据/快照/归属/幂等行都不残留", async () => {
+test("R25 划拨接受失败注入全回滚：第二台归属写入中途抛错，单据状态/归属/接受审计都不残留", async () => {
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
     const b2 = await s.makeBox("2", { ownerId: "101", owner: "陈默" });
-    const faulty = new FaultyDb(s.db, 2);
-    const policies = new ReportPolicy(faulty);
-    const controller = new ReportPolicyController(s.boxes, policies);
+    // 先正常创建（待接受，归属不动）
+    const d = await submit(s, [b1, b2], { clientToken: "tok-fault" });
     const before1 = await s.boxRow(b1);
     const before2 = await s.boxRow(b2);
+    // 接受事务内注入：第二台归属写入抛错 → 整体回滚（状态仍待接受、归属不动、无接受日志）。
+    // 直调领域层（绕过控制器 accept 码门，本用例只验事务原子性）。
+    const faulty = new FaultyDb(s.db, 2);
+    const policies = new ReportPolicy(faulty);
     const res = await s.run(
-      controller.createTransfer.bind(controller),
+      (ctx) =>
+        policies.acceptTransfer(ctx.params.id, {
+          actor: { id: ctx.user.id, name: ctx.user.nickname },
+        }),
       s.ctx(s.people.a, ["2", "3"]),
-      {
-        body: {
-          name: "注入测试",
-          toOrgId: "3",
-          boxIds: [b1, b2],
-          clientToken: "tok-fault",
-          password: CONFIRM_PW,
-        },
-      }
+      { params: { id: d.id }, body: {} }
     );
     assert.equal(res.ok, false);
     assert.match(res.message, /注入：归属写入失败/);
     assert.equal(faulty.updates, 2, "确实走到了第二台归属写入");
-    assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task WHERE kind='划拨'"), 0);
-    assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task_box"), 0);
-    assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task_log"), 0);
-    assert.equal(await s.count("SELECT COUNT(*) AS n FROM transfer_request"), 0);
+    assert.equal((await s.taskRow(d.id)).status, "待接受", "接受回滚后状态不变");
     assert.deepEqual(await s.boxRow(b1), before1, "第一台已写过的归属必须回滚");
     assert.deepEqual(await s.boxRow(b2), before2);
+    assert.equal(
+      await s.count(
+        "SELECT COUNT(*) AS n FROM sample_task_log WHERE task_id=? AND action='接受划拨'",
+        [d.id]
+      ),
+      0,
+      "接受审计不落"
+    );
   } finally {
     await s.teardown();
   }
 });
 
-test("划拨 client_token 幂等：重复提交返回原单不重复转移；无 token 时已属于目标公司被拦", async () => {
+test("R25 划拨 client_token 幂等：重复提交返回原单；无 token 时待接受占用拦重复（归属未动）", async () => {
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
@@ -465,16 +500,16 @@ test("划拨 client_token 幂等：重复提交返回原单不重复转移；无
     assert.equal(again.data.idempotent, true);
     assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task WHERE kind='划拨'"), 1);
     assert.equal(await s.count("SELECT COUNT(*) AS n FROM transfer_request"), 1);
-    assert.equal((await s.boxRow(b1)).org_id, "3");
-    // 不带 token 再提交同一批：G-C 天然幂等护栏
+    // R25：创建不转移归属，幂等重放也不动归属
+    assert.equal((await s.boxRow(b1)).org_id, "2");
+    // 不带 token 再提交同一批：待接受单占用箱子（activeTaskSql），整单拦下
     const dup = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
       { body: { name: "再来一张", toOrgId: "3", boxIds: [b1], password: CONFIRM_PW } }
     );
     assert.equal(dup.code, "A0409");
-    assert.equal(dup.data.blocked[0].reasonCode, "ALREADY_TARGET");
-    assert.match(dup.data.blocked[0].reason, /已属于 广州分公司/);
+    assert.equal(dup.data.blocked[0].reasonCode, "IN_ACTIVE_TASK");
     assert.equal(await s.count("SELECT COUNT(*) AS n FROM sample_task WHERE kind='划拨'"), 1);
   } finally {
     await s.teardown();
@@ -486,7 +521,7 @@ test("划拨撤销全合格：归属精确退回快照（含空保管人）、�
   try {
     const b1 = await s.makeBox("2", { ownerId: "101", owner: "陈默" });
     const b2 = await s.makeBox("2");
-    const d = await submit(s, [b1, b2]);
+    const d = await submitLegacy(s, [b1, b2]);
     const res = await s.run(
       s.controller.revokeTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
@@ -545,7 +580,7 @@ test("划拨撤销守卫 IN_ACTIVE_TASK：已进入未结束任务，整单禁�
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
-    const d = await submit(s, [b1]);
+    const d = await submitLegacy(s, [b1]);
     const occ = await s.run(s.controller.createTask.bind(s.controller), s.ctx(s.people.b, ["3"]), {
       body: {
         name: "南山管网水样采集",
@@ -585,7 +620,7 @@ test("划拨撤销守卫 OPENED_AFTER：opens 增量判定（D-7），整单禁�
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
-    const d = await submit(s, [b1]);
+    const d = await submitLegacy(s, [b1]);
     await s.db.run("UPDATE sample_box SET opens=opens+3 WHERE id=?", [b1]);
     const res = await s.run(
       s.controller.revokeTransfer.bind(s.controller),
@@ -608,7 +643,7 @@ test("划拨撤销守卫 INSPECTED：划拨后送检并完成开箱检测，整�
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
-    const d = await submit(s, [b1]);
+    const d = await submitLegacy(s, [b1]);
     // 划拨后这台箱子被送检：广州 → 花都检测站（合并采样单），签收后逐台开始检测
     const created = await s.run(
       s.controller.createTask.bind(s.controller),
@@ -671,7 +706,7 @@ test("划拨撤销守卫 ORG_MOVED：箱子被第三方改挂，整单禁撤（D
   const s = await setup();
   try {
     const b1 = await s.makeBox("2");
-    const d = await submit(s, [b1]);
+    const d = await submitLegacy(s, [b1]);
     await s.boxes.updateBox(b1, (item) => {
       item.orgId = "5";
       item.org = "第三方公司";
@@ -859,7 +894,7 @@ test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒
     );
     assert.equal(inspect.code, "A0409");
     assert.match(inspect.message, /已在任务单/);
-    // 新端点恒可用（off 配置不再报未开通）：提交/列表/候选/详情/撤销走一张真实划拨单
+    // 新端点恒可用（off 配置不再报未开通）：提交/列表/候选/详情/取消走一张真实划拨单（R25 三态）
     const created = await s.run(
       s.controller.createTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
@@ -867,7 +902,8 @@ test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒
     );
     assert.ok(created.ok, `${created.code} ${created.message}`);
     assert.match(created.data.id, /^AL-/);
-    assert.equal((await s.boxRow(b3)).org_id, "3", "提交即生效");
+    assert.equal(created.data.status, "待接受");
+    assert.equal((await s.boxRow(b3)).org_id, "2", "R25 创建不转移归属");
     const list = await s.run(
       s.controller.transfers.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
@@ -887,14 +923,16 @@ test("常开：旧 off 配置写入被忽略/读取恒 true，划拨新端点恒
       { params: { id: created.data.id } }
     );
     assert.ok(detail.ok, detail.message);
-    assert.equal(detail.data.boxes[0].revocable, true);
-    const revoke = await s.run(
-      s.controller.revokeTransfer.bind(s.controller),
+    assert.equal(detail.data.abilities.cancel, true, "创建方可取消");
+    // R25 创建方取消（新端点）：箱不动、单作废
+    const cancel = await s.run(
+      s.controller.cancelTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
-      { params: { id: created.data.id }, body: { reason: "误划拨" } }
+      { params: { id: created.data.id }, body: { note: "误建单" } }
     );
-    assert.ok(revoke.ok, `${revoke.code} ${revoke.message}`);
-    assert.equal((await s.boxRow(b3)).org_id, "2", "撤销归属退回快照");
+    assert.ok(cancel.ok, `${cancel.code} ${cancel.message}`);
+    assert.equal(cancel.data.status, "已取消");
+    assert.equal((await s.boxRow(b3)).org_id, "2", "取消箱不动");
     // 旧调拨单不走新端点：详情 404、撤销 kind 闸门（不再是「未开通」）
     const legacyDetail = await s.run(
       s.controller.transferDetail.bind(s.controller),
@@ -1030,7 +1068,7 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
     );
     assert.equal(wrongStatus.code, "A0409");
     assert.match(wrongStatus.message, /划拨单没有物流步骤/);
-    // 列表：counts 与列表同口径 + 箱次累计；行带 by/byId/from/toOrg
+    // 列表：counts 与列表同口径 + 箱次累计；行带 by/byId/from/toOrg（R25 三态计数）
     const list = await s.run(
       s.controller.transfers.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
@@ -1038,7 +1076,16 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
     );
     assert.ok(list.ok, list.message);
     assert.equal(list.data.total, 1);
-    assert.deepEqual(list.data.counts, { 全部: 1, 已划拨: 1, 已撤销: 0, boxCountTotal: 1 });
+    assert.deepEqual(list.data.counts, {
+      全部: 1,
+      待接受: 1,
+      已完成: 0,
+      已取消: 0,
+      已拒收: 0,
+      已撤销: 0,
+      已结束: 0,
+      boxCountTotal: 1,
+    });
     assert.equal(list.data.list[0].by, "陈默");
     assert.equal(list.data.list[0].byId, "101");
     assert.deepEqual(list.data.list[0].from, [{ orgId: "2", orgName: "深圳分公司", count: 1 }]);
@@ -1068,7 +1115,7 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
       }
     );
     assert.equal(byQ.data.total, 1);
-    // 详情：逐台快照 + revocable + 审计线
+    // 详情：逐台快照（当前归属=来源）＋审计线＋按态×角色 abilities（R25）
     const detail = await s.run(
       s.controller.transferDetail.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
@@ -1077,33 +1124,41 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
       }
     );
     assert.ok(detail.ok, detail.message);
-    assert.equal(detail.data.boxes[0].revocable, true);
     assert.equal(detail.data.boxes[0].fromOrgId, "2");
+    assert.equal(detail.data.boxes[0].orgId, "2", "待接受当前归属仍属来源");
     assert.equal(detail.data.logs.length, 1);
     assert.equal(detail.data.logs[0].action, "提交划拨");
-    // R24（#70）撤销下线：abilities 不再下发 revoke；boxes[].revocable 仍由领域层逐台算（历史审计口径）
-    assert.deepEqual(detail.data.abilities, { cancel: false });
-    // 撤销后列表/详情回 revokedAt/revokeReason，counts 同步
-    const revoke = await s.run(
-      s.controller.revokeTransfer.bind(s.controller),
+    assert.equal(detail.data.abilities.cancel, true);
+    assert.ok(!("revoke" in detail.data.abilities), "R24 撤销旗标已下线");
+    // R25 创建方取消后列表/详情回 cancelledAt/cancelNote，counts 同步（已取消入已结束桶）
+    const cancel = await s.run(
+      s.controller.cancelTransfer.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
       {
         params: { id: d.id },
-        body: { reason: "误划拨" },
+        body: { note: "误建单" },
       }
     );
-    assert.ok(revoke.ok, revoke.message);
+    assert.ok(cancel.ok, cancel.message);
     const after = await s.run(
       s.controller.transfers.bind(s.controller),
       s.ctx(s.people.a, ["2", "3"]),
       {
-        query: { status: "已撤销" },
+        query: { status: "已取消" },
       }
     );
     assert.equal(after.data.total, 1);
-    assert.deepEqual(after.data.counts, { 全部: 1, 已划拨: 0, 已撤销: 1, boxCountTotal: 1 });
-    assert.ok(after.data.list[0].revokedAt);
-    assert.equal(after.data.list[0].revokeReason, "误划拨");
+    assert.deepEqual(after.data.counts, {
+      全部: 1,
+      待接受: 0,
+      已完成: 0,
+      已取消: 1,
+      已拒收: 0,
+      已撤销: 0,
+      已结束: 1,
+      boxCountTotal: 1,
+    });
+    assert.ok(after.data.list[0].cancelledAt);
     const detailAfter = await s.run(
       s.controller.transferDetail.bind(s.controller),
       s.ctx(s.people.a, ["2"]),
@@ -1111,8 +1166,9 @@ test("常开（默认配置）：tasks 默认采样/allKinds 兜底，合并单 
         params: { id: d.id },
       }
     );
-    assert.equal(detailAfter.data.boxes[0].revocable, false);
-    // R24：撤销后 abilities 同样不含 revoke 键（原断言 abilities.revoke===false 随旗标下线改为键不存在）
+    assert.equal(detailAfter.data.status, "已取消");
+    assert.equal(detailAfter.data.cancelNote, "误建单");
+    assert.equal(detailAfter.data.abilities.cancel, false, "终态只读");
     assert.ok(!("revoke" in detailAfter.data.abilities));
     assert.equal(detailAfter.data.logs.length, 2);
   } finally {

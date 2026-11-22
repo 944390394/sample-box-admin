@@ -52,6 +52,7 @@ const { buildLocalMenus, TRANSFER_VIEW_PERMS } = await import("../../src/router/
 
 const CREATE = "task:create:transfer";
 const REVOKE = "task:transfer:revoke";
+const ACCEPT = "task:transfer:accept";
 const BOX_TASK = "device:box:task";
 /** 夹具口令（仅测试用，非真实凭据）。 */
 const CONFIRM_PW = "Retire-Fixture-2026";
@@ -248,7 +249,7 @@ test("R24 revoke 路由真实进程 410＋友好文案（临时 SAMPLE_HOME＋�
   }
 });
 
-test("R24 码表/模板不含 revoke＋abilities 无 revoke＋页门 create-only（仅撤销码 403/off/不注入）", async () => {
+test("R24/R25 码表/模板不含 revoke＋abilities 无 revoke＋页门 create-or-accept（仅撤销码 403/off/不注入；仅接受码可见）", async () => {
   const s = await setup();
   try {
     // 码表：item 与模板持有都移除；存量码经 upgradeCodes 原样放行（inert，领域直调仍认）
@@ -258,10 +259,15 @@ test("R24 码表/模板不含 revoke＋abilities 无 revoke＋页门 create-only
       assert.ok(DEFAULT_ROLE_PERMS[role].includes(CREATE), `${role} 模板应含 create`);
     }
     assert.ok(upgradeCodes([REVOKE]).includes(REVOKE), "存量授权行 inert 保留");
-    // 前端注入口径：单码；仅撤销码不注入；预览镜像 off
-    assert.deepEqual(TRANSFER_VIEW_PERMS, [CREATE]);
+    // R25：BRANCH_ADMIN 模板补接受码（064）；前端注入口径＝create 或 accept；仅撤销码不注入；预览镜像 off
+    assert.ok(DEFAULT_ROLE_PERMS.BRANCH_ADMIN.includes(ACCEPT), "BRANCH_ADMIN 应含 accept");
+    assert.deepEqual(TRANSFER_VIEW_PERMS, [CREATE, ACCEPT]);
     assert.ok(
       !buildLocalMenus({ perms: [BOX_TASK, REVOKE] }).some((g) => g.name === "SampleTransferGroup")
+    );
+    assert.ok(
+      buildLocalMenus({ perms: [BOX_TASK, ACCEPT] }).some((g) => g.name === "SampleTransferGroup"),
+      "仅接受码也注入调拨单组"
     );
     const preview = menuPreviewFor(new Set([BOX_TASK, REVOKE])).filter((m) =>
       m.title.startsWith("调拨单")
@@ -278,14 +284,15 @@ test("R24 码表/模板不含 revoke＋abilities 无 revoke＋页门 create-only
       password: CONFIRM_PW,
     });
     assert.ok(created.ok, `${created.code} ${created.message}`);
-    // abilities：创建响应与详情都不再含 revoke（cancel 历史占位保留）；逐台 revocable 仍由领域层下发
-    assert.deepEqual(created.data.abilities, { cancel: false });
+    // abilities：创建响应与详情都不再含 revoke；R25 按态×角色（创建方可取消/补单号）
+    assert.ok(!("revoke" in created.data.abilities));
+    assert.equal(created.data.abilities.cancel, true);
     const detail = await s.run(s.controller.transferDetail.bind(s.controller), actor, {
       params: { id: created.data.id },
     });
     assert.ok(detail.ok, detail.message);
-    assert.deepEqual(detail.data.abilities, { cancel: false });
-    assert.equal(typeof detail.data.boxes[0].revocable, "boolean");
+    assert.ok(!("revoke" in detail.data.abilities));
+    assert.equal(detail.data.boxes[0].orgId, "2", "待接受当前归属仍属来源");
     const revokeOnly = s.ctx([BOX_TASK, REVOKE]);
     const l = await s.run(s.controller.transfers.bind(s.controller), revokeOnly);
     assert.equal(l.code, "A0301");
@@ -295,12 +302,22 @@ test("R24 码表/模板不含 revoke＋abilities 无 revoke＋页门 create-only
     });
     assert.equal(d.code, "A0301");
     assert.equal(d.status, 403);
+    // R25：仅接受码（无建单码）也能看列表/详情（接受方视角）
+    const acceptOnly = s.ctx([BOX_TASK, ACCEPT]);
+    assert.ok((await s.run(s.controller.transfers.bind(s.controller), acceptOnly)).ok);
+    assert.ok(
+      (
+        await s.run(s.controller.transferDetail.bind(s.controller), acceptOnly, {
+          params: { id: created.data.id },
+        })
+      ).ok
+    );
   } finally {
     await s.teardown();
   }
 });
 
-test("R24 密码三态：缺 400／错 403（不累计改密锁定）／对 200 且归属转移；格式校验先于口令", async () => {
+test("R24/R25 密码三态：缺 400／错 403（不累计改密锁定）／对 200 落待接受（归属接受时转移）；格式校验先于口令", async () => {
   const s = await setup();
   try {
     const boxId = await s.makeBox("2");
@@ -335,13 +352,12 @@ test("R24 密码三态：缺 400／错 403（不累计改密锁定）／对 200 
     );
     assert.equal((await s.boxes.findById(boxId)).orgId, "2");
     assert.equal(Number((await s.db.get("SELECT COUNT(*) AS n FROM transfer_request")).n), 0);
-    // 对口令：200，归属即时转移、保管人清空
+    // 对口令：200，落待接受；R25 创建不转移归属（接受时才转移＋清空保管人）
     const ok = await s.create(actor, { ...base, password: CONFIRM_PW, clientToken: "tok-miss" });
     assert.ok(ok.ok, `${ok.code} ${ok.message}`);
-    assert.equal(ok.data.status, "已划拨");
+    assert.equal(ok.data.status, "待接受");
     const row = await s.boxes.findById(boxId);
-    assert.equal(row.orgId, "3");
-    assert.equal(row.ownerId, "");
+    assert.equal(row.orgId, "2", "创建不转移归属");
   } finally {
     await s.teardown();
   }
@@ -421,11 +437,11 @@ test("R24 幂等重复提交仍要密码：同 clientToken 缺 400／错 403／�
   }
 });
 
-test("R24 重新划拨预填候选合法：原单箱集对同目标 ALREADY_TARGET、对原公司可选可提交；历史已撤销单字段保留", async () => {
+test("R24/R25 重新划拨预填候选合法：已完成单箱集对同目标 ALREADY_TARGET、对原公司可选可提交；历史已撤销单字段保留", async () => {
   const s = await setup();
   try {
     const boxId = await s.makeBox("2");
-    const actor = s.ctx([CREATE]);
+    const actor = s.ctx([CREATE, ACCEPT, REVOKE]);
     const first = await s.create(actor, {
       name: "预填源单",
       toOrgId: "3",
@@ -433,6 +449,13 @@ test("R24 重新划拨预填候选合法：原单箱集对同目标 ALREADY_TARG
       password: CONFIRM_PW,
     });
     assert.ok(first.ok, `${first.code} ${first.message}`);
+    // R25：重新划拨针对已完成单——先接受（归属转移到目标 3），箱集才可重放
+    const accepted = await s.run(s.controller.acceptTransfer.bind(s.controller), actor, {
+      params: { id: first.data.id },
+      body: {},
+    });
+    assert.ok(accepted.ok, `${accepted.code} ${accepted.message}`);
+    assert.equal((await s.boxes.findById(boxId)).orgId, "3");
     // 列表「重新划拨」取详情逐台快照作预填箱集
     const detail = await s.run(s.controller.transferDetail.bind(s.controller), actor, {
       params: { id: first.data.id },
@@ -449,7 +472,7 @@ test("R24 重新划拨预填候选合法：原单箱集对同目标 ALREADY_TARG
       query: { toOrgId: "2" },
     });
     assert.equal(back.data.list.find((b) => b.boxId === boxId).selectable, true);
-    // 重新划拨提交（预填箱集＋新目标＋二次确认）：归属转回原公司
+    // 重新划拨提交（预填箱集＋新目标＋二次确认）：落待接受，归属接受时才转回原公司
     const replay = await s.create(actor, {
       name: "预填源单",
       toOrgId: "2",
@@ -457,10 +480,12 @@ test("R24 重新划拨预填候选合法：原单箱集对同目标 ALREADY_TARG
       password: CONFIRM_PW,
     });
     assert.ok(replay.ok, `${replay.code} ${replay.message}`);
-    assert.equal((await s.boxes.findById(boxId)).orgId, "2");
-    // 历史已撤销单：领域直调撤销（存量 inert 码）后，列表/详情保留 revokedAt/revokeReason 与页签计数
-    const legacy = s.ctx([CREATE, REVOKE]);
-    const revoked = await s.run(s.controller.revokeTransfer.bind(s.controller), legacy, {
+    assert.equal(replay.data.status, "待接受");
+    assert.equal((await s.boxes.findById(boxId)).orgId, "3", "创建不转移归属");
+    // 历史已撤销单：还原成 R24 前形态后领域直调撤销（存量 inert 码），列表/详情保留 revokedAt/revokeReason 与页签计数
+    await s.db.run("UPDATE sample_box SET org_id='2', org='深圳分公司' WHERE id=?", [boxId]);
+    await s.db.run("UPDATE sample_task SET status='已划拨' WHERE id=?", [replay.data.id]);
+    const revoked = await s.run(s.controller.revokeTransfer.bind(s.controller), actor, {
       params: { id: replay.data.id },
       body: { reason: "历史撤销" },
     });
@@ -478,7 +503,8 @@ test("R24 重新划拨预填候选合法：原单箱集对同目标 ALREADY_TARG
     assert.equal(histDetail.data.status, "已撤销");
     assert.ok(histDetail.data.revokedAt);
     assert.equal(histDetail.data.revokeReason, "历史撤销");
-    assert.deepEqual(histDetail.data.abilities, { cancel: false });
+    assert.ok(!("revoke" in histDetail.data.abilities));
+    assert.equal(histDetail.data.abilities.cancel, false, "历史终态只读");
   } finally {
     await s.teardown();
   }

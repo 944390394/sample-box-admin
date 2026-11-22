@@ -8,8 +8,11 @@ import {
   isLocalSample,
   nextOf,
   prefixOf,
+  TRANSFER_TRACK,
+  transferStatusOf,
 } from "./taskFlow.js";
 import { formatTimestamp } from "../domain/Clock.js";
+import { estimateBattery, parseBatteryModel } from "../domain/BatteryEstimate.js";
 import { voidBoxIds } from "./taskPlaces.js";
 import {
   currentBoxSettings,
@@ -116,6 +119,21 @@ export function resolvePolicy(single, batch, task, boxId, companyIdle = null) {
 
 const parse = (v) => (v ? JSON.parse(v) : null);
 const stamped = (v) => (v ? { ...validatePolicy(v), revision: randomUUID() } : null);
+
+/**
+ * 划拨详情箱清单电量百分比（R25）：与箱子列表同一套 estimateBattery（系统默认预留口径），
+ * 无电压/无模型回 null（页面显—）。控制器按 device:box:power 权限遮挡。
+ */
+function batteryPercentOf(box) {
+  if (!box || box.battery_mv == null || box.battery_mv === "") return null;
+  const estimate = estimateBattery(
+    parseBatteryModel(box.battery_model),
+    Number(box.battery_mv),
+    currentBoxSettings().batteryReserve,
+    box.charge == null ? null : Number(box.charge)
+  );
+  return estimate ? estimate.usable : null;
+}
 
 /**
  * 划拨提交守卫（§3.2 G-A/G-B/G-C）：向导候选箱（candidate-boxes）与提交端点用同一函数，
@@ -788,12 +806,14 @@ export class ReportPolicy {
   }
 
   /**
-   * 创建划拨单（§3.2）：提交即生效。单据、箱单快照、归属迁移在同一个 db.transaction 里写完，
-   * 任一步失败整体回滚（归属不得残留）；不调 boxes.updateBox（它另开事务）、不写 box_active_task、
-   * 不改 life、不下发任务策略——划拨两态 ∈ ENDED，不是任务、不占用箱子。
-   * clientToken 幂等（051 transfer_request）：重复提交返回原 task_id，不重复转移。
+   * 创建划拨单（R25 三态，任务 #71）：创建后落「待接受」，归属不转移——等目标分公司管理员接受。
+   * 单据、箱单快照在同一个 db.transaction 里写完，任一步失败整体回滚；不调 boxes.updateBox、
+   * 不写 box_active_task、不改 life、不下发任务策略。待接受是进行中态（∈ activeTaskSql），
+   * 箱子被这张单占用（transferBlock busy 守卫拦其他单），但归属仍属来源公司。
+   * clientToken 幂等（051 transfer_request）：重复提交返回原 task_id。
    * actor 可带 scope（控制器传 ctx.access.scope）：目标公司必须在操作人范围内，口径同单箱 assign。
    * P8（组织简化 B1c）：目标部门 type 必须=公司——检测站拒绝（友好报错），总部允许（收回未分配语义）。
+   * trackingNo（R25③）：快递单号选填 ≤64，接受前创建方可补填/修改（trackingTransfer），接受后只读。
    */
   async createTransfer(input, actor = {}) {
     const name = String(input?.name ?? "").trim();
@@ -806,6 +826,9 @@ export class ReportPolicy {
     if (!boxIds.length) throw badRequest("请选择要划拨的采样箱");
     if (boxIds.length > 500) throw badRequest("一张划拨单最多 500 台箱子，请分批提交");
     const note = String(input?.note ?? "").slice(0, 1000);
+    const trackingNo = String(input?.trackingNo ?? "")
+      .trim()
+      .slice(0, 64);
     const clientToken = String(input?.clientToken ?? "").slice(0, 64);
     const scope = actor.scope || null;
 
@@ -895,7 +918,6 @@ export class ReportPolicy {
           fromOwnerId: ownerId,
           fromOwner: ownerNameOf.get(ownerId) || "",
           life: box.life,
-          revocable: true,
         });
       }
       const from = [...fromMap.values()];
@@ -907,6 +929,7 @@ export class ReportPolicy {
         toOrgId: String(target.id),
         from,
         note,
+        ...(trackingNo ? { trackingNo } : {}),
         boxIds: sorted,
         ...(clientToken ? { clientToken } : {}),
         createdBy: String(actor.name || "").slice(0, 64),
@@ -914,28 +937,20 @@ export class ReportPolicy {
       };
       await tx.run(
         "INSERT INTO sample_task (id,name,kind,status,body,created_at,from_org_id,to_org_id,is_inspect) VALUES (?,?,?,?,?,?,?,?,0)",
-        [id, name, "划拨", "已划拨", JSON.stringify(body), createdAt, null, String(target.id)]
+        [id, name, "划拨", "待接受", JSON.stringify(body), createdAt, null, String(target.id)]
       );
       for (const boxId of sorted) {
         const box = snapshots.get(boxId);
-        // 快照 = 撤销时的回滚目标（唯一权威来源）；opens_start = 「划拨后是否开箱」的基线
+        // 快照 = 来源公司/保管人/开箱基线（接受时归属转移的对照来源；取消/拒收时箱不动）
         await tx.run(
           "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id,opens_start) VALUES (?,?,?,?,?)",
           [id, boxId, box.org_id, box.owner_id, Number(box.opens) || 0]
         );
-        // 归属即时转移，与单据同一事务。保管人清空：旧保管人不应再跨公司看到这批箱子
-        await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id='', owner='' WHERE id=?", [
-          String(target.id),
-          target.name,
-          boxId,
-        ]);
+        // R25：创建不转移归属——箱子仍属来源公司，接受时才转移（acceptTransfer）。
       }
-      // R13：归属跨公司迁移后公司默认层随之切换——同事务刷新策略生效值快照，
-      // 提交后按既有通道下发（划拨两态 ∈ ENDED，无任务覆盖，公司层直接生效）。
-      await this.refresh(sorted, tx);
       await addTaskLog(tx, {
         taskId: id,
-        status: "已划拨",
+        status: "待接受",
         action: "提交划拨",
         actor,
         note,
@@ -951,6 +966,7 @@ export class ReportPolicy {
           })),
           toOrgId: String(target.id),
           toOrgName: target.name,
+          ...(trackingNo ? { trackingNo } : {}),
         },
       });
       if (clientToken)
@@ -960,16 +976,262 @@ export class ReportPolicy {
         );
       result = { id, idempotent: false };
     });
-    // 幂等重放不重复下发；真正转移了归属才推策略（公司层随归属切换）
-    if (result && !result.idempotent) this.onPolicyChanged?.(boxIds);
+    // R25：创建未转移归属，不推策略（公司层随归属切换在接受时发生，见 acceptTransfer）。
     return result;
   }
 
   /**
-   * 撤销划拨（§4）：仅 kind=划拨 且 status=已划拨 可撤。事务内锁单锁箱后逐台实时判定四类守卫，
-   * 任一不合格 → 整单禁撤（状态不变、归属不动），409 带逐台原因；全合格 → 归属退回建单快照
-   * （sample_task_box.org_id/owner_id）+ status=已撤销 + 审计。不删行：箱单与日志全部保留。
-   * 已撤销不可再撤，也没有「撤销撤销」（D-8）。
+   * 接受划拨（R25①，任务 #71）：仅 kind=划拨 且 status=待接受 可接受；目标分公司管理员确认
+   * （身份/权限门在控制器：task:transfer:accept＋目标 manageOrgIds）。事务内锁单锁箱后逐台复核
+   * （箱子还在、未停用、归属仍属建单快照来源——接受前被改挂/停用的整单拒），全合格 → 归属转移到
+   * 目标公司＋保管人清空＋公司默认层刷新＋status=已完成＋审计。接受后不可撤销，只能重新划拨。
+   * 带 status 条件更新：并发第二次接受落 0 行 → 整体回滚。
+   */
+  async acceptTransfer(taskId, { actor = {} } = {}) {
+    let result = null;
+    let movedIds = [];
+    await this.db.transaction(async (tx) => {
+      const task = await tx.get(
+        "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+        [taskId]
+      );
+      if (!task) throw notVisible("划拨单不存在或不在你的管理范围内");
+      if (task.kind !== "划拨") throw conflict("只有划拨单可以接受");
+      if (task.status !== "待接受") throw conflict("任务状态已改变，请刷新后重试");
+      const body = parse(task.body) || {};
+      const target = await tx.get("SELECT id,name FROM sys_dept WHERE id=? AND status=1", [
+        String(task.to_org_id ?? ""),
+      ]);
+      if (!target) throw conflict("目标公司已停用或不存在，无法接受");
+      const links = await tx.all(
+        "SELECT box_id,org_id,owner_id,opens_start FROM sample_task_box WHERE task_id=? ORDER BY box_id",
+        [taskId]
+      );
+      // 与 createTransfer 同一加锁顺序（排序后逐台 FOR UPDATE），避免交叉死锁
+      const sorted = [...links].sort((a, b) => String(a.box_id).localeCompare(String(b.box_id)));
+      const blocked = [];
+      const moved = [];
+      for (const link of sorted) {
+        const box = await tx.get(
+          "SELECT id,name,life,org_id FROM sample_box WHERE id=?" +
+            (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+          [link.box_id]
+        );
+        const entry = { boxId: link.box_id, code: link.box_id, name: box?.name || link.box_id };
+        if (!box) {
+          blocked.push({
+            ...entry,
+            reasonCode: "BOX_MISSING",
+            reason: "采样箱已删除，请刷新后重试",
+          });
+          continue;
+        }
+        if (box.life === "停用") {
+          blocked.push({
+            ...entry,
+            reasonCode: "BOX_DISABLED",
+            reason: "采样箱已停用，请刷新后重试",
+          });
+          continue;
+        }
+        if (String(box.org_id ?? "") !== String(link.org_id ?? "")) {
+          blocked.push({
+            ...entry,
+            reasonCode: "ORG_MOVED",
+            reason: "接受前归属已改挂，不再属建单时的来源公司",
+          });
+          continue;
+        }
+        moved.push(entry);
+      }
+      // 整单拒（D-2 同款）：不做部分成功，逐台原因一次性回给页面
+      if (blocked.length)
+        throw Object.assign(conflict(blocked[0].reason), {
+          data: { blocked, totalCount: links.length, blockedCount: blocked.length },
+        });
+      const acceptedAt = new Date().toISOString();
+      movedIds = moved.map((item) => item.boxId);
+      for (const item of moved) {
+        // 归属接受时转移＋保管人清空：旧保管人不应再跨公司看到这批箱子（与旧 createTransfer 同口径）
+        await tx.run("UPDATE sample_box SET org_id=?, org=?, owner_id='', owner='' WHERE id=?", [
+          String(target.id),
+          target.name,
+          item.boxId,
+        ]);
+      }
+      // R13：归属跨公司迁移后公司默认层随之切换——同事务刷新，提交后下发
+      await this.refresh(
+        moved.map((item) => item.boxId),
+        tx
+      );
+      const updated = await tx.run(
+        "UPDATE sample_task SET status='已完成' WHERE id=? AND status='待接受'",
+        [taskId]
+      );
+      if (!Number(updated?.changes ?? updated?.affectedRows ?? 0))
+        throw conflict("任务状态已改变，请刷新后重试");
+      await addTaskLog(tx, {
+        taskId,
+        status: "已完成",
+        action: "接受划拨",
+        actor,
+        at: acceptedAt,
+        detail: {
+          count: moved.length,
+          toOrgId: String(target.id),
+          toOrgName: target.name,
+          boxes: moved.map((m) => ({ boxId: m.boxId, code: m.code, name: m.name })),
+          ...(body.trackingNo ? { trackingNo: body.trackingNo } : {}),
+        },
+      });
+      result = {
+        id: taskId,
+        status: "已完成",
+        acceptedAt,
+        acceptedBy: String(actor.name || ""),
+        acceptedById: String(actor.id || ""),
+        count: moved.length,
+        toOrg: { id: String(target.id), name: target.name },
+      };
+    });
+    // 归属转移了才推策略（公司层随归属切换）；幂等/失败不推
+    if (result) this.onPolicyChanged?.(movedIds);
+    return result;
+  }
+
+  /**
+   * 取消划拨（R25②，创建方出口）：仅 kind=划拨 且 status=待接受 可取消；创建方身份门在控制器。
+   * 接受前箱未动，取消无守卫（区别于旧撤销逐台禁撤）：归属不动、只把单据作废为已取消＋审计。
+   * 备注选填 ≤100。带 status 条件更新兜并发。
+   */
+  async cancelTransfer(taskId, { note = "", actor = {} } = {}) {
+    const remark = String(note ?? "")
+      .trim()
+      .slice(0, 100);
+    let result = null;
+    await this.db.transaction(async (tx) => {
+      const task = await tx.get(
+        "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+        [taskId]
+      );
+      if (!task) throw notVisible("划拨单不存在或不在你的管理范围内");
+      if (task.kind !== "划拨") throw conflict("只有划拨单可以取消");
+      if (task.status !== "待接受") throw conflict("任务状态已改变，请刷新后重试");
+      const cancelledAt = new Date().toISOString();
+      const updated = await tx.run(
+        "UPDATE sample_task SET status='已取消' WHERE id=? AND status='待接受'",
+        [taskId]
+      );
+      if (!Number(updated?.changes ?? updated?.affectedRows ?? 0))
+        throw conflict("任务状态已改变，请刷新后重试");
+      await addTaskLog(tx, {
+        taskId,
+        status: "已取消",
+        action: "取消划拨",
+        actor,
+        note: remark,
+        at: cancelledAt,
+        detail: {
+          count: Number(
+            (await tx.get("SELECT COUNT(*) AS n FROM sample_task_box WHERE task_id=?", [taskId])).n
+          ),
+        },
+      });
+      result = { id: taskId, status: "已取消", cancelledAt, cancelledBy: String(actor.name || "") };
+    });
+    return result;
+  }
+
+  /**
+   * 拒收划拨（R25②，接收方出口）：仅 kind=划拨 且 status=待接受 可拒收；目标 manageOrgIds＋task:reject
+   * 门在控制器。原因必填 ≤100（沿用签收拒收模式）。箱不动 → 已拒收终态＋审计。带 status 条件更新兜并发。
+   */
+  async rejectTransfer(taskId, { reason = "", actor = {} } = {}) {
+    const note = String(reason ?? "").trim();
+    if (!note || note.length > 100) throw badRequest("请填写拒收原因（100 字以内）");
+    let result = null;
+    await this.db.transaction(async (tx) => {
+      const task = await tx.get(
+        "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+        [taskId]
+      );
+      if (!task) throw notVisible("划拨单不存在或不在你的管理范围内");
+      if (task.kind !== "划拨") throw conflict("只有划拨单可以拒收");
+      if (task.status !== "待接受") throw conflict("任务状态已改变，请刷新后重试");
+      const rejectedAt = new Date().toISOString();
+      const updated = await tx.run(
+        "UPDATE sample_task SET status='已拒收' WHERE id=? AND status='待接受'",
+        [taskId]
+      );
+      if (!Number(updated?.changes ?? updated?.affectedRows ?? 0))
+        throw conflict("任务状态已改变，请刷新后重试");
+      await addTaskLog(tx, {
+        taskId,
+        status: "已拒收",
+        action: "拒收划拨",
+        actor,
+        note,
+        at: rejectedAt,
+        detail: {
+          count: Number(
+            (await tx.get("SELECT COUNT(*) AS n FROM sample_task_box WHERE task_id=?", [taskId])).n
+          ),
+        },
+      });
+      result = {
+        id: taskId,
+        status: "已拒收",
+        rejectedAt,
+        rejectedBy: String(actor.name || ""),
+        rejectReason: note,
+      };
+    });
+    return result;
+  }
+
+  /**
+   * 补填/修改快递单号（R25③）：仅 kind=划拨 且 status=待接受；创建方身份门在控制器。
+   * 单号 ≤64（空串＝清空，选填语义）；写 body.trackingNo＋审计。接受后只读（status 门拦）。
+   */
+  async trackingTransfer(taskId, { trackingNo = "", actor = {} } = {}) {
+    if (typeof trackingNo !== "string") throw badRequest("快递单号格式不正确");
+    const no = trackingNo.trim().slice(0, 64);
+    let result = null;
+    await this.db.transaction(async (tx) => {
+      const task = await tx.get(
+        "SELECT * FROM sample_task WHERE id=?" + (tx.dialect === "mysql" ? " FOR UPDATE" : ""),
+        [taskId]
+      );
+      if (!task) throw notVisible("划拨单不存在或不在你的管理范围内");
+      if (task.kind !== "划拨") throw conflict("只有划拨单可以补填快递单号");
+      if (task.status !== "待接受") throw conflict("接受后快递单号只读，不能修改");
+      const body = parse(task.body) || {};
+      if (no) body.trackingNo = no;
+      else delete body.trackingNo;
+      const updated = await tx.run("UPDATE sample_task SET body=? WHERE id=? AND status='待接受'", [
+        JSON.stringify(body),
+        taskId,
+      ]);
+      if (!Number(updated?.changes ?? updated?.affectedRows ?? 0))
+        throw conflict("任务状态已改变，请刷新后重试");
+      await addTaskLog(tx, {
+        taskId,
+        status: "待接受",
+        action: "补填快递单号",
+        actor,
+        note: no,
+        detail: { trackingNo: no },
+      });
+      result = { id: taskId, status: "待接受", trackingNo: no };
+    });
+    return result;
+  }
+
+  /**
+   * 撤销划拨（§4，R24 已下线路由、R25 保留领域本体）：仅 kind=划拨 且 status=已划拨 可撤。
+   * 事务内锁单锁箱后逐台实时判定四类守卫，任一不合格 → 整单禁撤（状态不变、归属不动），409 带逐台原因；
+   * 全合格 → 归属退回建单快照（sample_task_box.org_id/owner_id）+ status=已撤销 + 审计。不删行。
+   * R25 起新单不再落已划拨（创建落待接受），本方法只服务历史已划拨单回归用例直调与审计口径。
    */
   async revokeTransfer(taskId, { reason = "", actor = {} } = {}) {
     const note = String(reason ?? "").trim();
@@ -1087,9 +1349,11 @@ export class ReportPolicy {
   }
 
   /**
-   * 划拨单读模型（§6.2）：创建响应、幂等重放、详情共用。
+   * 划拨单读模型（R25）：创建响应、幂等重放、详情共用。
    * 「原公司」一律按 sample_task_box 快照聚合（跨公司批量时 from 多条，D-12）；
-   * status=已划拨 时逐台实时评估撤销守卫，给 revocable/reasonCode。
+   * 箱清单同时给当前归属/保管人（接受前=来源、接受后=目标＋保管人清空）＋电量/最近上报/位置（小地图用）。
+   * 终态事实（接受/拒收/取消/撤销人·时间·原因）从流转日志读，不伪造；历史已划拨单 legacyTransfer 标。
+   * 状态读兼容归一（transferStatusOf：历史已划拨→已完成）。编号脱敏/电量权限遮挡在控制器层做。
    */
   async transferView(taskId) {
     const row = await this.db.get("SELECT * FROM sample_task WHERE id=? AND kind='划拨'", [taskId]);
@@ -1112,16 +1376,23 @@ export class ReportPolicy {
     const fromMap = new Map();
     const boxes = [];
     for (const link of links) {
-      const box = await this.db.get("SELECT id,name,life,org_id,opens FROM sample_box WHERE id=?", [
-        link.box_id,
-      ]);
+      const box = await this.db.get(
+        "SELECT id,name,life,org_id,org,owner_id,owner,battery_mv,battery_model,charge,last_report_at,gps_lng,gps_lat,gps_info,lbs_lng,lbs_lat,lbs_at FROM sample_box WHERE id=?",
+        [link.box_id]
+      );
       const orgId = String(link.org_id ?? "");
       const orgName = orgNameOf.get(orgId) || orgId || "总公司";
       const bucket = fromMap.get(orgId) || { orgId, orgName, count: 0 };
       bucket.count += 1;
       fromMap.set(orgId, bucket);
       const ownerId = String(link.owner_id ?? "");
-      const hit = row.status === "已划拨" ? await revokeBlock(this.db, box, link, row) : null;
+      const curOrgId = String(box?.org_id ?? "");
+      let gpsAt;
+      try {
+        gpsAt = box?.gps_info ? JSON.parse(box.gps_info).at || "" : "";
+      } catch {
+        gpsAt = "";
+      }
       boxes.push({
         boxId: link.box_id,
         code: link.box_id,
@@ -1131,23 +1402,46 @@ export class ReportPolicy {
         fromOwnerId: ownerId,
         fromOwner: ownerNameOf.get(ownerId) || "",
         life: box?.life || "",
-        revocable: row.status === "已划拨" && !hit,
-        ...(hit ? { reasonCode: hit.reasonCode, reason: hit.reason } : {}),
+        // 当前归属/保管人（接受时转移＋清空）；箱已删除时回退快照来源
+        orgId: curOrgId || orgId,
+        org: box?.org || orgNameOf.get(curOrgId) || orgName,
+        ownerId: String(box?.owner_id ?? ""),
+        owner: box?.owner || "",
+        batteryMv:
+          box?.battery_mv == null || box?.battery_mv === "" ? null : Number(box.battery_mv),
+        batteryUsable: batteryPercentOf(box),
+        lastReportAt: box?.last_report_at || "",
+        gpsLng: box?.gps_lng == null ? null : Number(box.gps_lng),
+        gpsLat: box?.gps_lat == null ? null : Number(box.gps_lat),
+        gpsAt,
+        lbsLng: box?.lbs_lng == null ? null : Number(box.lbs_lng),
+        lbsLat: box?.lbs_lat == null ? null : Number(box.lbs_lat),
+        lbsAt: box?.lbs_at || "",
       });
     }
-    const revokeLog =
-      row.status === "已撤销"
-        ? await this.db.get(
-            "SELECT created_at,note FROM sample_task_log WHERE task_id=? AND action='撤销划拨' ORDER BY created_at DESC LIMIT 1",
-            [taskId]
-          )
-        : null;
+    // 终态事实：各动作最近一条流转日志（接受/拒收/取消/撤销），不伪造历史接受记录
+    const factLog = async (action) =>
+      this.db.get(
+        "SELECT created_at,actor_id,actor_name,note FROM sample_task_log WHERE task_id=? AND action=? ORDER BY created_at DESC LIMIT 1",
+        [taskId, action]
+      );
+    const [acceptLog, rejectLog, cancelLog, revokeLog] = await Promise.all([
+      factLog("接受划拨"),
+      factLog("拒收划拨"),
+      factLog("取消划拨"),
+      factLog("撤销划拨"),
+    ]);
     return {
       id: row.id,
       kind: row.kind,
-      status: row.status,
+      status: transferStatusOf(row.status),
       name: row.name,
       createdAt: row.created_at,
+      createdBy: body.createdBy || "",
+      createdById: body.createdById || "",
+      note: body.note || "",
+      trackingNo: body.trackingNo || "",
+      legacy: body.legacyTransfer === true,
       toOrg: {
         id: String(row.to_org_id ?? ""),
         name: body.toOrg || orgNameOf.get(String(row.to_org_id ?? "")) || "",
@@ -1155,7 +1449,28 @@ export class ReportPolicy {
       from: [...fromMap.values()],
       boxCount: links.length,
       boxes,
-      steps: [],
+      steps: TRANSFER_TRACK,
+      ...(acceptLog
+        ? {
+            acceptedAt: acceptLog.created_at,
+            acceptedBy: acceptLog.actor_name || "",
+            acceptedById: acceptLog.actor_id || "",
+          }
+        : {}),
+      ...(rejectLog
+        ? {
+            rejectedAt: rejectLog.created_at,
+            rejectedBy: rejectLog.actor_name || "",
+            rejectReason: rejectLog.note || "",
+          }
+        : {}),
+      ...(cancelLog
+        ? {
+            cancelledAt: cancelLog.created_at,
+            cancelledBy: cancelLog.actor_name || "",
+            cancelNote: cancelLog.note || "",
+          }
+        : {}),
       ...(revokeLog ? { revokedAt: revokeLog.created_at, revokeReason: revokeLog.note || "" } : {}),
     };
   }

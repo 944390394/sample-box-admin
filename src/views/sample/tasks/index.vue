@@ -143,7 +143,9 @@
             {{ opt.label }}
             <span class="d">{{ opt.desc }}</span>
           </label>
-          <div class="type-sep">划拨时状态＝已划拨/已撤销；历史调拨只读收尾（P2-2）</div>
+          <div class="type-sep">
+            划拨时状态＝待接受/已完成/已取消/已拒收（历史已划拨/已撤销只读）；历史调拨只读收尾（P2-2）
+          </div>
         </el-popover>
 
         <el-tree-select
@@ -591,6 +593,7 @@ const tabs = computed(() => [
 ]);
 
 // D1（R22 批2）：工作台桶 chip 文案，与 home 卡片标题一致；地址栏 bucket= 可关闭（参照箱子页 tile=）。
+// D-1（#81）：补划拨两桶（R25 服务端 BUCKET_KEYS 已支持，落地自动 kind=划拨），label 与 mp 统一。
 const BUCKET_LABELS: Record<string, string> = {
   sampling: "采样待推进",
   arrive: "待确认到达",
@@ -598,6 +601,8 @@ const BUCKET_LABELS: Record<string, string> = {
   returning: "待接收退回",
   send: "待寄出",
   overLimit: "开箱超限",
+  transferAccept: "划拨待接受",
+  transferCancel: "划拨可取消",
 };
 const bucketLabel = computed(() => BUCKET_LABELS[query.bucket] || query.bucket);
 const orgLabel = computed(
@@ -632,7 +637,9 @@ async function load() {
     mine: query.mine === "1" ? "1" : undefined,
     // P1-4：mine=1 也带 status（服务端 mineRows 内存过滤，可组合）；「全部」页签不传 status
     status: query.status === "全部" ? undefined : query.status || undefined,
-    // D1：桶参数（与 todo 同谓词）；非法值服务端静默忽略，这里只传已知桶
+    // D1：桶参数（与 todo 同谓词）；非法值服务端静默忽略，这里只传已知桶。
+    // D-1（#81）：划拨两桶随 BUCKET_LABELS 放行（服务端落地自动 kind=划拨）；
+    // API 类型联合仍是物流六桶（类型文件不在本批文件面），沿用既有窄化断言透传。
     bucket: BUCKET_LABELS[query.bucket] ? (query.bucket as TaskQuery["bucket"]) : undefined,
     kind: query.kind || undefined,
     // D4（批5）：默认最近更新；表头可切回创建

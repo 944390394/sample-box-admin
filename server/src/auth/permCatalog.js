@@ -206,7 +206,7 @@ export const TASK_PERMS = [
     9410,
     "task:create:transfer",
     "新建划拨单",
-    "批量把采样箱划拨给另一个公司，提交即生效、归属立即转移",
+    "批量把采样箱划拨给另一个公司：创建后待目标分公司管理员接受，接受时归属转移；接受前可取消/补填快递单号",
     "task",
     "do",
     TASK_ENTER
@@ -299,6 +299,17 @@ export const TASK_PERMS = [
     TASK_ENTER
   ),
   item(9426, "task:seal", "封箱", "样品装好后封箱", "task", "do", TASK_ENTER),
+  // R25（#71/064）划拨三态：接受划拨＝目标分公司管理员确认，接受时归属立即转移＋保管人清空。
+  // 创建（task:create:transfer）仍归创建方；接受是接收方动作，单独授权（BRANCH_ADMIN 模板＋存量 064 补码）。
+  item(
+    9427,
+    "task:transfer:accept",
+    "接受划拨",
+    "目标分公司管理员确认接受划拨单，接受时箱子归属立即转移到本公司（保管人清空）；接受后不可撤销",
+    "task",
+    "do",
+    TASK_ENTER
+  ),
   item(
     9422,
     "task:finish",
@@ -1122,6 +1133,14 @@ export const SPLIT_062 = {
 export const SAMPLER_ENTRY_063 = ["device:box:task", "task:sample-start", "task:seal"];
 
 /**
+ * 迁移 064（R25 / 任务 #71）：划拨三态的存量补码集——接受划拨（目标分公司管理员确认）。
+ * 不是拆码（无老码→新码映射），故不进 upgradeCodes 拆分链；新库由 LEGACY_DEFAULTS.BRANCH_ADMIN 覆盖，
+ * 存量 BRANCH_ADMIN 角色由 064 只补不删（063 同款）。创建/取消/拒收/补单号不另设码：
+ * 创建沿用 task:create:transfer，取消/补单号按创建方身份门，拒收沿用 task:reject（接收方）。
+ */
+export const TRANSFER_ACCEPT_064 = ["task:transfer:accept"];
+
+/**
  * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
  * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
  */
@@ -1247,6 +1266,9 @@ const LEGACY_DEFAULTS = {
     //（存量库由 057 幂等补码；角色页保存过的以保存为准）。
     // R24（#70）撤销下线：本模板不再补 task:transfer:revoke，只留 task:create:transfer。
     "task:create:transfer",
+    // R25（#71/064）划拨三态：分公司管理员是接受划拨主责角色（目标方确认），补接受码
+    //（存量库由 064 幂等补码；角色页保存过的以保存为准）。
+    "task:transfer:accept",
     // R13 公司策略中心：分公司管理员是本公司策略主责角色（存量库由 058 幂等补码；
     // manageOrgIds 闸门限本公司子树，总部管理员可改各分公司）。
     "device:box:policyCompany",

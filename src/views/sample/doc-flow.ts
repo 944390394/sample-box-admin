@@ -6,7 +6,7 @@
  * 三类单据（kind 是权威来源，单号前缀只是显示）：
  * - 采样 TK-：10 状态，trip 单向/双向/不寄送；
  * - 送检 IN-：9 状态，「已签收」不是持久状态（待签收上签收直接落待检测）；
- * - 划拨 AL-：提交即生效，只有 已划拨/已撤销 两个终态，无物流步骤。
+ * - 划拨 AL-（R25 三态）：待接受→已完成＋接受前出口已取消/已拒收；历史已划拨/已撤销只读别名。
  * 旧存储值「调拨」只读保留，不在 DOC_KINDS 新建枚举内。
  */
 import {
@@ -25,8 +25,15 @@ import {
 
 export { DOC_KINDS, ENDED, ENDED_OK, ENDED_VOID, isEnded, nextOf, prefixOf, signTargetOf, stepsOf };
 
-/** 划拨单持久状态：恰好两个终态（提交即生效、无物流）。 */
-export const TRANSFER_STATUS = ["已划拨", "已撤销"] as const;
+/** 划拨单持久状态（R25 三态）：待接受＋四终态＋历史已划拨别名（读兼容）。 */
+export const TRANSFER_STATUS = [
+  "待接受",
+  "已完成",
+  "已取消",
+  "已拒收",
+  "已撤销",
+  "已划拨",
+] as const;
 
 /**
  * 送检单 9 个持久状态 = 主路径 ∪ 返程路径 ∪ {已拒收, 已取消}（去重）。

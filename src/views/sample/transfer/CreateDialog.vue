@@ -10,10 +10,10 @@
   >
     <p class="lead">
       选目标公司，再勾选一批箱子。
-      <b>提交即生效</b>
-      ：箱子归属立刻转到目标公司，不寄出、不签收。提交前需输入登录密码二次确认，
-      <b>提交后不可撤销</b>
-      （退回/改派请用列表的「重新划拨」）。
+      <b>创建后待目标分公司管理员接受</b>
+      ：接受时箱子归属才转到目标公司（保管人清空）。接受前创建方可取消、接收方可拒收（原因必填）；
+      <b>接受后不可撤销</b>
+      （退回/改派请用列表的「重新划拨」）。提交前需输入登录密码二次确认。
     </p>
 
     <el-form label-width="90px" @submit.prevent>
@@ -35,6 +35,14 @@
           v-model="name"
           maxlength="120"
           placeholder="比如：华南区开工补给"
+          style="width: 420px"
+        />
+      </el-form-item>
+      <el-form-item label="快递单号">
+        <el-input
+          v-model="trackingNo"
+          maxlength="64"
+          placeholder="选填，接受前可补填/修改，接受后只读"
           style="width: 420px"
         />
       </el-form-item>
@@ -176,7 +184,7 @@
       <span class="footer-hint text-muted">
         {{
           selected.size
-            ? `提交后 ${selected.size} 台箱子立刻归属 ${targetName || "目标公司"}`
+            ? `提交后 ${selected.size} 台箱子待 ${targetName || "目标公司"} 管理员接受`
             : "请先选择至少 1 台箱子"
         }}
       </span>
@@ -213,7 +221,8 @@
         <span class="arrow">→</span>
         <b>{{ targetName || "目标公司" }}</b>
       </p>
-      <p class="warn-line">提交后不可撤销；如需退回或改派，请在列表使用「重新划拨」。</p>
+      <p v-if="trackingNo.trim()" class="route-line mono">快递单号：{{ trackingNo.trim() }}</p>
+      <p class="warn-line">提交后待目标分公司管理员接受；接受前可取消/拒收。</p>
     </div>
     <el-form label-width="90px" @submit.prevent>
       <el-form-item label="登录密码" required>
@@ -264,6 +273,8 @@ const orgOptions = ref<OptionItem[]>([]);
 const toOrgId = ref("");
 const name = ref("");
 const note = ref("");
+/** R25③ 快递单号选填 ≤64（接受前创建方可补填/修改，接受后只读）。 */
+const trackingNo = ref("");
 const q = ref("");
 const orgId = ref("");
 const life = ref("");
@@ -420,13 +431,14 @@ async function confirmSubmit() {
       toOrgId: toOrgId.value,
       boxIds: [...selected.value],
       note: note.value.trim() || undefined,
+      trackingNo: trackingNo.value.trim() || undefined,
       clientToken,
       password: password.value,
     });
     ElMessage.success(
       result.idempotent
         ? "已提交过，返回原划拨单"
-        : `已提交，${result.boxCount} 台箱子归属已转到 ${result.toOrg.name}`
+        : `已提交，${result.boxCount} 台箱子待 ${result.toOrg.name} 管理员接受`
     );
     confirmOpen.value = false;
     emit("saved");
@@ -455,6 +467,7 @@ async function onOpen() {
       : `t-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   name.value = "";
   note.value = "";
+  trackingNo.value = "";
   q.value = "";
   orgId.value = "";
   life.value = "";

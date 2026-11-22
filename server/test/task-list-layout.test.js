@@ -210,15 +210,25 @@ async function seed(s) {
     senderId: "21",
     signerId: "60",
   });
-  // 划拨两态：提交即生效一张＋撤销一张
+  // R25 划拨三态：接受一张（已完成）＋历史撤销一张（已撤销）。创建落待接受，接受才转移归属。
   const b8 = await s.makeBox("21");
   const al = await s.run(s.controller.createTransfer.bind(s.controller), s.admin, {
-    body: { name: "划拨已生效", toOrgId: "2", boxIds: [b8.id], password: CONFIRM_PW },
+    body: { name: "划拨已完成", toOrgId: "2", boxIds: [b8.id], password: CONFIRM_PW },
+  });
+  await s.run(s.controller.acceptTransfer.bind(s.controller), s.admin, {
+    params: { id: al.data.id },
+    body: {},
   });
   const b9 = await s.makeBox("21");
   const alRev = await s.run(s.controller.createTransfer.bind(s.controller), s.admin, {
     body: { name: "划拨已撤销", toOrgId: "2", boxIds: [b9.id], password: CONFIRM_PW },
   });
+  // 历史撤销单：还原 R24 前「提交即生效」形态（已划拨＋归属已转移），再直调撤销领域本体
+  await s.db.run(
+    "UPDATE sample_box SET org_id='2', org='深圳分公司', owner_id='', owner='' WHERE id=?",
+    [b9.id]
+  );
+  await s.db.run("UPDATE sample_task SET status='已划拨' WHERE id=?", [alRev.data.id]);
   await s.run(s.controller.revokeTransfer.bind(s.controller), s.admin, {
     params: { id: alRev.data.id },
     body: { reason: "验收撤销" },
@@ -344,10 +354,10 @@ test("批4：status 逗号多选落地行数＝counts 同态之和；与 kind/mi
       (kindBase.data.counts["待采样"] || 0) + (kindBase.data.counts["采样中"] || 0)
     );
     assert.ok(kindCombo.data.list.every((r) => r.displayKind === "采样后送检"));
-    // 划拨两态切换口径：kind=划拨 时 status=已划拨,已撤销 落地两张
-    const al = await s.tasks(s.admin, { kind: "划拨", status: "已划拨,已撤销", pageSize: 100 });
+    // R25 划拨三态切换口径：kind=划拨 时 status=已完成,已撤销 落地两张
+    const al = await s.tasks(s.admin, { kind: "划拨", status: "已完成,已撤销", pageSize: 100 });
     assert.equal(al.data.total, 2);
-    assert.deepEqual(al.data.list.map((r) => r.status).sort(), ["已划拨", "已撤销"].sort());
+    assert.deepEqual(al.data.list.map((r) => r.status).sort(), ["已完成", "已撤销"].sort());
     // 划拨×物流态＝合法筛选但无匹配（0 行是事实不是 R-c）
     const alNone = await s.tasks(s.admin, { kind: "划拨", status: "待采样", pageSize: 100 });
     assert.equal(alNone.data.total, 0);

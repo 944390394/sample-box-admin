@@ -36,9 +36,12 @@ export function taskToneFor(task?: { status?: string; kind?: string; localOnly?:
   return taskTone(status);
 }
 
-/** 划拨单状态色：已划拨 success / 已撤销 info（neutral）。 */
+/** 划拨单状态色（R25 三态）：待接受 warn / 已完成 ok / 已取消 info / 已拒收 danger / 已撤销 info·历史；已划拨＝历史别名 ok。 */
 export function transferTone(status?: string): Tone {
-  return status === "已划拨" ? "success" : "info";
+  if (status === "待接受") return "warning";
+  if (status === "已完成" || status === "已划拨") return "success";
+  if (status === "已拒收") return "danger";
+  return "info";
 }
 
 /** 录像请求状态。 */

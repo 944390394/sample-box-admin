@@ -17,7 +17,11 @@
  *   退回中→已退回（待检测/已检测可发起退回，退回目的地＝寄出方 fromOrg＝建单时箱归属：
  *   单向回原寄出分公司，双向回检测站）。
  *   新建合并单恒写 tripDerived=true＋派生 trip；旧数据（无 tripDerived 标记）只读兼容。
- * - 划拨 AL-：提交即生效，只有 已划拨/已撤销 两个终态，无物流步骤，只能走撤销端点、不走通用 transition。
+ * - 划拨 AL-（R25 三态，任务 #71）：创建→待接受→（目标分公司管理员）接受→已完成；归属在接受时转移。
+ *   接受前出口＝创建方取消（已取消）＋接收方拒收（已拒收，原因必填）；接受后不可撤销，只能重新划拨。
+ *   待接受是进行中态（占用箱子，不在 ENDED）；已完成/已取消/已拒收是终态。无物流步骤，
+ *   走专用 accept/cancel/reject/tracking 端点、不走通用 transition（nextOf 恒 []）。
+ *   历史两态（R24 前）：已划拨→已完成（064 迁移映射，接受人不伪造）、已撤销只读保留——两者仍在 ENDED 当别名。
  *
  * 只读保留的旧 kind（历史进度条仍要渲染、在途旧单仍能收尾，但不再新建）：
  * - 送检 IN-：9 状态，INSPECT_* 常量保留供迁移映射（LEGACY_*）引用；
@@ -49,18 +53,21 @@ export function deriveTrip(boxOrgId, stationOrgId, samplerOrgId) {
  * - 采样＝仅本地采样（待采样→采样中→已封箱终态OK，箱留采样单位，无寄送/检测站步）；
  * - 送检＝仅寄送（箱已采样封箱在寄出方，待寄出→运送中→待签收→待检测→已检测＋拒收/退回/取消）；
  * - 采样后送检＝采样＋送检合并全流（原 P6 合并单，R22 方向派生沿用）；
- * - 划拨＝归属立即转移（走 createTransfer）。
+ * - 划拨＝归属接受时转移（走 createTransfer→accept，R25 三态）。
  * 旧存储值「调拨」只读保留，不在其中。旧「送检」只读形态与新送检同流（INSPECT_*）。
  */
 export const DOC_KINDS = ["采样", "送检", "采样后送检", "划拨"];
 
-/** 走完流程结束的：老任务完成、旧调拨签收完、检测站全部开始检测、划拨提交即生效。 */
+/** 走完流程结束的：老任务完成、旧调拨签收完、检测站全部开始检测、划拨接受完成（已划拨＝历史别名）。 */
 export const ENDED_OK = ["已完成", "已签收", "已检测", "已划拨"];
-/** 中途作废结束的（含划拨撤销）。 */
+/** 中途作废结束的（含划拨取消/拒收/历史撤销）。 */
 export const ENDED_VOID = ["已取消", "已拒收", "已退回", "已撤销"];
 
 export const ENDED = [...ENDED_OK, ...ENDED_VOID];
-/** SQL 里用：t.status NOT IN (ENDED_SQL)。划拨两态必须在此，否则被划拨过的箱子永远选不上（功能级死锁）。 */
+/**
+ * SQL 里用：t.status NOT IN (ENDED_SQL)。划拨终态（已完成/已取消/已拒收＋历史已划拨/已撤销）必须在此，
+ * 否则被划拨过的箱子永远选不上（功能级死锁）；待接受是进行中态、不在此——接受前箱子被这张单占用。
+ */
 export const ENDED_SQL = ENDED.map((s) => `'${s}'`).join(",");
 
 /** 这张单是不是已经结束了：页面用它决定还显不显推进按钮、要不要继续轮询。 */
@@ -73,8 +80,17 @@ export const INSPECT_STEPS = ["待检测", "已检测"];
 /** 退回后的返程两步。 */
 export const RETURN_STEPS = ["退回中", "已退回"];
 
-/** 划拨无物流步骤：进度条不渲染。 */
+/** 划拨无物流步骤：通用任务进度条不渲染（详情页用 TRANSFER_TRACK 三步条，R25）。 */
 export const TRANSFER_STEPS = [];
+/**
+ * 划拨三态主路径（R25，任务 #71）：待接受→已完成。待接受是进行中态（占用箱子）；
+ * 接受前出口见 TRANSFER_EXIT；历史已划拨/已撤销是只读别名（LEGACY_STATUS_MAP.划拨）。
+ */
+export const TRANSFER_FLOW = ["待接受", "已完成"];
+/** 接受前支链出口（终态作废）：创建方取消→已取消；接收方拒收→已拒收（原因必填）。 */
+export const TRANSFER_EXIT = ["已取消", "已拒收"];
+/** 划拨详情三步条（显示用，非持久态）：创建划拨→接受划拨→已完成；终态末补支链格由页面按状态渲染。 */
+export const TRANSFER_TRACK = ["创建划拨", "接受划拨", "已完成"];
 /** 旧送检主路径 5 步（只读保留，供历史进度条与迁移映射引用；不再用于新单）。 */
 export const INSPECT_FLOW = ["待寄出", "运送中", "待签收", "待检测", "已检测"];
 /** 旧送检拒收并退回的返程路径（只读保留）。 */
@@ -222,9 +238,9 @@ export function signTargetOf(task) {
   return task.kind === "送检" || task.inspect ? "待检测" : "已签收";
 }
 
-/** 新建时的第一步；划拨提交即生效，唯一持久结果态是已划拨。 */
+/** 新建时的第一步；划拨创建后待目标分公司管理员接受（R25），接受才落已完成。 */
 export function initialOf(task) {
-  if (task.kind === "划拨") return "已划拨";
+  if (task.kind === "划拨") return "待接受";
   return stepsOf(task)[0];
 }
 
@@ -274,7 +290,7 @@ const SAMPLE_LOCAL_NEXT = {
 };
 
 /**
- * 从 status 能推进到哪些状态。划拨恒为 []（只能走撤销端点）。
+ * 从 status 能推进到哪些状态。划拨恒为 []（R25 走专用 accept/cancel/reject/tracking 端点，不走通用 transition）。
  * 合并采样单按 SAMPLE_NEXT（双向带首腿 SAMPLE_ROUND_NEXT）；旧送检/调拨/采样按各自旧流（读兼容）。
  */
 export function nextOf(task, status) {
@@ -315,11 +331,13 @@ export const LEGACY_KIND_MAP = { 送检: "采样" };
  * 状态映射（按旧 kind 分组）：未列出的状态同名保留。
  * - 送检：待寄出→已封箱、运送中→在途，其余同名（待签收/待检测/已检测/已拒收/已取消/退回中/已退回）。
  * - 旧采样：待核验→待检测、已签收→已检测、已完成→已检测（终态语义对齐），其余同名。
- * 终态语义保持：ENDED_OK→ENDED_OK、ENDED_VOID→ENDED_VOID（已签收/已完成 归并到 已检测）。
+ * - 划拨（R25/064）：历史已划拨→已完成（接受时转移语义对齐；接受人/接受时间不伪造，迁移打 legacyTransfer 标）。
+ *   已撤销只读保留（同名）。终态语义保持：ENDED_OK→ENDED_OK、ENDED_VOID→ENDED_VOID。
  */
 export const LEGACY_STATUS_MAP = {
   送检: { 待寄出: "已封箱", 运送中: "在途" },
   采样: { 待核验: "待检测", 已签收: "已检测", 已完成: "已检测" },
+  划拨: { 已划拨: "已完成" },
 };
 
 /** 迁移用：把旧 kind 映射到新 kind（映射外同名）。 */
@@ -330,4 +348,12 @@ export function migrateKind(kind) {
 /** 迁移用：把旧 kind 下的旧状态映射到新状态（映射外同名）。 */
 export function migrateStatus(kind, status) {
   return LEGACY_STATUS_MAP[kind]?.[status] ?? status;
+}
+
+/**
+ * 划拨状态读兼容（R25）：历史「已划拨」显示为「已完成」（064 已把存量映射掉，这里兜未迁移的读路径）；
+ * 其余状态同名。列表/详情/计数归一用它，避免历史单与新单两套词表。
+ */
+export function transferStatusOf(status) {
+  return migrateStatus("划拨", String(status ?? ""));
 }
