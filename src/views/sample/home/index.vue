@@ -165,11 +165,34 @@
                 <template #default="{ item }">
                   <div class="line">
                     <b>{{ item.name }}</b>
-                    <el-tag size="small" :type="lifeTone(item.life)">
+                    <!-- R23/D5：「任务中」标签＝链接 → 箱子详情·任务段（?tab=task）；其余生命周期仍普通标签 -->
+                    <el-tag
+                      v-if="item.life === '在途'"
+                      size="small"
+                      :type="lifeTone(item.life)"
+                      class="box-task-link"
+                      title="跳箱子详情的任务段"
+                      @click.stop="openBoxTaskTab(item.id)"
+                    >
+                      {{ lifeLabel(item.life) }} →
+                    </el-tag>
+                    <el-tag v-else size="small" :type="lifeTone(item.life)">
                       {{ lifeLabel(item.life) }}
                     </el-tag>
                   </div>
                   <div class="text-muted">{{ boxLine(item, "mine") }}</div>
+                  <!-- 行内推进入口：仅服务端 actions 命中才显示；跳任务详情任务段复用既有推进弹窗 -->
+                  <div v-if="boxRowActions(item.id).length" class="box-row-ops">
+                    <el-button
+                      v-for="act in boxRowActions(item.id)"
+                      :key="act.to"
+                      size="small"
+                      type="primary"
+                      @click.stop="openTaskProgress(act.taskId)"
+                    >
+                      {{ act.label }}
+                    </el-button>
+                  </div>
                 </template>
               </TodoCard>
               <TodoCard
@@ -294,6 +317,7 @@ import WorkbenchAPI, {
   type Workbench,
 } from "@/api/sample/workbench";
 import SampleBoxAPI from "@/api/sample/box";
+import PolicyAPI, { type PolicyTask } from "@/api/sample/report-policy";
 import PageHeader from "@/components/biz/PageHeader.vue";
 import StatTiles, { type StatTile } from "@/components/biz/StatTiles.vue";
 import TimeText from "@/components/biz/TimeText.vue";
@@ -305,6 +329,7 @@ import { ago, clock, toDate } from "@/utils/time";
 import { lifeTone, taskTone } from "@/utils/tone";
 import { BOX_PERM, TASK_CREATE, TRANSFER_CREATE } from "../data";
 import { graceHint, graceState } from "../boxes/grace";
+import { TASK_ACTIONS } from "../tasks/status";
 import TodoCard from "./TodoCard.vue";
 
 /**
@@ -321,6 +346,46 @@ const { enableTransferInspect, taskOfflineGraceSec, loadBoxFeatures } = useBoxFe
 const data = ref<Workbench | null>(null);
 const loading = ref(false);
 const updatedAt = ref<Date | null>(null);
+/**
+ * R23/D5（#66）：我保管的箱子行内「开始采样／封箱」入口。
+ * 显隐完全由服务端 actions 决定（与任务单列表/详情同一口径）：拉 mine=1&bucket=sampling
+ * （与工作台采样待办卡同谓词同窗口），按 boxIds 映射到箱子行；仅本人保管＋参与方＋对应权限码
+ * 三者同时满足服务端才回 action，前端不自造动作。无任务单权限或拉取失败时为空＝不显示按钮。
+ * 点按钮跳任务详情任务段深链 ?tab=task（复用详情页既有推进弹窗与原因校验），不在首页自造弹窗。
+ */
+const sampleTaskByBox = ref<Map<string, PolicyTask>>(new Map());
+const SAMPLER_ROW_ACTIONS = ["采样中", "已封箱"] as const;
+function boxRowActions(boxId: string) {
+  const task = sampleTaskByBox.value.get(boxId);
+  if (!task?.actions?.length) return [];
+  return SAMPLER_ROW_ACTIONS.filter((to) => task.actions!.includes(to)).map((to) => ({
+    to,
+    label: TASK_ACTIONS[to] || to,
+    taskId: task.id,
+  }));
+}
+function openBoxTaskTab(boxId: string) {
+  void router.push({ path: `/device/boxes/${boxId}`, query: { tab: "task" } });
+}
+function openTaskProgress(taskId: string) {
+  void router.push({ path: `/task/detail/${taskId}`, query: { tab: "task" } });
+}
+async function loadSampleActions() {
+  if (!can(BOX_PERM.task)) {
+    sampleTaskByBox.value = new Map();
+    return;
+  }
+  try {
+    const page = await PolicyAPI.tasks({ mine: "1", bucket: "sampling", pageSize: 100 });
+    const map = new Map<string, PolicyTask>();
+    for (const task of page.list || [])
+      for (const boxId of task.boxIds || []) if (!map.has(boxId)) map.set(boxId, task);
+    sampleTaskByBox.value = map;
+  } catch {
+    /* 拉取失败不显示行内按钮（fail-closed），不影响工作台主体 */
+    sampleTaskByBox.value = new Map();
+  }
+}
 
 /** 操作日志页的门禁码，与侧栏菜单（server/menus.js）同一项。 */
 const OPLOG_READ = "sys:oplog:read";
@@ -701,6 +766,8 @@ async function load() {
     }
     data.value = next;
     updatedAt.value = new Date();
+    // 行内采样入口的服务端 actions（与工作台同轮刷新；失败 fail-closed 不显示按钮）
+    await loadSampleActions();
   } finally {
     loading.value = false;
   }
@@ -740,6 +807,20 @@ onBeforeUnmount(() => window.clearInterval(poll));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* R23/D5：「任务中」标签链（虚线边框示意可点）＋行内推进按钮区 */
+.box-task-link {
+  cursor: pointer;
+  border-style: dashed;
+}
+.box-task-link:hover {
+  opacity: 0.85;
+}
+.box-row-ops {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 6px;
 }
 /* KPI 自适应：<1200px 三列、≤640px 两列（只覆盖本页，不动 StatTiles 全局口径） */
 @media (max-width: 1199px) {

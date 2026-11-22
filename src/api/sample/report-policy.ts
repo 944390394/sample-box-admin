@@ -91,6 +91,8 @@ export interface PolicyTask {
   recordVideo?: boolean;
   /** 列表用：我现在能把它推进到哪些状态。 */
   actions?: string[];
+  /** D4（R23 批5）：最近一条流转日志时间（建单日志兜底）；「最近更新」列与默认排序键同源。 */
+  updatedAt?: string;
 }
 export interface TaskOrg {
   id: string;
@@ -309,13 +311,14 @@ export interface TaskTrackResult {
 }
 export type TaskCreate = Omit<
   PolicyTask,
-  "id" | "status" | "createdAt" | "arrival" | "openOver" | "createdBy" | "steps"
+  "id" | "status" | "createdAt" | "updatedAt" | "arrival" | "openOver" | "createdBy" | "steps"
 >;
 export interface TaskQuery {
   page?: number;
   pageSize?: number;
   boxId?: string;
   kind?: string;
+  /** 批4：逗号分隔多选（16 态＋划拨两态＋伪态）；非法值服务端忽略（R-c）。 */
   status?: string;
   q?: string;
   orgId?: string;
@@ -324,6 +327,8 @@ export interface TaskQuery {
   mine?: "1";
   /** D1（R22 批2）：工作台桶参数，与 todo() 同谓词；mine=1 时落地行数==卡片数字。 */
   bucket?: "sampling" | "arrive" | "sign" | "returning" | "send" | "overLimit";
+  /** D4（R23 批5）：updated＝最近流转时间（默认）；created＝创建时间。非法值服务端回落 updated。 */
+  sort?: "updated" | "created";
 }
 /** 同样筛选下各状态的数量；mine 是我现在能推进的。 */
 export type TaskCounts = Record<string, number> & {

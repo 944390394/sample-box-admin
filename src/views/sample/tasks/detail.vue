@@ -45,7 +45,7 @@
         </div>
       </el-alert>
       <!-- 概况：状态、操作、步骤、关键数字和安排信息放在一张卡里，地图和动态紧跟其后 -->
-      <el-card shadow="never" class="block hero" :class="`tone-${headTone}`">
+      <el-card ref="heroCard" shadow="never" class="block hero" :class="`tone-${headTone}`">
         <div class="hero-head">
           <div class="hero-status">
             <span class="pulse" />
@@ -775,6 +775,19 @@ function focus(boxId: string, toggle = false) {
 }
 
 const tab = ref("boxes");
+/**
+ * R23/D5（#66）：?tab=task 深链定位「任务推进段」＝hero 概况卡（当前状态＋推进按钮＋步条）。
+ * 工作台「我保管的箱子」行内「开始采样／封箱」跳这里复用既有推进弹窗与原因校验。
+ * 只加 query 解析与滚动/激活：底部 el-tabs 无 task 页签，保持默认 boxes，不改其它逻辑。
+ */
+const heroCard = ref<{ $el?: HTMLElement } | null>(null);
+function focusTaskSection() {
+  if (String(routeInfo.query.tab || "") !== "task") return;
+  void nextTick(() => {
+    heroCard.value?.$el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+watch(() => routeInfo.query.tab, focusTaskSection);
 const videos = computed(() => detail.value?.videos || []);
 const videosRef = ref<InstanceType<typeof TaskVideos>>();
 /** 有视频地址的直接播放；还没录好的只切到录像标签页看状态。 */
@@ -804,6 +817,8 @@ async function load(silent = false) {
     if (mine !== seq) return;
     detail.value = next;
     stale.value = false;
+    // ?tab=task 深链：首屏/切单加载完成后定位任务推进段（后台静默刷新不重复滚动）
+    if (!silent) focusTaskSection();
   } catch (e) {
     if (mine !== seq) return;
     if (!silent) {

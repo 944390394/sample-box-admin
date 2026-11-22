@@ -8,13 +8,18 @@
 import {
   ENDED_OK,
   ENDED_VOID,
+  INSPECT_STEPS,
   isEnded,
   isEndedFor,
   isLegacySample,
   isLocalSample,
   isMergedSample,
+  RETURN_STEPS,
+  SAMPLE_FLOW,
+  SAMPLE_OUTBOUND_STEPS,
   stepsOf as flowStepsOf,
 } from "../../../../shared/taskFlow.js";
+import { TRANSFER_STATUS } from "../doc-flow";
 
 /**
  * 任务状态 tag 色（详情头共用）。R22 批1/P1-3：kind 感知终态——仅本地采样单
@@ -143,3 +148,47 @@ export const NEEDS_REASON: Record<string, string> = {
   退回中: "退回原因，如样品不合格、开箱超限",
   强制签收: "强制签收的原因，如签收人不在、开箱次数不对但样品完好",
 };
+
+/**
+ * 状态多选下拉词表（批4/D2）：16 态分组与服务端 counts 同源（counts 键即状态名）。
+ * 从 shared/taskFlow.js 流程常量派生，不另抄枚举；服务端 STATUS_KEYS 白名单同一份词汇。
+ * 历史态＝056 映射前的旧终态（只读兼容，存量行仍可筛）。
+ */
+export const STATUS_GROUPS: { title: string; historical?: boolean; statuses: string[] }[] = [
+  { title: "采样段", statuses: SAMPLE_FLOW.slice(0, 3) },
+  { title: "寄送段", statuses: [...SAMPLE_OUTBOUND_STEPS, ...SAMPLE_FLOW.slice(3, 5)] },
+  { title: "检测段", statuses: [...INSPECT_STEPS] },
+  { title: "退回段", statuses: [...RETURN_STEPS] },
+  { title: "作废终态", statuses: ENDED_VOID.filter((s) => s !== "已退回" && s !== "已撤销") },
+  { title: "历史态（只读）", historical: true, statuses: ["待核验", "已签收", "已完成"] },
+];
+
+/** 划拨/调拨两态（预览①：类型选划拨时状态下拉切换口径）。 */
+export const TRANSFER_STATUS_GROUP: { title: string; historical?: boolean; statuses: string[] } = {
+  title: "划拨两态",
+  statuses: [...TRANSFER_STATUS],
+};
+
+/** 具体状态全集（16＋划拨两态）：地址栏 status 多选 chips 与非法值判定用；伪态（进行中/已结束/签收）不在其中。 */
+export const STATUS_FILTER_KEYS: string[] = [
+  ...STATUS_GROUPS.flatMap((g) => g.statuses),
+  ...TRANSFER_STATUS,
+];
+
+/** 类型下拉切换状态词表：划拨/调拨＝两态；其余＝16 态。 */
+export function statusGroupsFor(kind?: string) {
+  return kind === "划拨" || kind === "调拨" ? [TRANSFER_STATUS_GROUP] : STATUS_GROUPS;
+}
+
+/**
+ * 类型下拉选项（批4/P2-1/P2-2）：默认三类（不传 kind，服务端白名单口径）；
+ * 划拨主入口仍在调拨单，这里只读筛；历史调拨只读收尾入口（P2-2 预防性修）。
+ */
+export const KIND_FILTER_OPTIONS: { value: string; label: string; desc: string }[] = [
+  { value: "", label: "三类（默认）", desc: "采样／送检／采样后送检" },
+  { value: "采样", label: "采样", desc: "仅本地 · 3 步 · 封箱即结束" },
+  { value: "送检", label: "送检", desc: "仅寄送 · 接收方固定唯一检测站" },
+  { value: "采样后送检", label: "采样后送检", desc: "合并全流 · 方向按箱归属派生" },
+  { value: "划拨", label: "划拨", desc: "提交即生效 · 无物流（主入口在调拨单）" },
+  { value: "调拨", label: "调拨（历史只读）", desc: "迁移前旧单 · 只读收尾" },
+];

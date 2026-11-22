@@ -91,10 +91,15 @@ import {
   activeTaskSql,
   deriveTrip,
   ENDED,
+  ENDED_OK,
+  ENDED_VOID,
   isEndedFor,
   isLocalSample,
   isMergedSample,
   nextOf,
+  RETURN_STEPS,
+  SAMPLE_FLOW,
+  SAMPLE_OUTBOUND_STEPS,
   signTargetOf,
   stepsOf,
 } from "../settings/taskFlow.js";
@@ -170,6 +175,7 @@ function isAdminRole(ctx) {
  * （manageOrgIds）里、或系统管理员（ADMIN）才认；全部范围的非 ADMIN 角色（如检测站值守 DUTY）
  * 不能推进他单位的采样/检测步。读可见性仍走 inScope（orgIds 含祖先与全部），这里只收写动作的参与方判定。
  * 手工构造的 scope 可能没有 manageOrgIds（如单测），退回 orgIds（与 orgScopeSql manage 口径同族）。
+ * 本函数保持严格口径不放宽；#69 的本人保管窄放宽只作用于采样段动作，见 selfCustodyHit。
  */
 function inPartyScope(ctx, orgId) {
   const scope = ctx.access?.scope;
@@ -177,6 +183,20 @@ function inPartyScope(ctx, orgId) {
   if (scope.all) return isAdminRole(ctx);
   const ids = scope.manageOrgIds ?? scope.orgIds;
   return ids.includes(String(orgId ?? ""));
+}
+
+/**
+ * #69 窄放宽（D5 采样员自助链，用户拍板「窄放宽本人保管」）：本人保管命中判定。
+ * scope4（仅本人）的 resolveScope 只填 ownerIds、manageOrgIds=[]，R22 严格参与方门把纯本人采样员
+ * 挡在本地采样步外（#66 §0 实证）。这里认「任务绑定箱全部是当前本人保管（box.owner_id∈ownerIds）」，
+ * 仅由采样段动作（待采样→采样中→已封箱，含 localOnly 与合并单采样段）调用；
+ * 寄出/确认到达/签收/开始检测/拒收/退回/取消等他角色步不调用，仍走 inPartyScope（manageOrgIds/ADMIN）。
+ * 空箱单不命中（fail-closed）；owned=null（未加载/全范围/无 ownerIds）恒不命中——
+ * 全部范围非 ADMIN（DUTY）的 scope.all 在 #selfOwnedBoxIds 即返回 null，R22 越权修保持。
+ */
+function selfCustodyHit(owned, task) {
+  const ids = task.boxIds || [];
+  return Boolean(owned && owned.size && ids.length) && ids.every((id) => owned.has(String(id)));
 }
 
 /** 所有策略写入都再次校验目标设备范围；批量操作不接受客户端声称的权限。 */
@@ -690,11 +710,14 @@ export class ReportPolicyController {
   }
 
   /**
-   * 任务列表。筛选：类型、状态（含「进行中」「已结束」）、单位、创建日期、关键字（任务名、编号、箱号、箱子名称）。
-   * mine=1 只列我现在能推进的任务。counts 是同样筛选下各状态的数量，给页面上的状态标签用。
+   * 任务列表。筛选：类型、状态（逗号多选，含「进行中」「已结束」伪态；非法值忽略＝R-c）、单位、创建日期、关键字（任务名、编号、箱号、箱子名称）。
+   * mine=1 只列我现在能推进的任务（可与 status/bucket 内存组合）。counts 是同样筛选下各状态的数量，给页面上的状态标签用。
+   * sort=updated（默认）按最近流转时间倒序（sample_task_log MAX(created_at)，无新迁移）；sort=created 切回创建序。
    */
   async tasks(ctx) {
     this.require(ctx, BOX.task);
+    // #69：本人保管箱集（采样段参与方门本人分支）；mine/bucket 与列表 actions 共用同一份
+    const owned = await this.#selfOwnedBoxIds(ctx);
     const visible = this.#visible(ctx);
     const clauses = visible.sql ? [visible.sql] : [];
     const params = [...visible.params];
@@ -765,15 +788,17 @@ export class ReportPolicyController {
         (row.kind === "采样" && Number(row.local) === 1 && row.status === "已封箱");
       counts[ended ? "已结束" : "进行中"] += n;
     }
-    // 我能推进的：只在进行中的任务里找，最多看 500 张（与工作台 todo 同窗口）
+    // 我能推进的：只在进行中的任务里找，最多看 500 张（与工作台 todo 同窗口）。
+    // 窗口序保持 created_at DESC（D1：与 todo() 同窗口同序，卡数==落地数不变）；
+    // 带出 last_flow_at 供 mine/bucket 内存路径按「最近更新」排序（D4/批5）。
     const activeRows = await this.db.all(
-      `SELECT t.* FROM sample_task t ${base ? `${base} AND` : "WHERE"} ${activeTaskSql()} ORDER BY created_at DESC LIMIT 500`,
+      `SELECT t.*, f.last_flow_at FROM sample_task t ${LAST_FLOW_JOIN} ${base ? `${base} AND` : "WHERE"} ${activeTaskSql()} ORDER BY t.created_at DESC LIMIT 500`,
       params
     );
     // 每单 abilities 算一次：mine 过滤与 bucket 分桶共用（D1：与 todo() 同谓词同窗口）
     const active = activeRows.map((row) => {
       const task = JSON.parse(row.body);
-      return { row, task, can: this.#abilities(ctx, task, row.status) };
+      return { row, task, can: this.#abilities(ctx, task, row.status, owned) };
     });
     // 只能取消的不算「待我处理」：和工作台、顶栏铃铛用同一个口径
     const mineRows = active.filter((item) => actionable(item.can)).map((item) => item.row);
@@ -795,21 +820,34 @@ export class ReportPolicyController {
       }
     }
 
+    // 批4：status 支持逗号分隔多选（16 态＋划拨两态＋伪态）；非法值忽略该筛选（R-c，与 kind/bucket 同口径）。
+    // 单值行为与 R22 完全一致（伪态走 SQL 谓词、具体态等值）；多值按 OR 组合（伪态谓词 OR 具体态 IN）。
+    const statusKeys = [
+      ...new Set(
+        String(ctx.query.status || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => STATUS_KEYS.includes(s))
+          .slice(0, 24)
+      ),
+    ];
     const statusClauses = [...clauses],
       statusParams = [...params];
-    if (ctx.query.status === "进行中") statusClauses.push(activeTaskSql());
-    else if (ctx.query.status === "已结束") statusClauses.push(`NOT ${activeTaskSql()}`);
-    // 「签收」：调拨的待签收和采样的待核验都是签收核验那一步，列在一起
-    else if (ctx.query.status === "签收")
-      statusClauses.push(`t.status IN (${SIGN_STEPS.map((s) => `'${s}'`).join(",")})`);
-    else if (
-      typeof ctx.query.status === "string" &&
-      ctx.query.status &&
-      ctx.query.status.length <= 16
-    ) {
-      statusClauses.push("t.status=?");
-      statusParams.push(ctx.query.status);
+    if (statusKeys.length) {
+      const concrete = statusKeys.filter((key) => !statusSqlOf(key));
+      const parts = statusKeys.filter((key) => statusSqlOf(key)).map((key) => statusSqlOf(key));
+      if (concrete.length) {
+        parts.push(`t.status IN (${concrete.map(() => "?").join(",")})`);
+        statusParams.push(...concrete);
+      }
+      statusClauses.push(parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`);
     }
+    // D4（批5）：默认排序＝最近更新（流转日志 MAX(created_at)）；sort=created 切回创建序；非法值回落默认。
+    const sort = ctx.query.sort === "created" ? "created" : "updated";
+    const orderBy =
+      sort === "created"
+        ? "t.created_at DESC, t.id DESC"
+        : "COALESCE(f.last_flow_at, t.created_at) DESC, t.id DESC";
     const where = statusClauses.length ? `WHERE ${statusClauses.join(" AND ")}` : "";
     const page = Math.max(1, Math.floor(Number(ctx.query.page) || 1));
     const pageSize = Math.min(100, Math.max(1, Math.floor(Number(ctx.query.pageSize) || 20)));
@@ -824,24 +862,21 @@ export class ReportPolicyController {
         const mineIds = new Set(mineRows.map((row) => row.id));
         picked = picked.filter((row) => mineIds.has(row.id));
       }
-      const status = typeof ctx.query.status === "string" ? ctx.query.status : "";
-      if (status && status !== "全部") {
-        // 窗口本身只含进行中：进行中＝全留、已结束＝空；签收/具体状态按状态名匹配
-        picked = picked.filter((row) =>
-          status === "进行中"
-            ? true
-            : status === "已结束"
-              ? false
-              : status === "签收"
-                ? SIGN_STEPS.includes(row.status)
-                : row.status === status
-        );
+      if (statusKeys.length) {
+        // 窗口本身只含进行中：进行中＝全留、已结束＝空；签收/具体状态按状态名匹配；多选 OR（批4）
+        picked = picked.filter((row) => statusKeys.some((key) => statusMatchOf(key, row.status)));
       }
+      // D4（批5）：内存路径与 SQL 路径同排序键（最近更新＝last_flow_at，创建＝created_at），id DESC 兜底同秒
+      picked = [...picked].sort((a, b) => {
+        const ka = sort === "created" ? a.created_at : flowAtOf(a);
+        const kb = sort === "created" ? b.created_at : flowAtOf(b);
+        return ka < kb ? 1 : ka > kb ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+      });
       total = picked.length;
       rows = picked.slice((page - 1) * pageSize, page * pageSize);
     } else {
       rows = await this.db.all(
-        `SELECT t.* FROM sample_task t ${where} ORDER BY created_at DESC,id DESC LIMIT ${pageSize} OFFSET ?`,
+        `SELECT t.*, f.last_flow_at FROM sample_task t ${LAST_FLOW_JOIN} ${where} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ?`,
         [...statusParams, (page - 1) * pageSize]
       );
       total = Number(
@@ -852,6 +887,8 @@ export class ReportPolicyController {
     const list = [];
     for (const row of rows) {
       const task = await this.#taskView(ctx, row);
+      // D4（批5）：最近更新＝最近一条流转日志时间（建单日志兜底），列表「最近更新」列与排序键同源
+      task.updatedAt = flowAtOf(row);
       // 正在去某地的任务，算出有几台已到附近
       const target = MOVING.includes(row.status) ? targetOf(task, row.status) : null;
       if (target && withPosition && hasCoords(target)) {
@@ -866,7 +903,7 @@ export class ReportPolicyController {
       }
       if (Number.isInteger(task.maxOpens))
         task.openOver = overOpenLimit(task, await openCounts(this.db, row.id)).length;
-      task.actions = Object.entries(this.#abilities(ctx, task, row.status))
+      task.actions = Object.entries(this.#abilities(ctx, task, row.status, owned))
         .filter(([, ok]) => ok)
         .map(([to]) => to);
       list.push(task);
@@ -1312,6 +1349,7 @@ export class ReportPolicyController {
   /** 任务详情：任务、流转记录、各箱当前位置和到当前目标的距离。 */
   async taskDetail(ctx) {
     this.require(ctx, BOX.task);
+    const owned = await this.#selfOwnedBoxIds(ctx);
     const visible = this.#visible(ctx);
     const row = await this.db.get(
       `SELECT t.* FROM sample_task t WHERE t.id=?${visible.sql ? ` AND ${visible.sql}` : ""}`,
@@ -1446,7 +1484,7 @@ export class ReportPolicyController {
         policy: perms.has(P.read),
       },
       arriveRadiusM: radius,
-      ...(await this.#receiveDetail(ctx, task, row)),
+      ...(await this.#receiveDetail(ctx, task, row, owned)),
       // 最近一次签收交接的跳过明细（R-5）：页面据此显示「N 台箱子未随单交接」警示
       handOver,
       logs: logs.map((log, index) => ({
@@ -1460,23 +1498,43 @@ export class ReportPolicyController {
     });
   }
 
-  /** 详情里的 can；在等这个人收货时换成核验后的结果，并带上 check。 */
-  async #receiveDetail(ctx, task, row) {
-    const plain = this.#receiveCan(ctx, task, row.status, null);
+  /** 详情里的 can；在等这个人收货时换成核验后的结果，并带上 check。owned 透传（#69）。 */
+  async #receiveDetail(ctx, task, row, owned = null) {
+    const plain = this.#receiveCan(ctx, task, row.status, null, owned);
     if (this.#receiveMode(task, plain) === "none")
-      return { can: this.#abilities(ctx, task, row.status), check: null };
+      return { can: this.#abilities(ctx, task, row.status, owned), check: null };
     const check = await receiveCheck(this.db, this.boxes, task, row.id, row.status, {
       perms: ctx.access.perms,
     });
-    return { can: this.#receiveCan(ctx, task, row.status, check), check };
+    return { can: this.#receiveCan(ctx, task, row.status, check, owned), check };
+  }
+
+  /**
+   * #69：一次查齐本人保管箱 id 集（scope.ownerIds），供采样段参与方门的本人分支同步判定。
+   * 显式传参给 #abilities/#receiveCan/#receiveDetail，不挂 ctx——同一 actor 对象跨调用复用
+   * （单测/内部调用）时避免 stale 缓存。全范围（scope.all，含 DUTY）或无 ownerIds 返回 null＝不放宽。
+   * 仅 scope4 类（有 ownerIds）请求多这一条按保管人的查询，与箱子列表 scopeSql 同族口径。
+   */
+  async #selfOwnedBoxIds(ctx) {
+    const scope = ctx.access?.scope;
+    if (!scope || scope.all || !scope.ownerIds?.length) return null;
+    const ids = scope.ownerIds.map(String).filter(Boolean);
+    if (!ids.length) return null;
+    const rows = await this.db.all(
+      `SELECT id FROM sample_box WHERE owner_id IN (${ids.map(() => "?").join(",")})`,
+      ids
+    );
+    return new Set(rows.map((row) => String(row.id)));
   }
 
   /**
    * 谁能推进哪一步。调拨单：寄出、取消归寄出单位；确认到达寄出、接收方都可以；签收、拒收只归接收单位。
    * 接收方只需能看任务（device:box:task），不需要上报策略权限。
    * 指定了签收人（系统用户）时只有他能正常签收；接收单位里其他有签收权限的人只能「强制签收」，要写原因。
+   * owned＝#selfOwnedBoxIds 查得的本人保管箱集（#69）：仅采样段（采样中/已封箱）认本人保管，
+   * 默认 null＝不放宽（fail-closed），他角色步一律不读它。
    */
-  #abilities(ctx, task, status) {
+  #abilities(ctx, task, status, owned = null) {
     const has = (perm) => ctx.access.perms.has(perm);
     const view = has(BOX.task);
     const next = nextOf(task, status);
@@ -1486,11 +1544,13 @@ export class ReportPolicyController {
     if (isLocalSample(task)) {
       // R-b：参与方门走管理范围（manageOrgIds/ADMIN），全部范围的非 ADMIN 角色不能推进他单位采样步
       const unit = inPartyScope(ctx, task.orgId || task.fromOrgId);
+      // #69 窄放宽：采样段（采样中/已封箱）另认本人保管；取消仍走严格参与方门（不放宽）
+      const sampling = unit || selfCustodyHit(owned, task);
       const STEP = { 采样中: T.sampleStart, 已封箱: T.seal };
       return Object.fromEntries(
         next.map((to) => {
           if (to === "已取消") return [to, may(T.cancel, unit)];
-          if (STEP[to]) return [to, may(STEP[to], unit)];
+          if (STEP[to]) return [to, may(STEP[to], sampling)];
           return [to, false];
         })
       );
@@ -1507,6 +1567,8 @@ export class ReportPolicyController {
       const receiver = inPartyScope(ctx, task.toOrgId);
       const signer = isSigner(ctx, task);
       const sampler = task.orgId ? inPartyScope(ctx, task.orgId) : sender;
+      // #69 窄放宽：仅采样段（采样中/已封箱）另认本人保管；寄送段（在途 sendBack 等）不放宽
+      const custody = selfCustodyHit(owned, task);
       const STEP = { 采样中: T.sampleStart, 已封箱: T.seal, 在途: T.sendBack };
       const can = Object.fromEntries(
         next.map((to) => {
@@ -1517,6 +1579,9 @@ export class ReportPolicyController {
           if (to === "运送中") return [to, may(T.send, sender) || may(T.sign, sender)];
           // 分公司确认到达（＝首腿签收）：归属随交接检测站→采样单位
           if (to === "待采样") return [to, may(T.arrive, sampler)];
+          // 采样段：参与方（采样单位/寄出方）或本人保管（#69）；寄送段在途仍仅参与方
+          if (to === "采样中" || to === "已封箱")
+            return [to, may(STEP[to], sampler || sender || custody)];
           if (STEP[to]) return [to, may(STEP[to], sampler || sender)];
           if (to === signTo) return [to, may(T.sign, task.signerId ? signer : receiver)];
           if (to === "已拒收") return [to, may(T.reject, signer || receiver)];
@@ -1579,22 +1644,23 @@ export class ReportPolicyController {
    * 收货时能做什么：在 #abilities 的基础上，
    * - 调拨运送中：收货方扫码可以直接签收、拒收（推进时先自动记一笔「确认到达」）；
    * - 签收核验有问题（check.problems）：不能直接签收，只能拒收或强制签收（要写原因）。
+   * owned 透传 #abilities（#69 采样段本人保管）；收货追加的签收/拒收动作不读它（不放宽）。
    */
-  #receiveCan(ctx, task, status, check) {
-    const can = { ...this.#abilities(ctx, task, status) };
+  #receiveCan(ctx, task, status, check, owned = null) {
+    const can = { ...this.#abilities(ctx, task, status, owned) };
     const signTo = signTargetOf(task);
     if (task.kind === "调拨" && status === "运送中") {
-      const at = this.#abilities(ctx, task, "待签收");
+      const at = this.#abilities(ctx, task, "待签收", owned);
       for (const to of [signTo, "已拒收", "退回中", FORCE_SIGN]) if (at[to]) can[to] = true;
     }
     // 送检：检测站在「运送中」扫箱码可直接签收/拒收（推进时先自动记一笔「确认到达」）
     if (task.kind === "送检" && status === "运送中") {
-      const at = this.#abilities(ctx, task, "待签收");
+      const at = this.#abilities(ctx, task, "待签收", owned);
       for (const to of [signTo, "已拒收", "退回中", FORCE_SIGN]) if (at[to]) can[to] = true;
     }
     // 合并采样单：检测站在「在途」扫箱码可直接签收/拒收（推进时先自动记一笔「确认到达」）
     if (isMergedSample(task) && status === "在途") {
-      const at = this.#abilities(ctx, task, "待签收");
+      const at = this.#abilities(ctx, task, "待签收", owned);
       for (const to of [signTo, "已拒收", FORCE_SIGN]) if (at[to]) can[to] = true;
     }
     if (check?.problems?.length && can[signTo]) {
@@ -1617,12 +1683,13 @@ export class ReportPolicyController {
    */
   async receive(ctx) {
     this.require(ctx, BOX.task);
+    const owned = await this.#selfOwnedBoxIds(ctx);
     const row = await this.#visibleTask(ctx);
     const task = JSON.parse(row.body);
     const check = await receiveCheck(this.db, this.boxes, task, row.id, row.status, {
       perms: ctx.access.perms,
     });
-    const can = this.#receiveCan(ctx, task, row.status, check);
+    const can = this.#receiveCan(ctx, task, row.status, check, owned);
     ctx.ok({
       task: {
         id: row.id,
@@ -1654,6 +1721,8 @@ export class ReportPolicyController {
    */
   async todo(ctx) {
     if (!ctx.access.perms.has(BOX.task)) return null;
+    // #69：本人保管箱集——sampling 待办桶与 mine 同谓词，门放宽即随 #abilities 生效
+    const owned = await this.#selfOwnedBoxIds(ctx);
     const visible = this.#visible(ctx);
     const rows = await this.db.all(
       `SELECT t.* FROM sample_task t WHERE ${activeTaskSql()}${visible.sql ? ` AND ${visible.sql}` : ""} ORDER BY created_at DESC LIMIT 500`,
@@ -1676,7 +1745,7 @@ export class ReportPolicyController {
       myName = ctx.user?.nickname || "";
     for (const row of rows) {
       const task = JSON.parse(row.body);
-      const can = this.#abilities(ctx, task, row.status);
+      const can = this.#abilities(ctx, task, row.status, owned);
       const brief = {
         id: row.id,
         name: task.name,
@@ -1743,6 +1812,7 @@ export class ReportPolicyController {
     const visible = canSee(ctx.access, box) && (perms.has(BOX.detail) || perms.has(BOX.list));
     let tasks = [];
     if (perms.has(BOX.task)) {
+      const owned = await this.#selfOwnedBoxIds(ctx);
       const scope = this.#visible(ctx);
       const rows = await this.db.all(
         `SELECT t.*, m.inspected_at AS box_inspected_at, m.opens_start AS box_opens_start, m.opens_end AS box_opens_end FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=?${scope.sql ? ` AND ${scope.sql}` : ""} ORDER BY t.created_at DESC LIMIT 10`,
@@ -1754,7 +1824,7 @@ export class ReportPolicyController {
         // 检测站已开始检测的箱子：这张单对它来说已经结束；R23 本地采样已封箱也是终态
         const active =
           !isEndedFor({ ...task, kind: row.kind, status: row.status }) && !row.box_inspected_at;
-        const can = active ? this.#abilities(ctx, task, row.status) : {};
+        const can = active ? this.#abilities(ctx, task, row.status, owned) : {};
         // 待检测时扫到的这台箱子：能逐台开始检测；整张单的「全部开始检测」留在任务详情里
         if (active && row.status === "待检测") {
           can["开始检测"] = Boolean(can["已检测"]);
@@ -1762,7 +1832,7 @@ export class ReportPolicyController {
         }
         // 这张单在等这个人收货：小程序扫码后直接弹出签收核验页
         const receive = active
-          ? this.#receiveMode(task, this.#receiveCan(ctx, task, row.status, null))
+          ? this.#receiveMode(task, this.#receiveCan(ctx, task, row.status, null, owned))
           : "none";
         // 本次任务开了几次箱：签收前看当前，签收后定在签收那一刻
         const opensDuring =
@@ -1966,6 +2036,8 @@ export class ReportPolicyController {
 
   async transition(ctx) {
     this.require(ctx, BOX.task);
+    // #69：本人保管箱集——采样段推进门本人分支；签收/检测等他角色步不读它
+    const owned = await this.#selfOwnedBoxIds(ctx);
     const asked = ctx.body?.status;
     const force = asked === FORCE_SIGN;
     const note = typeof ctx.body?.note === "string" ? ctx.body.note.slice(0, 1000) : "";
@@ -1996,8 +2068,8 @@ export class ReportPolicyController {
         })
       : null;
     const can = receiving
-      ? this.#receiveCan(ctx, task, row.status, check)
-      : this.#abilities(ctx, task, row.status);
+      ? this.#receiveCan(ctx, task, row.status, check, owned)
+      : this.#abilities(ctx, task, row.status, owned);
     if (!can[asked]) {
       const problems = check?.problems || [];
       const message =
@@ -2118,13 +2190,14 @@ export class ReportPolicyController {
    */
   async inspect(ctx) {
     this.require(ctx, BOX.task);
+    const owned = await this.#selfOwnedBoxIds(ctx);
     const row = await this.#visibleTask(ctx);
     const task = JSON.parse(row.body);
     if (row.status !== "待检测")
       throw badRequest(
         row.status === "已检测" ? "这张单的箱子都已开始检测" : "签收以后才能开始检测"
       );
-    if (!this.#abilities(ctx, task, row.status)["已检测"])
+    if (!this.#abilities(ctx, task, row.status, owned)["已检测"])
       throw noPermission("只有检测站有签收权限的人员可以开始检测");
     const boxId = String(ctx.params.boxId || "").slice(0, 64);
     // 这台箱子也得在自己的范围内：否则能给范围外的箱子盖「开始检测」
@@ -2188,6 +2261,52 @@ export class ReportPolicyController {
 
 /** 签收核验那一步：合并单/调拨叫「待签收」，旧采样寄回叫「待核验」。任务单列表的「待签收」标签都列。 */
 const SIGN_STEPS = ["待签收", "待核验"];
+
+/**
+ * 状态筛选白名单（批4/R-c）：16 个持久态＋划拨两态＋伪态（进行中/已结束/签收）。
+ * 从 shared/taskFlow.js 的流程常量派生（与前端 status.ts 的 STATUS_GROUPS 同一份词汇），
+ * 不另抄枚举。非法值忽略该筛选（与 kind/bucket 同口径），不再静默 0 行——
+ * 旧书签/分享链接里的陈旧状态值不再落进「没有符合条件的任务」死胡同。
+ */
+const STATUS_KEYS = [
+  ...new Set([
+    ...SAMPLE_FLOW,
+    ...SAMPLE_OUTBOUND_STEPS,
+    ...RETURN_STEPS,
+    ...ENDED_OK,
+    ...ENDED_VOID,
+    "待核验", // 旧采样核验态（只读兼容，056 映射前的存量行）
+    "进行中",
+    "已结束",
+    "签收",
+  ]),
+];
+
+/** 伪态的 SQL 谓词；具体态返回 null（走等值/IN）。 */
+function statusSqlOf(key) {
+  if (key === "进行中") return activeTaskSql();
+  if (key === "已结束") return `NOT ${activeTaskSql()}`;
+  if (key === "签收") return `t.status IN (${SIGN_STEPS.map((s) => `'${s}'`).join(",")})`;
+  return null;
+}
+
+/** 伪态在 mine/bucket 内存窗口（只含进行中）上的判定；具体态按状态名匹配。 */
+function statusMatchOf(key, status) {
+  if (key === "进行中") return true;
+  if (key === "已结束") return false;
+  if (key === "签收") return SIGN_STEPS.includes(status);
+  return status === key;
+}
+
+/**
+ * 最近更新排序（D4/批5）：sample_task 无 updated_at 列，用流转日志 MAX(created_at) 子查询，
+ * 不新增迁移。建单事务内就写「创建」日志（ReportPolicy.addTaskLog），每单至少一条；
+ * COALESCE 兜底 022 迁移前的无日志老行。idx_task_log_task(task_id,created_at) 覆盖分组。
+ * MySQL 大库 join 计划未在本轮验证（残留风险，见验收报告）。
+ */
+const LAST_FLOW_JOIN =
+  "LEFT JOIN (SELECT task_id, MAX(created_at) AS last_flow_at FROM sample_task_log GROUP BY task_id) f ON f.task_id = t.id";
+const flowAtOf = (row) => row.last_flow_at || row.created_at;
 
 /** 有取消以外的动作可做：算「待我处理」。只能取消的（比如管理员看别人的单）不算。 */
 function actionable(can) {

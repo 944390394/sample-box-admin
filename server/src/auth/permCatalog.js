@@ -1120,6 +1120,14 @@ export const SPLIT_062 = {
 };
 
 /**
+ * 迁移 063（R23 / 任务 #66，D5 已拍板）：现场采样员最小任务入口的存量补码集。
+ * 读（device:box:task，菜单/列表/详情门）＋开始采样＋封箱；数据范围仍仅本人保管（scope4 不变）。
+ * 不是拆码（无老码→新码映射），故不进 upgradeCodes 拆分链；新库由 LEGACY_DEFAULTS.SAMPLER 覆盖，
+ * 存量 SAMPLER 角色由 063 只补不删。工作台卡片随读码由 cardsFor 同补（保证存量==新库口径）。
+ */
+export const SAMPLER_ENTRY_063 = ["device:box:task", "task:sample-start", "task:seal"];
+
+/**
  * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
  * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
  */
@@ -1260,7 +1268,14 @@ const LEGACY_DEFAULTS = {
   ],
   // 组织简化（B1b/P3）：AGENCY_LEAD 废弃——存量持有者由迁移 056 改绑 BRANCH_ADMIN，
   // sys_role 14 停用不物理删；默认授权/模板不再含该项（权限码本身不删）。
-  SAMPLER: [...OLD(["list", "detail", "status", "location", "track"])],
+  // R23（D5/任务 #66）：现场采样员最小任务入口＝读＋开始采样＋封箱，数据范围仍仅本人保管（scope4）。
+  // 补 device:box:task（读，菜单/列表/详情门）＋task:sample-start＋task:seal；存量角色由 063 幂等补码。
+  // 不给 send/sign/inspect/cancel/create/transfer 等码：寄出、签收、检测、取消、建单、划拨按钮不显示。
+  SAMPLER: [
+    ...OLD(["list", "detail", "status", "location", "track", "task"]),
+    "task:sample-start",
+    "task:seal",
+  ],
   HOME_SWITCH: [],
 };
 
@@ -1282,7 +1297,7 @@ export const ROLE_TEMPLATES = [
   {
     key: "SAMPLER",
     label: "现场采样员",
-    hint: "看自己保管的箱子：电量、箱盖、位置、轨迹",
+    hint: "看自己保管的箱子：电量、箱盖、位置、轨迹；本人保管箱可开始采样、封箱（R23/D5）",
     suggestedScope: 4,
   },
   {
