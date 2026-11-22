@@ -22,6 +22,38 @@
     <el-empty v-if="!canManage" description="当前角色没有「新建采样任务 / 新建送检单」权限" />
     <div v-else class="create-layout" :class="{ solo: !showSummary }">
       <el-card shadow="never" class="task-form">
+        <!-- R27：采样箱选了就一直挂在步骤条上方，每一步都看得见绑了哪几台（点标签或「修改」回第 2 步） -->
+        <div class="box-strip" :class="{ idle: !boxChips.length }" data-test="create-box-strip">
+          <template v-if="boxChips.length">
+            <span class="box-strip-label">已选采样箱</span>
+            <el-tag
+              v-for="chip in boxChipsShown"
+              :key="chip.id"
+              size="small"
+              effect="plain"
+              :class="{ jump: canBackToBoxes }"
+              :data-test="`create-box-chip-${chip.id}`"
+              @click="backToBoxes"
+            >
+              {{ chip.text }}
+            </el-tag>
+            <span v-if="boxChipsRest" class="box-strip-more" data-test="create-box-chips-more">
+              另 {{ boxChipsRest }} 台
+            </span>
+            <span class="box-strip-count">共 {{ boxChips.length }} 台</span>
+            <el-button
+              v-if="canBackToBoxes"
+              link
+              type="primary"
+              size="small"
+              data-test="create-box-strip-edit"
+              @click="backToBoxes"
+            >
+              修改
+            </el-button>
+          </template>
+          <span v-else class="box-strip-empty" data-test="create-box-strip-empty">未选采样箱</span>
+        </div>
         <el-steps :active="step" finish-status="success" align-center class="steps">
           <el-step
             v-for="(item, index) in steps"
@@ -303,12 +335,17 @@
             </el-form-item>
             <!-- 流程守卫：录像＋开箱上限都是任务级守卫，与寄送方向无关（合并单直寄检测站） -->
             <el-divider content-position="left">流程守卫</el-divider>
-            <el-form-item label="开箱录像">
-              <el-switch v-model="form.recordVideo" :disabled="!isCompany" />
-              <p class="tip">
+            <!-- R27：开箱录像只对带采样段的类型有意义。送检＝箱已封箱只寄送，没有采样现场开箱，整项隐藏（核对页同步，见 showRecordVideo） -->
+            <el-form-item v-if="showRecordVideo" label="开箱录像" data-test="create-record-video">
+              <el-switch
+                v-model="form.recordVideo"
+                :disabled="!isCompany"
+                data-test="create-record-video-switch"
+              />
+              <p class="tip" data-test="create-record-video-tip">
                 {{
                   isCompany
-                    ? "开启后，任务进行中箱子每次在计划地点（误差范围内）开箱，服务器会通知视频平台录像，录像显示在任务详情里。"
+                    ? "分公司采样现场附近（计划地点误差范围内）每开一次箱触发一次录像：一次开箱一段，不是整单一段；录像显示在任务详情里。"
                     : "只有采样单位是分公司（公司类型）时才能开启；检测站不设录像。单位类型在「组织管理 › 部门」里设置。"
                 }}
               </p>
@@ -511,8 +548,13 @@
                   <dd>{{ form.sample || "—" }}</dd>
                   <dt>授权人员</dt>
                   <dd>{{ form.people || "—" }}</dd>
-                  <dt>开箱录像</dt>
-                  <dd>{{ form.recordVideo ? "开启" : "不录" }}</dd>
+                  <!-- R27：送检没有采样段，核对页也不出现「开箱录像」这一行（与采样安排步同一判据） -->
+                  <template v-if="showRecordVideo">
+                    <dt>开箱录像</dt>
+                    <dd data-test="create-review-record-video">
+                      {{ form.recordVideo ? "开启" : "不录" }}
+                    </dd>
+                  </template>
                   <dt>开箱上限</dt>
                   <dd>{{ limitOpens ? `每台最多 ${maxOpens} 次` : "不限" }}</dd>
                 </dl>
@@ -749,6 +791,12 @@ const peoplePick = computed({
 });
 /** 采样单位＝所选分公司；录像 gate 公司类型（检测站禁录）。 */
 const isCompany = computed(() => orgById(form.fromOrgId)?.type === "公司");
+/**
+ * R27：开箱录像这项只对带采样段的类型存在。
+ * 采样＝仅本地采样（含旧合并别名），采样后送检＝合并全流；送检只有寄送，没有采样现场开箱，
+ * 所以整项隐藏（采样安排步本来就不在该类型的步骤里，这里把判据写明，核对页那一行同步）。
+ */
+const showRecordVideo = computed(() => form.kind === "采样" || form.kind === "采样后送检");
 /** R22：选中箱子的归属集合（未分配算空串）；>1＝混归属，整单拒（方向是单级派生事实）。 */
 const boxOrgIds = computed(() => [
   ...new Set(chosenBoxes.value.map((box) => String(box.orgId || ""))),
@@ -951,6 +999,35 @@ const summaryItems = computed<InfoItem[]>(() => {
 function goto(key: StepKey) {
   const index = steps.value.findIndex((s) => s.key === key);
   if (index >= 0) step.value = index;
+}
+
+/**
+ * R27 常驻采样箱栏（步骤条上方那一行）：每一步都要看得见当前绑了哪几台，不用回第 2 步核对。
+ * 称谓沿用 boxTitle / imeiText 的权限口径——没有「设备标识」权限的角色看到的是打码串或「无权查看」，
+ * 整串 IMEI 不会从这一行漏出去（和列表页、核对页同一套规则）。
+ */
+const boxChips = computed(() =>
+  form.boxIds.map((id) => {
+    const box = chosenBoxes.value.find((b) => b.id === id);
+    return { id, text: box ? boxTitle(box) : imeiText({ id }) };
+  })
+);
+/** 一次最多能挑 100 台，这行不能撑成一片：超过 6 台收进「另 N 台」，跳步入口不受影响。 */
+const CHIP_LIMIT = 6;
+const boxChipsShown = computed(() => boxChips.value.slice(0, CHIP_LIMIT));
+const boxChipsRest = computed(() => Math.max(0, boxChips.value.length - CHIP_LIMIT));
+/**
+ * 「采样箱」这一步在各类型里都是第 2 步，但 steps 按类型动态生成，还是按 key 找下标，不写死 1。
+ * 回退沿用步骤条自己的规则（只能点回已走过的步骤），所以只有已经过了这一步才给跳；
+ * 从第 1 步往前跳要过 checkStep，这里不新开一条绕过校验的路。
+ */
+const boxesStepIndex = computed(() => steps.value.findIndex((item) => item.key === "boxes"));
+const canBackToBoxes = computed(
+  () => boxesStepIndex.value >= 0 && step.value > boxesStepIndex.value
+);
+function backToBoxes() {
+  if (!canBackToBoxes.value) return;
+  step.value = boxesStepIndex.value;
 }
 
 /** 当前这一步没填完时，在对应输入框下面标出原因，返回 false。R23 按类型校验。 */
@@ -1341,6 +1418,45 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload)
 }
 .steps :deep(.jump) {
   cursor: pointer;
+}
+/*
+ * R27 常驻采样箱栏：和步骤条同宽、贴在它上面，只用一行小字＋标签＋一条虚线分隔。
+ * 不铺底色做成独立横条（那种在页头和表单之间太突兀，先例 R20 的收尾口径是融入而不是加块）。
+ */
+.box-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  max-width: 960px;
+  padding-bottom: 10px;
+  margin: 0 auto 2px;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+.box-strip.idle {
+  min-height: 22px;
+}
+.box-strip-label,
+.box-strip-count,
+.box-strip-more {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.box-strip-empty {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+}
+.box-strip :deep(.el-tag.jump) {
+  cursor: pointer;
+}
+.box-strip :deep(.el-tag.jump:hover) {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+}
+@media (max-width: 640px) {
+  .box-strip {
+    gap: 4px;
+  }
 }
 .body {
   min-height: 320px;

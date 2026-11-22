@@ -403,8 +403,22 @@
             <el-col :span="12" :xs="24">
               <el-form-item label="类型">
                 <el-radio-group v-model="formData.type" :disabled="!can('sys:dept:type')">
-                  <el-radio-button value="公司">公司</el-radio-button>
-                  <el-radio-button value="检测站">检测站</el-radio-button>
+                  <el-radio-button value="公司" data-test="dept-type-company">公司</el-radio-button>
+                  <!-- #62：检测站全局唯一（停用也占名额）——已有别的站时禁选，tooltip 点名原因；
+                       编辑对象就是该站本身不锁（改回公司＝释放名额）。服务端 checkStationType 仍兜底 -->
+                  <el-tooltip
+                    :content="stationHint"
+                    placement="top"
+                    :disabled="!stationLocked || !can('sys:dept:type')"
+                  >
+                    <el-radio-button
+                      value="检测站"
+                      :disabled="stationLocked"
+                      data-test="dept-type-station"
+                    >
+                      检测站
+                    </el-radio-button>
+                  </el-tooltip>
                 </el-radio-group>
                 <p class="tip">
                   {{
@@ -412,6 +426,10 @@
                       ? "检测站全局唯一、须挂总公司子树：接收任务单后逐台扫码「开始检测」，总览里单列；禁配摄像头（开箱凭证靠扫码＋开箱次数差）。"
                       : "公司＝总公司 / 分公司。分公司自采，可配采样现场监控通道；任务单接收方固定为唯一检测站。"
                   }}
+                </p>
+                <!-- #62：已有检测站时点名当前唯一站（识别优于回忆）；无站时不渲染，维持原文案 -->
+                <p v-if="stationHint" class="tip" data-test="dept-type-station-hint">
+                  {{ stationHint }}
                 </p>
               </el-form-item>
             </el-col>
@@ -884,6 +902,30 @@ const deptIndex = computed(() => {
     });
   walk(list.value);
   return map;
+});
+
+/** #62：检测站全局唯一（停用也占名额）。列表接口一次性返回全量树（含停用节点；祖先只读壳也带 type），
+ * 直接从 deptIndex 派生现有检测站，不加请求。scoped 用户树里看不到站时这里为空，服务端 checkStationType 兜底。 */
+const existingStation = computed<DeptItem | null>(() => {
+  for (const node of deptIndex.value.values()) {
+    if (node.type === "检测站") return node;
+  }
+  return null;
+});
+/** 选项级锁：已有别的检测站时禁选「检测站」；编辑对象就是该站本身不锁（把它改回公司＝释放名额）。 */
+const stationLocked = computed(() => {
+  const station = existingStation.value;
+  return Boolean(station && String(station.id) !== String(formData.id || ""));
+});
+/** tooltip/旁注点名原因；编辑该站自身时提示它就是当前唯一站（识别优于回忆）。 */
+const stationHint = computed(() => {
+  const station = existingStation.value;
+  if (!station) return "";
+  if (stationLocked.value)
+    return `检测站全局唯一：「${station.name}」已是检测站（停用也占名额），请先把它改回公司`;
+  return `当前唯一检测站：「${station.name}」${
+    station.status === CommonStatus.ENABLED ? "" : "（停用中，仍占名额）"
+  }。把它改回「公司」即释放名额。`;
 });
 
 function locatedAncestor(parentId?: string) {

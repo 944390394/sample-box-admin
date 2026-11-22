@@ -9,7 +9,9 @@ const RECORDING = ["待采样", "采样中", "已封箱"];
 /**
  * 开箱录像（组织简化 P6/录音⑥）：采样单勾了「需要录像」、采样单位是分公司（公司类型）时，
  * 箱子在采样现场（计划地点到达半径内）每开一次箱，记一条录像请求，再异步请视频平台录像。
- * 计划地点没有坐标时，只在「采样中」算。检测站不设摄像头、不开录像（建单 gate 已拦）。
+ * 有采样段的单都算：kind「采样」（含仅本地采样、旧合并别名）与「采样后送检」（R23 合并全流）；
+ * 纯送检（kind「送检」）没有采样段，不触发。计划地点没有坐标时，只在「采样中」算。
+ * 检测站不设摄像头、不开录像（建单 gate 已拦）。
  */
 export class TaskVideoService {
   constructor(db, platform, { now = () => new Date() } = {}) {
@@ -22,9 +24,12 @@ export class TaskVideoService {
   async onOpen(box, uplink) {
     // 认派生 kind（uplink.kind），不认原始 why：连续上报的固件开箱只发 why=timer，靠 opens 跳变才派生出 pad
     if ((uplink?.kind ?? uplink?.why) !== "pad" || !box) return null;
+    // R23 三类型改名回归：合并流（采样＋送检）的存储 kind 从「采样」改成了「采样后送检」，
+    // 这里还只认 '采样' 的话，新建的「采样后送检」单开箱就不录像了（该文件早于 R23，一直没跟上）。
+    // 旧合并别名（kind='采样'＋inspect=true）与仅本地采样（kind='采样'＋localOnly）仍在 '采样' 一支里，不用另列。
     const task = await this.db.get(
       `SELECT t.id, t.status, t.body FROM sample_task t JOIN sample_task_box m ON m.task_id = t.id
-       WHERE m.box_id = ? AND t.kind = '采样' AND t.status IN (${RECORDING.map(() => "?").join(",")})
+       WHERE m.box_id = ? AND t.kind IN ('采样','采样后送检') AND t.status IN (${RECORDING.map(() => "?").join(",")})
        ORDER BY t.created_at DESC LIMIT 1`,
       [box.id, ...RECORDING]
     );
