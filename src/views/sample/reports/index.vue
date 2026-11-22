@@ -69,7 +69,7 @@
               class="chip"
               :class="{ active: kind === chip.value }"
               :aria-pressed="kind === chip.value"
-              @click="kind = chip.value"
+              @click="kind = !hasLog && kind === chip.value ? defaultKind : chip.value"
             >
               {{ chip.label }}
             </button>
@@ -137,7 +137,13 @@
             :image-size="80"
             :description="boxes.length ? '该时间段没有上报记录' : '数据范围内没有采样箱'"
           >
-            <span class="empty-hint">换个时间范围或类型试试，或关闭「仅看异常」</span>
+            <div class="empty-hints">
+              <span class="empty-hint">换个时间范围或类型试试，或关闭「仅看异常」</span>
+              <!-- #85：事件-only 角色空态补权限说明（持 log 真无数据保持原文案） -->
+              <span v-if="!hasLog" class="empty-hint">
+                当前角色仅可见开关箱/上电/充电事件；定时报文需「查看上报记录」权限
+              </span>
+            </div>
           </el-empty>
           <el-table
             v-else
@@ -367,8 +373,11 @@ const tableArea = ref<HTMLElement | null>(null);
 
 /**
  * R21（062）：事件-only 角色（无 device:box:log）只能查持码的事件种类——服务端 #logPerm 口径不变，
- * 页内把类型 chips 收窄到持码项并默认选第一项，避免默认「全部」撞 403；持 log 角色全种类照旧。
+ * 页内把类型 chips 收窄到持码项；持 log 角色全种类照旧（含「全部」「定时上报」）。
  * chgs（充电状态）/timer/unknown 不在事件码口径里，要 log 码。
+ * R26（#85）：默认不预选首事件 chip＝默认查全部可见种类——持 log 角色默认全部（kind=""）；
+ * 事件-only 角色默认查持码事件种类并集（逗号列表，#logPerm 认全事件类组合），不再只查「开箱」；
+ * 事件-only 点已选 chip 回到并集默认（默认态经 chips 可达）。空态对 !hasLog 追加权限说明。
  */
 const EVENT_CHIP_PERMS: Record<string, string> = {
   pad: BOX_PERM.eventLid,
@@ -386,15 +395,23 @@ const ALL_KIND_CHIPS = [
   { value: "chgs", label: "充电状态" },
   { value: "unknown", label: "其他" },
 ];
+const hasLog = computed(() => can(BOX_PERM.log));
 const kindChips = computed(() =>
-  can(BOX_PERM.log)
+  hasLog.value
     ? ALL_KIND_CHIPS
     : ALL_KIND_CHIPS.filter(
         (chip) => EVENT_CHIP_PERMS[chip.value] && can(EVENT_CHIP_PERMS[chip.value])
       )
 );
-// 事件-only 角色默认选第一个持码事件种类（「全部」要 log 码，默认查会 403）
-if (!can(BOX_PERM.log)) kind.value = kindChips.value[0]?.value ?? "";
+/** 默认查询口径：持 log 查全部；事件-only 查持码事件种类并集（不预选任何 chip）。 */
+const defaultKind = computed(() =>
+  hasLog.value
+    ? ""
+    : Object.keys(EVENT_CHIP_PERMS)
+        .filter((value) => can(EVENT_CHIP_PERMS[value]))
+        .join(",")
+);
+kind.value = defaultKind.value;
 const presetChips: { value: Preset; label: string }[] = [
   { value: "1h", label: "1 小时" },
   { value: "6h", label: "6 小时" },
@@ -1009,6 +1026,12 @@ onBeforeUnmount(() => {
 
 .state {
   padding: 12px 0;
+}
+
+.empty-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .empty-hint {

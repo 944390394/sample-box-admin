@@ -213,13 +213,7 @@
                 placeholder="选择采样单位（分公司）"
                 style="width: 100%"
               >
-                <el-option
-                  v-for="o in companyOrgs"
-                  :key="o.id"
-                  :value="o.id"
-                  :label="o.path"
-                  :disabled="!o.inScope"
-                />
+                <el-option v-for="o in companyOrgs" :key="o.id" :value="o.id" :label="o.path" />
               </el-select>
               <!-- #82：单向/双向解释与上方寄送方向气泡全文重复，收敛删除；保留选单位默认口径 -->
               <p class="tip">采样单位可选分公司，默认箱归属分公司（箱在检测站时默认本单位）。</p>
@@ -258,12 +252,19 @@
               class="indent"
               :title="`${outside.join('、')} 不在寄出方「${derivedFromOrg?.name}」及其上下级里，确认要从这里寄出吗？`"
             />
-            <el-form-item v-if="form.kind !== '采样'" label="寄出地址">
-              <PlaceField
+            <el-form-item
+              v-if="form.kind !== '采样'"
+              label="寄出地址"
+              required
+              :error="errors.fromPlace"
+            >
+              <AddressBlock
                 v-if="form.fromOrgId"
                 v-model="form.fromPlace"
                 :org="derivedFromOrg || orgById(form.fromOrgId)"
+                variant="ship"
                 :default-radius="arriveRadius"
+                @refresh="reloadOptions"
               />
               <span v-else class="tip">先选采样单位</span>
             </el-form-item>
@@ -303,12 +304,14 @@
               </el-select>
               <p class="tip">寄出人须是寄出方的人员。箱子应已采样封箱。</p>
             </el-form-item>
-            <el-form-item label="寄出地址">
-              <PlaceField
+            <el-form-item label="寄出地址" required :error="errors.fromPlace">
+              <AddressBlock
                 v-if="derivedFromOrg"
                 v-model="form.fromPlace"
                 :org="derivedFromOrg"
+                variant="ship"
                 :default-radius="arriveRadius"
+                @refresh="reloadOptions"
               />
               <span v-else class="tip">先选采样箱</span>
             </el-form-item>
@@ -347,11 +350,14 @@
               <p class="tip">默认检测站负责人。签收后箱子改归检测站。</p>
             </el-form-item>
             <el-form-item label="收货地址">
-              <PlaceField
+              <AddressBlock
                 v-if="station"
                 v-model="form.toPlace"
                 :org="stationOrg"
+                variant="receive"
+                :show-setup="canSetupStation"
                 :default-radius="arriveRadius"
+                @refresh="reloadOptions"
               />
               <span v-else class="tip">指定检测站后带出收货地址</span>
             </el-form-item>
@@ -359,11 +365,13 @@
 
           <template v-else-if="current === 'sample'">
             <el-form-item label="计划地点">
-              <PlaceField
+              <AddressBlock
                 :key="form.fromOrgId || 'none'"
                 v-model="form.placeAt"
                 :org="orgById(form.fromOrgId)"
+                variant="plan"
                 :default-radius="arriveRadius"
+                @refresh="reloadOptions"
               />
             </el-form-item>
             <el-form-item label="样品">
@@ -469,11 +477,14 @@
               </p>
             </el-form-item>
             <el-form-item label="收货地址">
-              <PlaceField
+              <AddressBlock
                 v-if="station"
                 v-model="form.toPlace"
                 :org="stationOrg"
+                variant="receive"
+                :show-setup="canSetupStation"
                 :default-radius="arriveRadius"
+                @refresh="reloadOptions"
               />
               <span v-else class="tip">指定检测站后带出收货地址</span>
             </el-form-item>
@@ -792,7 +803,7 @@ import API, {
 } from "@/api/sample/report-policy";
 import type { SampleBox } from "../data";
 import PolicyFields from "../boxes/PolicyFields.vue";
-import PlaceField from "./PlaceField.vue";
+import AddressBlock from "./AddressBlock.vue";
 import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
@@ -817,6 +828,13 @@ const canInspect = computed(() => Boolean(user.userInfo.perms?.includes("task:cr
 const canPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.task)));
 const canReadPolicy = computed(() => Boolean(user.userInfo.perms?.includes(policyPerm.read)));
 const canManage = computed(() => canSample.value || canInspect.value);
+/** #88 收货地址「去设置」gate：仅检测站管理员（STATION_ADMIN）/ADMIN 可见（角色 code 来自 /me）。 */
+const canSetupStation = computed(
+  () =>
+    user.userInfo.roles?.includes("ADMIN") ||
+    user.userInfo.roles?.includes("STATION_ADMIN") ||
+    false
+);
 /** 某类型当前账号能不能建（送检严格要 inspect 码，与服务器同口径；R21/062 去 sample 兜底）。 */
 function kindAllowed(kind: string) {
   // 暂时下线（#73）：建单口径暂只放行「采样后送检」。恢复时取消注释原判定、删掉本行守卫，
@@ -1021,11 +1039,12 @@ const orgs = ref<TaskOrg[]>([]),
   senderUsers = ref<Person[]>([]);
 /** 唯一检测站（taskOptions 回生效值）：接收方固定为它，只读展示。 */
 const station = ref<TaskStation | null>(null);
-/** 采样单位候选＝公司类型（分公司自采），排除检测站。 */
+/** 采样单位候选＝公司类型（分公司自采），排除检测站。
+ * #87 双保险：只渲染范围内单位（服务端 taskOptions 已按范围过滤）——范围外公司不得 disabled 灰显泄露名称。 */
 const companyOrgs = computed(() =>
-  orgs.value.filter((o) => o.type === "公司" && o.id !== station.value?.id)
+  orgs.value.filter((o) => o.type === "公司" && o.id !== station.value?.id && o.inScope)
 );
-/** 检测站作 PlaceField 的 org：优先用 orgs 里的行，取不到时按 station 拼一个。 */
+/** 检测站作 AddressBlock 的 org：优先用 orgs 里的行，取不到时按 station 拼一个。 */
 const stationOrg = computed<TaskOrg | null>(() => {
   const st = station.value;
   if (!st) return null;
@@ -1169,12 +1188,15 @@ function checkStep(key: StepKey) {
     else if (orgById(form.fromOrgId)?.type !== "公司")
       errors.fromOrgId = "采样单位必须是分公司（公司类型）";
     if (!form.sender) errors.sender = "请选择或填写寄出人";
+    // #88 寄出地址必填：公司地址已设置视为已填（AddressBlock 公司模式带出）；未设置且自定义空→拦
+    if (!form.fromPlace) errors.fromPlace = "请设置寄出地址：选用公司地址或自定义";
   }
   // 送检：寄出与接收一步（寄出人＋检测站＋签收人）
   if (key === "send") {
     if (!form.sender) errors.sender = "请选择或填写寄出人";
     if (!station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
     if (!form.signer) errors.signer = "请选择或填写签收人";
+    if (!form.fromPlace) errors.fromPlace = "请设置寄出地址：选用公司地址或自定义";
   }
   if (key === "to" && !station.value) errors.toOrgId = "请先在系统设置指定唯一检测站";
   if (key === "to" && !form.signer) errors.signer = "请选择或填写签收人";
@@ -1456,6 +1478,21 @@ async function submit() {
 const optionsFailed = ref(false);
 /** 带过来的 ?boxIds= 里没取到的台数（不在范围内或已删除）：取到几台就用几台，但要告诉用户少了几台。 */
 const presetMissing = ref(0);
+/**
+ * #88「刷新公司地址/检测站地址」：只重拉单位列表与检测站（含 effectiveDeptLocation），
+ * 不动已填表单/已选箱子/脏基线。地址块 watch org.location 落定后自动带出新地址。
+ */
+async function reloadOptions() {
+  try {
+    const loaded = await API.taskOptions();
+    orgs.value = loaded.orgs;
+    station.value = loaded.station;
+    arriveRadius.value = loaded.arriveRadiusM;
+    myOrgId.value = loaded.myOrgId;
+  } catch {
+    ElMessage.warning("刷新单位地址失败，请稍后重试");
+  }
+}
 /**
  * 初始化：单位列表、唯一检测站、系统默认（上报周期、到达误差）、?boxIds= 预选的箱子。
  * 取失败时页面会是一张填不下去的半张表，所以要留一条能重试的提示。

@@ -2,21 +2,28 @@
   <el-dialog
     :model-value="modelValue"
     title="批量划拨箱子"
-    width="860px"
+    width="1000px"
     style="max-width: 96vw"
     :close-on-click-modal="false"
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     @open="onOpen"
   >
-    <p class="lead">
-      选目标公司，再勾选一批箱子。
-      <b>创建后待目标分公司管理员接受</b>
-      ：接受时箱子归属才转到目标公司（保管人清空）。接受前创建方可取消、接收方可拒收（原因必填）；
-      <b>接受后不可撤销</b>
-      （退回/改派请用列表的「重新划拨」）。提交前需输入登录密码二次确认。
+    <!-- #84 弹框精修：四行规则长段→一行灰字短句＋行尾 info 气泡承载原文全文（RULES_FULL 单点常量） -->
+    <p class="lead" data-test="transfer-lead">
+      {{ RULES_SHORT }}
+      <el-tooltip
+        placement="top"
+        effect="light"
+        :content="RULES_FULL"
+        :popper-style="{ maxWidth: '360px' }"
+      >
+        <el-icon class="lead-info" tabindex="0" data-test="transfer-lead-info">
+          <QuestionFilled />
+        </el-icon>
+      </el-tooltip>
     </p>
 
-    <el-form label-width="90px" @submit.prevent>
+    <el-form label-width="100px" class="form-grid" @submit.prevent>
       <el-form-item label="目标公司" required>
         <el-tree-select
           v-model="toOrgId"
@@ -25,7 +32,7 @@
           filterable
           clearable
           placeholder="箱子归属要转到的公司"
-          style="width: 320px"
+          style="width: 100%"
           :render-after-expand="false"
           @change="onTargetChange"
         />
@@ -35,7 +42,7 @@
           v-model="name"
           maxlength="120"
           placeholder="比如：华南区开工补给"
-          style="width: 420px"
+          style="width: 100%"
         />
       </el-form-item>
       <el-form-item label="快递单号">
@@ -43,17 +50,17 @@
           v-model="trackingNo"
           maxlength="64"
           placeholder="选填，接受前可补填/修改，接受后只读"
-          style="width: 420px"
+          style="width: 100%"
         />
       </el-form-item>
-      <el-form-item label="备注">
+      <el-form-item label="备注" class="span-2">
         <el-input
           v-model="note"
           type="textarea"
           :rows="2"
           maxlength="1000"
           placeholder="选填，记进操作记录"
-          style="width: 560px"
+          style="width: 100%"
         />
       </el-form-item>
     </el-form>
@@ -88,20 +95,21 @@
       >
         <el-option v-for="l in LIVES" :key="l" :value="l" :label="l" />
       </el-select>
-      <span class="spacer" />
-      <el-button link type="primary" :disabled="!pageSelectable.length" @click="selectPage">
-        全选本页
-      </el-button>
-      <el-button link type="primary" :disabled="!selectableCount" @click="selectAll">
-        选择全部 {{ selectableCount }} 台可选
-      </el-button>
-      <el-button link :disabled="!selected.size" @click="selected.clear()">清空</el-button>
+      <span class="picker-links">
+        <el-button link type="primary" :disabled="!pageSelectable.length" @click="selectPage">
+          全选本页
+        </el-button>
+        <el-button link type="primary" :disabled="!selectableCount" @click="selectAll">
+          选择全部 {{ selectableCount }} 台可选
+        </el-button>
+        <el-button link :disabled="!selected.size" @click="selected.clear()">清空</el-button>
+      </span>
     </div>
 
     <el-table
       v-loading="loading"
       :data="rows"
-      height="300"
+      :max-height="320"
       row-key="boxId"
       class="picker-table"
       empty-text="没有符合条件的箱子"
@@ -148,8 +156,8 @@
         </template>
       </el-table-column>
     </el-table>
-    <DataPager v-model:page="page" v-model:page-size="pageSize" :total="total" :sizes="[50, 100]" />
 
+    <!-- #84：已选 chips 紧贴表底（表→chips→翻页），单行自适应后不再隔翻页留白 -->
     <div v-if="selected.size" class="chips">
       <span class="text-muted">已选 {{ selected.size }} 台：</span>
       <el-tag
@@ -163,6 +171,8 @@
         {{ nameOf(id) }}
       </el-tag>
     </div>
+
+    <DataPager v-model:page="page" v-model:page-size="pageSize" :total="total" :sizes="[50, 100]" />
 
     <el-alert
       v-if="blocked.length"
@@ -222,9 +232,9 @@
         <b>{{ targetName || "目标公司" }}</b>
       </p>
       <p v-if="trackingNo.trim()" class="route-line mono">快递单号：{{ trackingNo.trim() }}</p>
-      <p class="warn-line">提交后待目标分公司管理员接受；接受前可取消/拒收。</p>
+      <p class="warn-line">{{ RULES_SHORT }}</p>
     </div>
-    <el-form label-width="90px" @submit.prevent>
+    <el-form label-width="100px" @submit.prevent>
       <el-form-item label="登录密码" required>
         <el-input
           v-model="password"
@@ -249,13 +259,21 @@
 
 <script setup lang="ts">
 import { ElMessage } from "element-plus";
-import { Search } from "@element-plus/icons-vue";
+import { Search, QuestionFilled } from "@element-plus/icons-vue";
 import TransferAPI, { type CandidateBox, type CreateBlocked } from "@/api/sample/transfer";
 import DeptAPI from "@/api/system/dept";
 import type { OptionItem } from "@/api/common";
 import DataPager from "@/components/biz/DataPager.vue";
 import { lifeTone } from "@/utils/tone";
 import type { ApiError } from "@/utils/request";
+
+/**
+ * #84 弹框精修（仅呈现）：可见层只留一行灰字短句，规则原文全文收进行尾 info 气泡。
+ * 两个常量单点维护防漂移；短句与二次确认弹框 warn-line 共用同一来源。
+ */
+const RULES_SHORT = "提交后待目标分公司管理员接受；接受前可取消/拒收。";
+const RULES_FULL =
+  "选目标公司，再勾选一批箱子。创建后待目标分公司管理员接受：接受时箱子归属才转到目标公司（保管人清空）。接受前创建方可取消、接收方可拒收（原因必填）；接受后不可撤销（退回/改派请用列表的「重新划拨」）。提交前需输入登录密码二次确认。";
 
 /**
  * R24（#70）prefill：列表「重新划拨」带进来的原单箱集（重放语义）。
@@ -537,6 +555,30 @@ onBeforeUnmount(() => window.clearTimeout(typing));
   font-size: 13px;
   color: var(--el-text-color-secondary);
 }
+/* #84：行尾 info 图标沿用 tasks/index.vue .qmark／create.vue .tip-info 字阶配色；气泡限宽走 popper-style */
+.lead-info {
+  margin-left: 4px;
+  font-size: 14px;
+  vertical-align: -2px;
+  color: var(--el-text-color-placeholder);
+  cursor: help;
+}
+/* #84：表单双列栅格撑满弹框内容列（目标公司｜划拨单名称／快递单号／备注跨列）；
+   控件 100% 随列宽，消除固定 px 宽的右半空白；1280 档回落单列。间距走 4px 网格。 */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+  align-items: start;
+}
+.form-grid .span-2 {
+  grid-column: 1 / -1;
+}
+@media (max-width: 1280px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .picker-bar {
   display: flex;
   flex-wrap: wrap;
@@ -544,8 +586,12 @@ onBeforeUnmount(() => window.clearTimeout(typing));
   align-items: center;
   margin-bottom: 10px;
 }
-.spacer {
-  flex: 1;
+/* #84：三链接收成一组的右对齐 flex，换行时整组落行不挤散 */
+.picker-links {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: auto;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -569,7 +615,7 @@ onBeforeUnmount(() => window.clearTimeout(typing));
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
-  margin-top: 10px;
+  margin-top: 8px;
 }
 .blocked-alert {
   margin-top: 12px;
@@ -604,7 +650,7 @@ onBeforeUnmount(() => window.clearTimeout(typing));
 .pw-error {
   visibility: hidden;
   height: 20px;
-  margin: 0 0 0 90px;
+  margin: 0 0 0 100px;
   font-size: 12px;
   line-height: 20px;
   color: var(--el-color-danger);

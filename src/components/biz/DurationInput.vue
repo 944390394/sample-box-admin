@@ -1,5 +1,5 @@
 <template>
-  <div class="duration-input">
+  <div class="duration-input" :class="{ 'is-inline': inlineChips }">
     <!-- 只读态（无权限/继承）：归一文本，不可编辑 -->
     <div v-if="disabled" class="duration-line">
       <span class="duration-readonly">{{ formatDuration(whole) }}</span>
@@ -62,6 +62,7 @@
           v-for="chip in chips"
           :key="chip.value"
           size="small"
+          :round="inlineChips"
           :type="whole === chip.value ? 'primary' : 'default'"
           :aria-pressed="whole === chip.value"
           @click="pick(chip.value)"
@@ -96,6 +97,8 @@ import type { DurationPartKey } from "@/utils/duration";
  * 超量统一由 applyDurationPart clamp；分量清空（null）忽略，el-input-number 回弹显示。
  * 只监听 @change（blur/Enter/步进提交）不监听逐键 update:modelValue：归一会改变分量绑定值，
  * 逐键应用＋提交再应用会把同一输入叠算两次（600+90→690 再 +90→750）；提交时应用一次则无此问题。
+ * inlineChips（opt-in，#90 公司策略中心网格版式）：stepper＋＝X 秒＋chips 同行单行排布，
+ * 分量收窄 64px、chips 改 round 小按钮；默认 false 两行版式不变（BoxPolicySettings 等调用点零回归）。
  */
 defineOptions({ name: "DurationInput" });
 
@@ -106,8 +109,10 @@ const props = withDefaults(
     min?: number;
     max?: number;
     disabled?: boolean;
+    /** chips 与 stepper 同行（公司策略中心网格版式 opt-in）。 */
+    inlineChips?: boolean;
   }>(),
-  { min: 5, max: 3600, disabled: false }
+  { min: 5, max: 3600, disabled: false, inlineChips: false }
 );
 const emit = defineEmits<{ (e: "update:modelValue", value: number): void }>();
 
@@ -209,5 +214,33 @@ onBeforeUnmount(() => clearTimeout(hintTimer));
 }
 .duration-chips .el-button + .el-button {
   margin-left: 0;
+}
+/* opt-in 同行版式（#90）：stepper＋＝X 秒＋chips 单行；默认两行版式不受影响 */
+.duration-input.is-inline {
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+}
+.duration-input.is-inline .duration-line {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  gap: 6px 8px;
+}
+.duration-input.is-inline .duration-part {
+  width: 64px;
+}
+.duration-input.is-inline .duration-equals {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.duration-input.is-inline .duration-chips {
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+}
+.duration-input.is-inline .duration-chips .el-button {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
 }
 </style>

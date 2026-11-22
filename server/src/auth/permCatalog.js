@@ -1141,6 +1141,29 @@ export const SAMPLER_ENTRY_063 = ["device:box:task", "task:sample-start", "task:
 export const TRANSFER_ACCEPT_064 = ["task:transfer:accept"];
 
 /**
+ * 迁移 065（R26 / 任务 #85，用户拍板「三角色补码」）：上报记录可见性的存量补码集。
+ * BRANCH_ADMIN 预设原缺 device:box:log，#logPerm 只放行持码事件类——只有定时报文的箱子
+ * 概览 0/空态。补「查看上报记录」＋「导出单箱上报记录」（导出是读的延伸，随读同补，055 同款口径）。
+ * 生产另有 DB-only 自定义角色 STATION_ADMIN/STATION_STAFF（代码模板无），由 065 按 role code 一并补。
+ * 不是拆码（无老码→新码映射），故不进 upgradeCodes 拆分链；新库由 DEFAULT_ROLE_PERMS.BRANCH_ADMIN
+ * 后置追加覆盖（见下），存量三角色由 065 只补不删（063/064 同款）。
+ */
+export const UPLINK_LOG_GRANT_065 = ["device:box:log", "device:box:logExport"];
+
+/**
+ * 迁移 066（R27 / 任务 #89，用户拍板「管理角色自部门基本信息编辑，结构归总部」）：存量补码集。
+ * BRANCH_ADMIN 预设原缺 sys:dept:update——分公司管理员改不了本单位名称/地址/联系人/电话/排序。
+ * 补「编辑部门基本信息」一码；类型/上级/启停/编码属组织结构，由 org-api updateDept 字段级守卫
+ * 挡给总部 ADMIN（即使角色页另授 type/enable/disable 也挡），不靠拆码扩面。
+ * 生产另有 DB-only 自定义角色 STATION_ADMIN（代码模板无），由 066 按 role code 一并补。
+ * 不是拆码，故不进 upgradeCodes 拆分链：SPLIT_045 会把 sys:dept:update 连带拆出
+ * type/address/camera/leader、061 再拆出 enable/disable，超出本批「仅 update＋字段级守卫」口径，
+ * 新库由 DEFAULT_ROLE_PERMS.BRANCH_ADMIN 升级链后置追加覆盖（见下，065 同款），
+ * 存量两角色由 066 只补不删（063/064/065 同款）。
+ */
+export const DEPT_SELF_EDIT_066 = ["sys:dept:update"];
+
+/**
  * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
  * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
  */
@@ -1308,6 +1331,22 @@ export const DEFAULT_ROLE_PERMS = {
 DEFAULT_ROLE_PERMS.SAMPLER = DEFAULT_ROLE_PERMS.SAMPLER.filter(
   (code) => code !== "monitor:overview"
 );
+// R26（#85/065）三角色补码：分公司管理员是上报记录主责角色，模板补 log＋logExport
+//（存量库由 065 幂等补码，含 DB-only 的 STATION_ADMIN/STATION_STAFF；角色页保存过的以保存为准）。
+// 不走 LEGACY_DEFAULTS/upgradeCodes：SPLIT_045 会把 device:box:log 连带拆出 device:box:raw
+//（查看上报原文），超出本批「仅 log+logExport」拍板口径，故在升级链之后显式追加
+//（SAMPLER 剔 monitor:overview 同款后置修正；seedRolePerms/ROLE_TEMPLATES 直读 DEFAULT_ROLE_PERMS，不再过拆分链）。
+DEFAULT_ROLE_PERMS.BRANCH_ADMIN = [
+  ...new Set([...DEFAULT_ROLE_PERMS.BRANCH_ADMIN, ...UPLINK_LOG_GRANT_065]),
+];
+// R27（#89/066）自部门基本信息编辑：分公司管理员补 sys:dept:update（存量库由 066 幂等补码，
+// 含 DB-only 的 STATION_ADMIN；角色页保存过的以保存为准）。结构（类型/上级/启停/编码）归总部，
+// 由 org-api updateDept 字段级守卫挡，不靠拆码扩面。不走 LEGACY_DEFAULTS/upgradeCodes：
+// SPLIT_045 会把 sys:dept:update 连带拆出 type/address/camera/leader、061 再拆出 enable/disable，
+// 超出本批「仅 update＋字段级守卫」口径，故升级链后置 Set 去重追加（065 同款后置修正）。
+DEFAULT_ROLE_PERMS.BRANCH_ADMIN = [
+  ...new Set([...DEFAULT_ROLE_PERMS.BRANCH_ADMIN, ...DEPT_SELF_EDIT_066]),
+];
 
 /** 角色页「常用模板」：一键套用后再改。suggestedScope 是建议数据范围（B4 范围选择器一键带入），与种子角色一致。 */
 export const ROLE_TEMPLATES = [

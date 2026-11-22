@@ -531,6 +531,12 @@ export class ReportPolicyController {
     metadata.fromPlace = readPlace(input.fromPlace);
     metadata.placeAt = readPlace(input.placeAt);
     if (metadata.placeAt?.address && !metadata.place) metadata.place = metadata.placeAt.address;
+    // #88 寄出地址必填（与建单页 step3 同口径）：寄送类（送检/采样后送检，含旧合并别名）公司地址
+    // 已设置视为已填——建单页恒把最终地址（公司或自定义）放进 fromPlace 下发。新口径请求显式携带
+    // fromPlace 字段却为空（公司未设置且自定义也空）→ 400。旧客户端/小程序不带该字段＝旧口径，
+    // 保留兼容（与 localOnly 显式标记同源），不强制 legacy 路径；本地采样无寄送腿，不要求。
+    if (!localOnly && input.fromPlace !== undefined && !metadata.fromPlace)
+      throw badRequest("请设置寄出地址：选用公司地址或自定义");
     metadata.createdBy = actorOf(ctx).name;
     // 任务期间每台箱子最多开几次箱，不填不限
     if (input.maxOpens != null && input.maxOpens !== "") {
@@ -610,8 +616,11 @@ export class ReportPolicyController {
         if (String(sampler.id) === String(station.id)) throw badRequest("采样单位不能是检测站");
         if (sampler.type !== "公司") throw badRequest("采样单位必须是分公司（公司类型）");
         const trip = deriveTrip(String(from.id), String(station.id), String(sampler.id));
-        if (!inScope(ctx, sampler.id) && !inScope(ctx, from.id) && !isSystemAdmin(ctx))
-          throw badRequest("采样单位或寄出方不在你的管理范围内");
+        // #87：采样单位（客户端 orgId/fromOrgId）必须在建单方范围内——原 OR 口径（采样单位或寄出方
+        // 任一在范围即过）让分公司管理员拿自己的箱把采样单位写成兄弟公司（越权建单洞）。
+        // 寄出方＝箱当前归属，已被 targets() 的箱子范围门把住，无需再 OR；管理员全量不受限。
+        if (!inScope(ctx, sampler.id) && !isSystemAdmin(ctx))
+          throw noPermission("采样单位不在你的管理范围内");
         metadata.orgId = String(sampler.id);
         metadata.org = sampler.name;
         metadata.trip = trip;
@@ -1532,10 +1541,15 @@ export class ReportPolicyController {
         location: effectiveDeptLocation(rows, row.id),
         leader: row.leader_name ? { id: String(row.leader_user_id), name: row.leader_name } : null,
       }))
+      // #87：非管理员只回数据范围内的单位——原先全量返回＋inScope 旗标，前端把范围外公司
+      // disabled 灰显仍泄露名称与层级（分公司管理员看见华东/西南/总公司）。ADMIN（scope.all）全量保持；
+      // 保留行的 path 祖先名随子树自然带出，属范围内信息。
+      .filter((org) => org.inScope || isSystemAdmin(ctx))
       .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
     let users = [];
     const orgId = String(ctx.query.orgId || "");
-    if (byId.has(orgId)) {
+    // #87：按单位取人员同样过范围门——越权 orgId 回空数组，不给他单位人员名单（原先只查部门存在）
+    if (byId.has(orgId) && (inScope(ctx, orgId) || isSystemAdmin(ctx))) {
       const ids = [
         orgId,
         ...orgs.filter((org) => org.path.startsWith(`${pathOf(orgId)} / `)).map((org) => org.id),

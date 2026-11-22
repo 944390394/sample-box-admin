@@ -118,6 +118,17 @@ const hasPerm = (ctx, code) => isAdmin(ctx) || Boolean(ctx.access?.perms?.has(co
 /** 这项权限我能不能转授：系统管理员全部能；其他人要自己某个角色上这项开了「可转授」。 */
 const canPass = (ctx, code) => isAdmin(ctx) || Boolean(ctx.access?.grantable?.has(code));
 /**
+ * R27（#89/066）自部门基本信息编辑模式：分公司/站点管理员（非 ADMIN）持 sys:dept:update 时，
+ * 只改本单位基本资料（名称/地址/联系人/电话/排序，＋持 camera 码改监控），组织结构归总部 ADMIN。
+ * 按角色 code 命中（与 066 补码同口径）——自定义角色（如 DESK/EDITOR）持 update 仍走原字段权限桶，
+ * 不借本批扩面（dept-limit/perm-status-split 基线锁定）。角色页收回 update 即退出自编辑（保存为准）。
+ */
+const DEPT_SELF_EDIT_ROLES = new Set(["BRANCH_ADMIN", "STATION_ADMIN"]);
+const isDeptSelfEdit = (ctx) =>
+  !isAdmin(ctx) &&
+  Boolean(ctx.access?.roles?.some((role) => DEPT_SELF_EDIT_ROLES.has(role))) &&
+  Boolean(ctx.access?.perms?.has("sys:dept:update"));
+/**
  * 当前用户不能转授的项，逐项说明为什么（授权界面上灰掉的项悬停看原因）：
  * 被自己所在部门的上限挡住了、自己没有这项、有但没开可转授。管理员返回空对象。
  */
@@ -322,9 +333,11 @@ async function readLeader(db, input, policy = SECURITY_DEFAULTS) {
  * 部门表单里每块字段要各自的权限：基本信息、类型、地址和联系人、监控通道、负责人。
  * 启停单独授权（R26/061）：改成启用要「启用部门」、改成停用要「停用部门」，不再并入基本信息。
  * 顺手新建负责人账号等于新增人员：还要「新增人员」，给角色还要「给人员分配角色」并过可转授检查。
+ * selfEdit（R27/#89/066）：分公司/站点管理员自编辑模式，地址块由 update 覆盖（不另查地址码）；
+ * 结构字段（类型/上级/启停/编码）的拦截在 updateDept 守卫层，不在本函数。
  * current 为空表示新建。返回失败原因或空串。
  */
-async function checkDeptFields(ctx, body, current, { place, leader, cameras }) {
+async function checkDeptFields(ctx, body, current, { place, leader, cameras, selfEdit = false }) {
   const need = (perm) => (hasPerm(ctx, perm) ? "" : `没有「${permLabelOf(perm)}」权限`);
   const creating = !current;
   const changed = (key, value, before) =>
@@ -357,7 +370,9 @@ async function checkDeptFields(ctx, body, current, { place, leader, cameras }) {
     (key) => String(place[key] ?? "") !== String(before[key] ?? "")
   );
   if (moved) {
-    const why = need("sys:dept:address");
+    // R27（#89/066）：自编辑模式（分公司/站点管理员持 update）下 update 即覆盖地址块——
+    // 改本单位地址/联系人/电话不再另要 sys:dept:address；其他角色仍按原桶查地址码。
+    const why = selfEdit ? "" : need("sys:dept:address");
     if (why) return why;
   }
   if (
@@ -762,6 +777,21 @@ export async function updateDept(ctx) {
     await record(ctx, action, "dept", current.id, "失败");
     return denyScope(ctx, "只能修改自己管理范围内的部门");
   }
+  // R27（#89/066）自部门基本信息编辑守卫：分公司/站点管理员（非 ADMIN）持 update 只改基本资料；
+  // 类型/上级/启停/编码属组织结构，归总部 ADMIN——即使角色页另授了 type/enable/disable 也挡（结构归总部拍板）。
+  // 置于范围校验后（范围外仍 A0404 不泄露存在性）、字段权限桶前（目标角色结构变更统一回此文案）。
+  // 回显原值（未变更）不拦：前端整表保存带 type/status/parentId 原值仍能改基本资料（061「状态没变不查码」同款）。
+  const selfEdit = isDeptSelfEdit(ctx);
+  if (selfEdit) {
+    const typeChanged = DEPT_TYPES.includes(body.type) && body.type !== (current.type || "公司");
+    const parentChanged = parentId !== String(current.parent_id);
+    const codeChanged =
+      body.code !== undefined && String(body.code ?? "") !== String(current.code ?? "");
+    if (typeChanged || parentChanged || statusChanged || codeChanged) {
+      await record(ctx, action, "dept", current.id, "失败");
+      return denyPerm(ctx, "组织结构调整请联系系统管理员");
+    }
+  }
   let place, leader, cameras;
   try {
     place = deptLocation(body, current);
@@ -772,7 +802,7 @@ export async function updateDept(ctx) {
     await record(ctx, action, "dept", current.id, "失败");
     return ctx.fail(error.message);
   }
-  const denied = await checkDeptFields(ctx, body, current, { place, leader, cameras });
+  const denied = await checkDeptFields(ctx, body, current, { place, leader, cameras, selfEdit });
   if (denied) {
     await record(ctx, action, "dept", current.id, "失败");
     return denyPerm(ctx, denied);
@@ -825,7 +855,40 @@ export async function updateDept(ctx) {
       ]);
     return leaderId;
   });
-  await record(ctx, action, "dept", current.id, "成功");
+  // R27（#89/066）审计明细：before/after 差集（沿 deptLimit/saveRolePerms「只存值、有变化才写」口径，
+  // 日志只存码/数值、读时装饰）。逐字段比落库终值与改前现状；无任何变化时不写空明细。
+  const written = {
+    parent_id: parentId,
+    name: body.name || current.name,
+    code: body.code || current.code,
+    type: DEPT_TYPES.includes(body.type) ? body.type : current.type || "公司",
+    sort: Number(body.sort ?? current.sort),
+    status: Number(body.status ?? current.status),
+    address: place.address,
+    lng: place.lng,
+    lat: place.lat,
+    contact: place.contact,
+    phone: place.phone,
+    leader_user_id: leaderId,
+  };
+  const detail = {};
+  for (const [key, value] of Object.entries(written)) {
+    if (String(value ?? "") !== String(current[key] ?? ""))
+      detail[key] = { before: current[key] ?? null, after: value ?? null };
+  }
+  if (cameras) {
+    const beforeCameras = readCameras(current.cameras);
+    if (JSON.stringify(beforeCameras) !== JSON.stringify(cameras))
+      detail.cameras = { before: beforeCameras, after: cameras };
+  }
+  await record(
+    ctx,
+    action,
+    "dept",
+    current.id,
+    "成功",
+    Object.keys(detail).length ? detail : undefined
+  );
   if (leader.create) await record(ctx, "新增用户（部门负责人）", "user", leaderId, "成功");
   ctx.ok(leaderResult(leader, leaderId), `修改部门${body.name || current.name}成功`);
 }

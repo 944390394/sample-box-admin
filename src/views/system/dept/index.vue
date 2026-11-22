@@ -119,6 +119,7 @@
                   v-if="canEditAny"
                   type="primary"
                   :icon="Edit"
+                  data-test="dept-edit-btn"
                   @click="openDialog(selected.parentId, selected.id)"
                 >
                   编辑
@@ -330,6 +331,7 @@
       :title="dialogState.title"
       size="720px"
       class="dept-drawer"
+      data-test="dept-drawer"
       @closed="closeDialog"
     >
       <el-form
@@ -342,8 +344,8 @@
         <section class="block">
           <h4>基本信息</h4>
           <el-row :gutter="16">
-            <el-col :span="24">
-              <el-form-item label="上级部门" prop="parentId">
+            <el-col v-if="!selfEdit" :span="24">
+              <el-form-item label="上级部门" prop="parentId" data-test="dept-field-parent">
                 <!-- #26 B3：scoped options；祖先壳禁用（不能把部门挂到上级单位下），scoped 用户没有「顶级部门」 -->
                 <el-tree-select
                   v-model="formData.parentId"
@@ -368,7 +370,7 @@
               </el-form-item>
             </el-col>
             <el-col :span="12" :xs="24">
-              <el-form-item label="部门名称" prop="name">
+              <el-form-item label="部门名称" prop="name" data-test="dept-field-name">
                 <el-input
                   v-model="formData.name"
                   maxlength="64"
@@ -377,8 +379,8 @@
                 />
               </el-form-item>
             </el-col>
-            <el-col :span="12" :xs="24">
-              <el-form-item label="部门编号" prop="code">
+            <el-col v-if="!selfEdit" :span="12" :xs="24">
+              <el-form-item label="部门编号" prop="code" data-test="dept-field-code">
                 <el-input
                   v-model="formData.code"
                   maxlength="64"
@@ -400,8 +402,8 @@
                 </p>
               </el-form-item>
             </el-col>
-            <el-col :span="12" :xs="24">
-              <el-form-item label="类型">
+            <el-col v-if="!selfEdit" :span="12" :xs="24">
+              <el-form-item label="类型" data-test="dept-field-type">
                 <el-radio-group v-model="formData.type" :disabled="!can('sys:dept:type')">
                   <el-radio-button value="公司" data-test="dept-type-company">公司</el-radio-button>
                   <!-- #62：检测站全局唯一（停用也占名额）——已有别的站时禁选，tooltip 点名原因；
@@ -454,8 +456,8 @@
                 />
               </el-form-item>
             </el-col>
-            <el-col :span="12" :xs="24">
-              <el-form-item label="状态">
+            <el-col v-if="!selfEdit" :span="12" :xs="24">
+              <el-form-item label="状态" data-test="dept-field-status">
                 <!-- R26（061）：启停各查各码——切到「正常」要启用部门、切到「禁用」要停用部门；
                      选回原状态是 no-op 不锁。无码 disabled＋tooltip 说明原因 -->
                 <el-radio-group v-model="formData.status">
@@ -597,17 +599,13 @@
                   v-model="formData.contact"
                   maxlength="64"
                   placeholder="收发联系人，默认负责人"
-                  :disabled="!can('sys:dept:address')"
+                  :disabled="!canAddress"
                 />
               </el-form-item>
             </el-col>
             <el-col :span="12" :xs="24">
               <el-form-item label="联系电话">
-                <el-input
-                  v-model="formData.phone"
-                  maxlength="32"
-                  :disabled="!can('sys:dept:address')"
-                />
+                <el-input v-model="formData.phone" maxlength="32" :disabled="!canAddress" />
               </el-form-item>
             </el-col>
           </el-row>
@@ -616,7 +614,7 @@
         <section class="block">
           <h4>地址与位置</h4>
           <p class="tip">调拨和采样任务会按这里自动带出寄出、收货地址，并计算箱子离目的地多远。</p>
-          <div class="address-card">
+          <div class="address-card" data-test="dept-address-card">
             <el-icon class="pin"><Location /></el-icon>
             <div class="address-text">
               <template v-if="place">
@@ -635,7 +633,7 @@
               </template>
               <div v-else class="muted">未设置，任务里需要手动填写地址</div>
             </div>
-            <el-button v-if="can('sys:dept:address')" @click="mapOpen = !mapOpen">
+            <el-button v-if="canAddress" data-test="dept-address-edit" @click="mapOpen = !mapOpen">
               {{ mapOpen ? "收起地图" : place ? "修改位置" : "地图选点" }}
             </el-button>
             <span v-else class="tip">没有「设置部门地址和联系人」权限</span>
@@ -712,11 +710,27 @@ defineOptions({
 });
 
 const router = useRouter();
+const route = useRoute();
 const deptFormRef = ref<FormInstance>();
 const can = usePerm();
 const me = useUserStore();
 /** #26 B3：只有全部数据范围能建顶级部门；scoped（本单位子树+祖先壳）不给「顶级部门」选项。 */
 const scopeAll = computed(() => me.userInfo.dataScope !== "scoped");
+/** #88 ADMIN 判定（角色 code 来自 /me）：结构字段对 ADMIN 全可见。 */
+const isAdmin = computed(() => me.userInfo.roles?.includes("ADMIN") ?? false);
+/**
+ * #88 自部门编辑模式：非 ADMIN 的分公司/检测站管理员持 sys:dept:update（066 补码）。
+ * 结构（类型/上级/状态/编号）归总部——抽屉隐藏这些字段；名称/地址/联系人/电话/排序可自编辑，
+ * cameras/leader 仍按现状码 gate。与 org-api updateDept 字段级守卫（按角色 code 命中）同口径。
+ */
+const selfEdit = computed(
+  () =>
+    !isAdmin.value &&
+    can("sys:dept:update") &&
+    (me.userInfo.roles?.includes("BRANCH_ADMIN") || me.userInfo.roles?.includes("STATION_ADMIN"))
+);
+/** 地址/联系人 gate：持 address 码，或自编辑模式（066 服务端守卫以 update 放行地址桶，UI 同步）。 */
+const canAddress = computed(() => can("sys:dept:address") || selfEdit.value);
 /** 编辑部门拆成五项＋启停（R26/061）：名称和上级、类型、地址和联系人、监控通道、负责人、启用/停用，有任意一项就能打开编辑。 */
 const canEditAny = computed(() =>
   [
@@ -1323,8 +1337,25 @@ function closeDialog(): void {
   resetForm();
 }
 
-onMounted(() => {
-  fetchData();
+/**
+ * #88 ?edit=<id> 深链（建单地址块「去设置」新标签打开）：列表加载后选中该部门并打开编辑抽屉。
+ * 权限不足→友好提示不开抽屉；范围外/不存在→getFormData 回 A0404，openDialog 已给可懂文案，不炸。
+ */
+async function applyEditDeepLink(): Promise<void> {
+  const editId = String(route.query.edit || "").trim();
+  if (!editId) return;
+  if (!canEditAny.value) {
+    ElMessage.warning("你没有编辑部门的权限，请联系系统管理员设置地址");
+    return;
+  }
+  const node = deptIndex.value.get(editId);
+  if (node) select(editId);
+  await openDialog(node?.parentId ? String(node.parentId) : undefined, editId);
+}
+
+onMounted(async () => {
+  await fetchData();
+  await applyEditDeepLink();
 });
 </script>
 

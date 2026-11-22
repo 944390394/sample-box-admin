@@ -162,12 +162,14 @@ test("调拨：选单位带出地址，寄出方寄出，接收方看得到并�
     const options = await call(c.taskOptions.bind(c), { ...south, query: {} });
     const desk = options.orgs.find((o) => o.id === "21");
     assert.equal(desk.location.fromName, "华南分公司");
-    assert.equal(options.orgs.find((o) => o.id === "3").inScope, false);
-    const people = await call(c.taskOptions.bind(c), { ...south, query: { orgId: "3" } });
-    assert.deepEqual(
-      people.users.map((u) => u.name),
-      ["华东签收员"]
+    // #87：范围外单位不再返回（原先全量＋inScope=false 灰显，泄露他公司名称/层级）
+    assert.equal(
+      options.orgs.find((o) => o.id === "3"),
+      undefined
     );
+    // #87：越权 orgId 取人员回空数组（原先会取回华东签收员）
+    const people = await call(c.taskOptions.bind(c), { ...south, query: { orgId: "3" } });
+    assert.deepEqual(people.users, []);
 
     // 寄出单位必须在自己范围内（合并单口径）；旧调拨不再新建
     const base = {
@@ -556,7 +558,9 @@ test("部门负责人：新建账号（随机或手填密码）、选已有用�
 });
 
 test("合并采样任务：选寄出分公司和计划地点，接收方固定检测站；建单即占用、取消释放、开箱上限", async () => {
-  applyBoxSettings({ box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" } });
+  applyBoxSettings({
+    box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
+  });
   const dir = await mkdtemp(path.join(os.tmpdir(), "task-sample-"));
   const db = await openDatabase(
     { dialect: "sqlite", sqlitePath: path.join(dir, "db") },
