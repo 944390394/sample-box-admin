@@ -21,6 +21,10 @@ export interface OperationLogItem {
   action: string;
   targetType: string;
   targetId: string;
+  /** #94 对象可读名（服务端解析：人员姓名/部门名/箱名/单号+名称；回退「类型 #id」）。旧服务端无此字段 */
+  targetName?: string;
+  /** #94 回退态标记：false=范围外/已删除/未解析，页面灰字＋tooltip 原编号 */
+  targetResolved?: boolean;
   result: string;
   /** 明细（grant diff/scope 前后等 JSON 文本，055a 起回填） */
   detail: string;

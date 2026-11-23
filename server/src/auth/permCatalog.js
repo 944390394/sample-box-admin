@@ -1164,6 +1164,18 @@ export const UPLINK_LOG_GRANT_065 = ["device:box:log", "device:box:logExport"];
 export const DEPT_SELF_EDIT_066 = ["sys:dept:update"];
 
 /**
+ * 迁移 068（R28 / 任务 #95，用户拍板「分公司管理员应该可以设置自己公司下的采样箱」）：存量补码集。
+ * BRANCH_ADMIN 预设原缺 device:box:policyWrite/policyBatch——分公司管理员在采样箱详情上报策略弹框
+ * 控件全 disabled、批量入口不显示（缺写码）。补「设置单箱上报策略」＋「批量设置上报策略」两码；
+ * 服务端 ReportPolicyController single/batch 入口同批加 manageOrgIds 范围守卫（非 ADMIN 只能改本公司
+ * 子树内的箱子，批量任一越权整单拒），补码不越权改他司箱。
+ * 生产另有 DB-only 自定义角色 STATION_ADMIN（代码模板无），由 068 按 role code 一并补。
+ * 不是拆码（无老码→新码映射），故不进 upgradeCodes 拆分链；新库由 DEFAULT_ROLE_PERMS.BRANCH_ADMIN
+ * 升级链后置追加覆盖（见下，065/066 同款），存量两角色由 068 只补不删（063/064/065/066 同款）。
+ */
+export const BOX_POLICY_SELF_068 = ["device:box:policyWrite", "device:box:policyBatch"];
+
+/**
  * 迁移 055（#26 D4）：新权限点补授权——持 sys:oplog:read 的角色/部门上限自动补 sys:oplog:export
  * （导出是读的延伸，拆开会让老角色点不到导出；同 053 模式，只补不删，幂等）。
  */
@@ -1346,6 +1358,13 @@ DEFAULT_ROLE_PERMS.BRANCH_ADMIN = [
 // 超出本批「仅 update＋字段级守卫」口径，故升级链后置 Set 去重追加（065 同款后置修正）。
 DEFAULT_ROLE_PERMS.BRANCH_ADMIN = [
   ...new Set([...DEFAULT_ROLE_PERMS.BRANCH_ADMIN, ...DEPT_SELF_EDIT_066]),
+];
+// R28（#95/068）分公司自箱上报策略：分公司管理员补 policyWrite＋policyBatch（存量库由 068 幂等补码，
+// 含 DB-only 的 STATION_ADMIN；角色页保存过的以保存为准）。服务端 single/batch 入口同批加 manageOrgIds
+// 范围守卫（非 ADMIN 只能改本公司子树内的箱子，批量任一越权整单拒），补码不越权改他司箱。
+// 升级链后置 Set 去重追加（065/066 同款后置修正）：两码非拆码键、无连带扩面，后置仅为与补码批一致口径。
+DEFAULT_ROLE_PERMS.BRANCH_ADMIN = [
+  ...new Set([...DEFAULT_ROLE_PERMS.BRANCH_ADMIN, ...BOX_POLICY_SELF_068]),
 ];
 
 /** 角色页「常用模板」：一键套用后再改。suggestedScope 是建议数据范围（B4 范围选择器一键带入），与种子角色一致。 */

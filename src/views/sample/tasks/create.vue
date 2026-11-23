@@ -158,7 +158,7 @@
           </template>
 
           <template v-else-if="current === 'from'">
-            <!-- R22：寄出方＝箱子当前归属，只读带出（双向＝检测站，单向＝分公司/总部）；R23 本地采样＝采样单位 -->
+            <!-- R22：寄出方＝箱子当前归属，只读带出（R28 寄送类要求箱在分公司/总部）；R23 本地采样＝采样单位 -->
             <el-form-item
               :label="form.kind === '采样' ? '采样单位' : '寄出方'"
               data-test="create-from-readonly"
@@ -179,16 +179,18 @@
                 仅本地采样：封箱后任务结束，箱子留在该采样单位，不寄送检测站。
               </p>
             </el-form-item>
+            <!-- R28：寄送方向可选（单向/双向，默认单向）；本地采样无寄送腿，整项隐藏 -->
             <el-form-item
-              v-if="trip && form.kind !== '采样'"
+              v-if="form.kind !== '采样'"
               label="寄送方向"
-              data-test="create-trip-tag-from"
+              data-test="create-trip-seg-from"
             >
-              <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
-                {{ trip }}
-              </el-tag>
+              <el-radio-group v-model="form.trip" data-test="create-trip-seg">
+                <el-radio-button value="单向">单向</el-radio-button>
+                <el-radio-button value="双向">双向</el-radio-button>
+              </el-radio-group>
               <p class="tip" data-test="create-trip-from-hint">
-                {{ directionHint }}
+                {{ DIRECTION_HINT }}
                 <el-tooltip
                   placement="top"
                   effect="light"
@@ -216,7 +218,7 @@
                 <el-option v-for="o in companyOrgs" :key="o.id" :value="o.id" :label="o.path" />
               </el-select>
               <!-- #82：单向/双向解释与上方寄送方向气泡全文重复，收敛删除；保留选单位默认口径 -->
-              <p class="tip">采样单位可选分公司，默认箱归属分公司（箱在检测站时默认本单位）。</p>
+              <p class="tip">采样单位可选分公司，默认箱归属分公司。</p>
             </el-form-item>
             <el-form-item
               v-if="form.kind !== '采样'"
@@ -243,7 +245,7 @@
                   <span class="dept">{{ u.dept }}</span>
                 </el-option>
               </el-select>
-              <p class="tip">寄出人须是寄出方的人员（双向时＝检测站人员）。</p>
+              <p class="tip">寄出人须是寄出方的人员。</p>
             </el-form-item>
             <el-alert
               v-if="outside.length && form.kind !== '采样'"
@@ -281,6 +283,26 @@
                 <div v-if="derivedFromOrg" class="text-muted">{{ derivedFromOrg.path }}</div>
               </div>
               <span v-else class="tip">先在「采样箱」步选箱，寄出方按箱子当前归属自动带出</span>
+            </el-form-item>
+            <!-- R28：送检方向同样可选（单向/双向，默认单向） -->
+            <el-form-item label="寄送方向" data-test="create-trip-seg-send">
+              <el-radio-group v-model="form.trip" data-test="create-trip-seg">
+                <el-radio-button value="单向">单向</el-radio-button>
+                <el-radio-button value="双向">双向</el-radio-button>
+              </el-radio-group>
+              <p class="tip" data-test="create-trip-send-hint">
+                {{ DIRECTION_HINT }}
+                <el-tooltip
+                  placement="top"
+                  effect="light"
+                  :content="MERGED_FLOW_TEXT"
+                  :popper-style="{ maxWidth: '360px' }"
+                >
+                  <el-icon class="tip-info" tabindex="0" data-test="create-trip-send-hint-info">
+                    <QuestionFilled />
+                  </el-icon>
+                </el-tooltip>
+              </p>
             </el-form-item>
             <el-form-item label="寄出人" required :error="errors.sender">
               <el-select
@@ -433,7 +455,7 @@
               </div>
               <p class="tip">
                 从任务开始到结束，按箱子上报的开箱次数计算。上限计采样开箱（装样+封箱=2）；
-                寄出腿（寄往检测站／双向首腿检测站→分公司）途中开箱超限会在任务列表与详情标红。
+                寄出腿（寄往检测站）与双向寄回腿（检测站寄回分公司）途中开箱超限会在任务列表与详情标红。
               </p>
             </el-form-item>
           </template>
@@ -502,13 +524,18 @@
               data-test="create-mixed-org"
               :title="`选中的箱子分属 ${boxOrgs.join('、')}。同一任务单的箱子须同归属，请按归属拆分任务单（跨公司批量请用划拨）`"
             />
-            <!-- R22：方向由箱归属派生（只读）——选箱后即可见，采样单位步再确认一次 -->
-            <el-form-item v-if="trip" label="寄送方向" data-test="create-trip-tag">
-              <el-tag :type="trip === '双向' ? 'warning' : 'success'" effect="plain" size="large">
-                {{ trip }}
-              </el-tag>
+            <!-- R28：方向可选（单向/双向，默认单向）——选箱步即可选，采样单位步再确认一次 -->
+            <el-form-item
+              v-if="form.kind !== '采样'"
+              label="寄送方向"
+              data-test="create-trip-seg-boxes"
+            >
+              <el-radio-group v-model="form.trip" data-test="create-trip-seg">
+                <el-radio-button value="单向">单向</el-radio-button>
+                <el-radio-button value="双向">双向</el-radio-button>
+              </el-radio-group>
               <p class="tip" data-test="create-trip-hint">
-                {{ directionHint }}
+                {{ DIRECTION_HINT }}
                 <el-tooltip
                   placement="top"
                   effect="light"
@@ -570,18 +597,17 @@
                     {{ derivedFromText || "—" }}
                     <el-tag size="small" type="info" class="tag">按箱归属 · 只读</el-tag>
                   </dd>
-                  <template v-if="form.kind === '采样后送检'">
+                  <template v-if="form.kind !== '采样'">
                     <dt>方向</dt>
                     <dd data-test="create-review-direction">
                       <el-tag
-                        v-if="trip"
                         size="small"
-                        :type="trip === '双向' ? 'warning' : 'success'"
+                        :type="form.trip === '双向' ? 'warning' : 'success'"
                         class="tag"
                       >
-                        {{ trip }}
+                        {{ form.trip }}
                       </el-tag>
-                      <span class="dir-hint">{{ trip ? directionHint : "选箱后按归属派生" }}</span>
+                      <span class="dir-hint">{{ DIRECTION_HINT }}</span>
                       <el-tooltip
                         placement="top"
                         effect="light"
@@ -593,6 +619,8 @@
                         </el-icon>
                       </el-tooltip>
                     </dd>
+                  </template>
+                  <template v-if="form.kind === '采样后送检'">
                     <dt>采样单位</dt>
                     <dd>{{ orgById(form.fromOrgId)?.path }}</dd>
                   </template>
@@ -808,7 +836,7 @@ import BoxPicker from "./BoxPicker.vue";
 import { radiusText } from "./radius";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
 import { formatDuration } from "@/utils/duration";
-import { KIND_META, MERGED_FLOW_TEXT } from "./status";
+import { DIRECTION_HINT, KIND_META, MERGED_FLOW_TEXT } from "./status";
 import { kindLabel, kindTone } from "../doc-flow";
 import { useUserStore } from "@/stores/user";
 import SampleBoxAPI from "@/api/sample/box";
@@ -863,6 +891,8 @@ const form = reactive({
   name: "",
   boxIds: [] as string[],
   overrides: {} as Record<string, Policy>,
+  /** R28：寄送方向用户可选（单向/双向，默认单向）；本地采样不消费。 */
+  trip: "单向" as "单向" | "双向",
   fromOrgId: "",
   sender: "",
   senderId: "",
@@ -885,13 +915,12 @@ function pickKind(kind: string) {
 }
 const kindLabelText = computed(() => kindLabel(form));
 /**
- * #82 文案精简：方向派生说明统一「一行灰字＋info 气泡全文」。短句单点常量，
- * step1／选箱／采样单位／核对四处复用；气泡全文复用 status.ts MERGED_FLOW_TEXT（单源防漂移）。
+ * #82 文案精简：方向说明统一「一行灰字＋info 气泡全文」。短句单点常量（status.ts DIRECTION_HINT），
+ * 选箱／采样单位／寄出与接收／核对四处复用；气泡全文复用 MERGED_FLOW_TEXT（单源防漂移，含寄回腿步骤链）。
  */
-const directionHint = "方向按箱当前归属自动派生（只读）";
 /** #82：面板下说明收敛为短句；原长段移入 kindFlowTipFull 气泡（hover/点击可见），不再占版面。 */
 const kindFlowTip = computed(() =>
-  form.kind === "采样后送检" ? directionHint : KIND_DESC_SHORT[form.kind] || ""
+  form.kind === "采样后送检" ? DIRECTION_HINT : KIND_DESC_SHORT[form.kind] || ""
 );
 const kindFlowTipFull = computed(() =>
   form.kind === "采样后送检"
@@ -945,25 +974,13 @@ const boxOrgIds = computed(() => [
 ]);
 /** 箱子共同归属（混归属时为空）；未分配＝""，显示总公司。 */
 const commonBoxOrgId = computed(() => (boxOrgIds.value.length === 1 ? boxOrgIds.value[0] : ""));
-/** 寄出方＝箱子当前归属（只读派生）：双向＝检测站，单向＝分公司/总部。 */
+/** 寄出方＝箱子当前归属（只读派生）：寄送类要求箱在分公司/总部（箱在检测站→建单拒，用划拨）。 */
 const derivedFromOrg = computed(() =>
   commonBoxOrgId.value ? orgById(commonBoxOrgId.value) : null
 );
 const derivedFromText = computed(() => {
   if (!chosenBoxes.value.length || boxOrgIds.value.length > 1) return "";
   return derivedFromOrg.value?.path || "总公司（未分配）";
-});
-/**
- * R22 派生方向（只读，不手选）：箱在检测站且采样单位≠检测站→双向（检测站寄出→分公司采样→寄回），
- * 否则单向（本地采样后寄检测站）。选了箱子才可派生；混归属/未指定检测站时为空。
- */
-const trip = computed<"单向" | "双向" | null>(() => {
-  // R23：只有采样后送检（合并流）才有派生方向；本地采样/送检无方向概念
-  if (form.kind !== "采样后送检") return null;
-  if (!chosenBoxes.value.length || boxOrgIds.value.length > 1 || !station.value) return null;
-  return commonBoxOrgId.value === station.value.id && form.fromOrgId !== station.value.id
-    ? "双向"
-    : "单向";
 });
 const boxNames = computed(() =>
   form.boxIds
@@ -1035,7 +1052,7 @@ watch(limitOpens, (on) => {
 const orgs = ref<TaskOrg[]>([]),
   fromUsers = ref<Person[]>([]),
   toUsers = ref<Person[]>([]),
-  /** R22：寄出人候选＝寄出方（箱归属）的人员；双向时是检测站的人。 */
+  /** R22：寄出人候选＝寄出方（箱归属）的人员（R28 寄送类箱在分公司/总部，寄出人即该单位的人）。 */
   senderUsers = ref<Person[]>([]);
 /** 唯一检测站（taskOptions 回生效值）：接收方固定为它，只读展示。 */
 const station = ref<TaskStation | null>(null);
@@ -1061,6 +1078,34 @@ const stationOrg = computed<TaskOrg | null>(() => {
     }
   );
 });
+/**
+ * R28：箱在检测站（寄送类）——建单拒，回分公司请用划拨；与服务端 createTask 同口径。
+ * 声明须在 station 之后：getter 读 station.value，提前声明会在 watch 初值求值时踩 TDZ，
+ * computed 缓存 undefined 且只 track 到 form.kind，门永远不生效（本批实测缺陷）。
+ */
+const boxesAtStation = computed(
+  () =>
+    form.kind !== "采样" &&
+    Boolean(station.value) &&
+    Boolean(commonBoxOrgId.value) &&
+    commonBoxOrgId.value === station.value?.id
+);
+/**
+ * R28 stale 校验修（截图缺陷）：选箱步的红字随选择即时清除/更新——以前 errors 只在点「下一步」
+ * 时重算，空选报错后选上 1 台，红字「请至少绑定一台采样箱」仍挂着。只在已有错误时重算，
+ * 不在用户挑选过程中抢先报错；混归属/箱在检测站两类错误同口径随选择更新。
+ */
+watch(
+  () => [form.boxIds.join(","), boxOrgIds.value.join(","), boxesAtStation.value] as const,
+  () => {
+    if (!errors.boxIds) return;
+    if (!form.boxIds.length) errors.boxIds = "请至少绑定一台采样箱";
+    else if (boxOrgIds.value.length > 1)
+      errors.boxIds = "同一任务单的箱子须同归属，请按归属拆分任务单";
+    else if (boxesAtStation.value) errors.boxIds = "箱在检测站：回分公司请用划拨";
+    else delete errors.boxIds;
+  }
+);
 // 采样单位不是公司类型时不能要求录像
 watch(isCompany, (on) => {
   if (!on) form.recordVideo = false;
@@ -1111,10 +1156,10 @@ const summaryItems = computed<InfoItem[]>(() => {
       value: form.boxIds.length ? `${form.boxIds.length} 台：${boxNames.value}` : "还没选",
     },
   ];
-  if (form.kind === "采样后送检")
+  if (form.kind !== "采样")
     items.push({
       label: "方向",
-      value: trip.value ? `${trip.value}（按箱归属派生）` : "选箱后派生",
+      value: form.trip,
     });
   if (form.kind === "采样") {
     items.push({ label: "采样单位", value: derivedFromText.value || "选箱后带出" });
@@ -1180,6 +1225,8 @@ function checkStep(key: StepKey) {
   if (key === "boxes" && !form.boxIds.length) errors.boxIds = "请至少绑定一台采样箱";
   if (key === "boxes" && boxOrgIds.value.length > 1)
     errors.boxIds = "同一任务单的箱子须同归属，请按归属拆分任务单";
+  // R28：寄送类箱在检测站→建单拒（回分公司请用划拨），与服务端同文案
+  if (key === "boxes" && boxesAtStation.value) errors.boxIds = "箱在检测站：回分公司请用划拨";
   // 本地采样：采样单位＝箱归属只读带出（选箱后即可），无寄出人
   if (key === "from" && form.kind === "采样" && !derivedFromOrg.value)
     errors.fromOrgId = "请先选采样箱，采样单位按箱子归属带出";
@@ -1434,6 +1481,7 @@ async function submit() {
     data = {
       ...base,
       kind: "送检",
+      trip: form.trip,
       fromOrgId: from,
       orgId: from,
       toOrgId: station.value.id,
@@ -1449,6 +1497,7 @@ async function submit() {
     data = {
       ...base,
       kind: "采样后送检",
+      trip: form.trip,
       fromOrgId: form.fromOrgId,
       toOrgId: station.value.id,
       sender: form.sender,

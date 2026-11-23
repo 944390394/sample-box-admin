@@ -7,7 +7,8 @@
           <template #content>
             <div>采样（仅本地）：待采样→采样中→已封箱（结束，箱留采样单位）</div>
             <div>送检（仅寄送）：待寄出→运送中→待签收→待检测→已检测</div>
-            <div>采样后送检＝合并全流，方向按箱归属派生（只读）</div>
+            <div>采样后送检＝合并全流，方向可选单向/双向（默认单向）</div>
+            <div>双向检测完寄回分公司（待寄回→寄回在途→待归还→已归还），需分公司签收归还</div>
             <div>签收后逐台扫码开始检测；待检测/已检测可退回寄出方</div>
           </template>
           <el-icon class="qmark"><QuestionFilled /></el-icon>
@@ -256,15 +257,15 @@
                 {{ kindLabel(row) }}
               </el-tag>
               <el-tag
-                v-if="row.trip && kindLabel(row) === '采样后送检'"
+                v-if="row.trip && ['采样后送检', '送检'].includes(kindLabel(row))"
                 size="small"
                 class="mini"
                 :type="row.trip === '双向' ? 'warning' : 'info'"
                 effect="plain"
                 :title="
-                  row.trip === '双向'
-                    ? '箱在检测站：检测站寄出→分公司采样→寄回检测站'
-                    : '箱在分公司/总部：本地采样后寄检测站'
+                  tripModeOf(row) === 'stationFirst'
+                    ? '箱在检测站：检测站寄出→分公司采样→寄回检测站（历史派生）'
+                    : TRIP_MODE_TEXT[tripModeOf(row)]
                 "
               >
                 {{ row.trip }}
@@ -493,6 +494,8 @@ import {
   statusGroupsFor,
   stepsOf,
   TASK_ACTIONS,
+  TRIP_MODE_TEXT,
+  tripModeOf,
 } from "./status";
 import { ENDED_VOID, kindLabel, kindTone } from "../doc-flow";
 import { IMEI_PERMS, TASK_CREATE } from "../data";
@@ -812,13 +815,22 @@ function dirOf(row: TaskRow) {
       hint: r.status === "退回中" ? "退回返程" : "退回完成",
       title: `退回返程：${r.toOrg || "—"} → ${r.fromOrg || "—"}`,
     };
-  if (label === "采样后送检" && r.trip === "双向")
+  if (label === "采样后送检" && tripModeOf(r) === "stationFirst")
     return {
       local: false,
       from: r.fromOrg || "—",
       to: r.org || "—",
       hint: "双向首腿 · 返程寄回检测站",
-      title: `双向全程：${r.fromOrg || "检测站"}寄出→${r.org || "分公司"}采样→寄回${r.toOrg || "检测站"}`,
+      title: `双向全程（历史派生）：${r.fromOrg || "检测站"}寄出→${r.org || "分公司"}采样→寄回${r.toOrg || "检测站"}`,
+    };
+  // R28 双向寄回腿（return）：寄出分公司→检测站，检测完寄回分公司（分公司签收归还）
+  if (tripModeOf(r) === "return" && (label === "采样后送检" || label === "送检"))
+    return {
+      local: false,
+      from: r.fromOrg || "—",
+      to: r.toOrg || "—",
+      hint: "双向 · 检测完寄回分公司",
+      title: `双向全程：${r.fromOrg || "分公司"}寄出→${r.toOrg || "检测站"}检测→寄回${r.fromOrg || "分公司"}（签收归还）`,
     };
   const from = r.fromOrg || r.org || "—";
   const to = r.toOrg || (label === "送检" ? "—" : r.org || "—");

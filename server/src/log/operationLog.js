@@ -1,4 +1,4 @@
-import { identityGranted, maskImei, resolveAccess } from "../auth/boxAccess.js";
+import { boxNameCell, identityGranted, maskImei, resolveAccess } from "../auth/boxAccess.js";
 import { formatTimestamp } from "../domain/Clock.js";
 import { pageLimit, resolveTimeRange } from "./timeRange.js";
 
@@ -53,12 +53,16 @@ export async function operationScope(db, user) {
   const sc = access.scope;
   if (sc.all) return { kind: "all" };
   const ids = (sc.manageOrgIds || []).map(String).filter(Boolean);
+  // #94：additive 带出箱子/任务可见性口径（orgIds 含祖先、ownerIds 保管人），
+  // 供对象名解析的范围判定用；列表/导出的行过滤仍只用 ids/actorId，口径零改动。
+  const orgIds = (sc.orgIds || []).map(String);
+  const ownerIds = (sc.ownerIds || []).map(String);
   if (!ids.length) {
-    if ((sc.ownerIds || []).length) return { kind: "actor", actorId: String(user.id) };
+    if (ownerIds.length) return { kind: "actor", actorId: String(user.id), orgIds, ownerIds };
     // 无生效角色（停用/未分配）且无部门范围：空范围显式 none，不能落到 depts[] 被误当全量
     return { kind: "none" };
   }
-  return { kind: "depts", ids };
+  return { kind: "depts", ids, orgIds, ownerIds };
 }
 
 /**
@@ -178,6 +182,147 @@ function toItem(row, perms = null) {
   };
 }
 
+/**
+ * #94 对象可读化：类型中文文案（与网页 TARGET_TYPES 同词汇）。
+ * 回退态「类型 #id」与设置类对象（无实体可查）都用这份文案。
+ */
+const TARGET_LABELS = {
+  user: "人员",
+  dept: "部门",
+  role: "角色",
+  box: "采样箱",
+  task: "任务单",
+  branding: "系统名称和图标",
+  map: "地图设置",
+  labels: "字段名称",
+  database: "数据库",
+  "report-policy": "上报策略",
+  "company-policy": "公司策略",
+  oplog: "操作日志",
+  overview: "总览",
+};
+
+/**
+ * #94：对象解析分类。report-policy 是历史重载类型——TK-/AL- 单号其实是 sample_task
+ * （任务单/划拨单），按单号解析；单箱策略的 15 位 IMEI 与其余类型不参与四类解析，走回退。
+ * 编号与类型同串（旧数据把类型当编号写）视同无编号，与网页 targetText 同口径。
+ */
+function targetOf(row) {
+  const type = String(row.target_type ?? "");
+  const raw = String(row.target_id ?? "");
+  const id = raw && raw !== type ? raw : "";
+  if (type === "task" || id.startsWith("TK-")) return { kind: "task", label: "任务单", id };
+  if (id.startsWith("AL-")) return { kind: "task", label: "划拨单", id };
+  if (type === "user" || type === "dept" || type === "box")
+    return { kind: type, label: TARGET_LABELS[type], id };
+  return { kind: "", label: TARGET_LABELS[type] || type, id };
+}
+
+/**
+ * #94：对象名解析的范围判定（fail-closed，与各对象自己的可见性口径一致）：
+ * - 人员/部门＝管人范围 manageOrgIds（scope.ids，下级管不了上级）；
+ * - 箱子＝canSee 口径 org_id∈orgIds（含祖先）或保管人∈ownerIds；
+ * - 任务＝参与方 from/to_org_id∈orgIds 或 body.orgId∈orgIds（箱快照分支不认，宁回退不泄露）；
+ * - 仅本人范围：人员只认自己、箱子只认自己保管的，其余回退。
+ * 范围外/已删除一律回退「类型 #id」，不报错也不泄露存在性。
+ */
+function targetInScope(kind, hit, scope) {
+  if (scope.kind === "all") return true;
+  if (scope.kind === "actor") {
+    if (kind === "user") return String(hit.id) === String(scope.actorId);
+    if (kind === "box")
+      return Boolean(hit.owner_id) && (scope.ownerIds || []).includes(String(hit.owner_id));
+    return false;
+  }
+  if (scope.kind !== "depts") return false;
+  const manage = scope.ids || [];
+  const orgs = scope.orgIds || [];
+  if (kind === "user") return manage.includes(String(hit.dept_id ?? ""));
+  if (kind === "dept") return manage.includes(String(hit.id));
+  if (kind === "box")
+    return (
+      orgs.includes(String(hit.org_id ?? "")) ||
+      (Boolean(hit.owner_id) && (scope.ownerIds || []).includes(String(hit.owner_id)))
+    );
+  if (kind === "task") {
+    if (hit.from_org_id && orgs.includes(String(hit.from_org_id))) return true;
+    if (hit.to_org_id && orgs.includes(String(hit.to_org_id))) return true;
+    let bodyOrg;
+    try {
+      bodyOrg = String(JSON.parse(hit.body || "{}").orgId ?? "");
+    } catch {
+      bodyOrg = "";
+    }
+    return Boolean(bodyOrg) && orgs.includes(bodyOrg);
+  }
+  return false;
+}
+
+/** #94：解析名。箱子沿 boxNameCell 脱敏口径（未起名回显编号时按设备标识权限打码）；任务＝单号＋名称。 */
+function targetDisplayName(kind, hit, perms) {
+  if (kind === "user") return String(hit.nickname || hit.username || "");
+  if (kind === "dept") return String(hit.name || "");
+  if (kind === "box")
+    return boxNameCell(
+      { id: String(hit.id), name: String(hit.name || "") || String(hit.id) },
+      perms
+    );
+  if (kind === "task") return `${hit.id} ${hit.name || ""}`.trim();
+  return "";
+}
+
+/** IN 查询分批上限：老 SQLite 变量上限 999，MySQL 65535，取 800 两边都安全。 */
+const LOOKUP_CHUNK = 800;
+
+/**
+ * #94：对象可读化批量 lookup——每类型一条 IN 查询映射（本页 ≤4 条、与行数无关，无 N+1；
+ * 导出大表按 800/批切分仍是批量）。list/detail/export 同口径（都过 toItem 后的这一层）。
+ * 响应 additive 增 targetName（最终展示串：解析名或回退「类型 #id」）与 targetResolved
+ * （回退态标记，网页据此灰字＋tooltip 原编号）；旧客户端忽略新字段不受影响。
+ * 回退里的编号用 toItem 已打码的 targetId——无设备标识权限者连回退串也见不到整串 IMEI。
+ */
+async function attachTargetNames(db, items, rawRows, scope, perms) {
+  const meta = rawRows.map((row) => targetOf(row));
+  const want = { user: new Set(), dept: new Set(), box: new Set(), task: new Set() };
+  for (const t of meta) if (t.kind && t.id) want[t.kind].add(t.id);
+  const maps = {};
+  const lookup = async (kind, table, cols) => {
+    const ids = [...want[kind]];
+    if (!ids.length) return;
+    const found = new Map();
+    for (let start = 0; start < ids.length; start += LOOKUP_CHUNK) {
+      const part = ids.slice(start, start + LOOKUP_CHUNK);
+      const rows = await db.all(
+        `SELECT ${cols} FROM ${table} WHERE id IN (${part.map(() => "?").join(", ")})`,
+        part
+      );
+      for (const row of rows) found.set(String(row.id), row);
+    }
+    maps[kind] = found;
+  };
+  await lookup("user", "sys_user", "id, nickname, username, dept_id");
+  await lookup("dept", "sys_dept", "id, name");
+  await lookup("box", "sample_box", "id, name, org_id, owner_id");
+  await lookup("task", "sample_task", "id, name, from_org_id, to_org_id, body");
+  items.forEach((item, i) => {
+    const t = meta[i];
+    const hit = t.kind && t.id ? maps[t.kind]?.get(t.id) : null;
+    const name =
+      hit && targetInScope(t.kind, hit, scope) ? targetDisplayName(t.kind, hit, perms) : "";
+    if (name) {
+      item.targetName = name;
+      item.targetResolved = true;
+    } else if (!t.id) {
+      // 设置类/空编号：对象就是类型本身，无实体可查，不算回退
+      item.targetName = t.label;
+      item.targetResolved = true;
+    } else {
+      item.targetName = `${t.label} #${item.targetId}`;
+      item.targetResolved = false;
+    }
+  });
+}
+
 export async function queryOperationLogs(db, user, query = {}, perms = null) {
   const scope = await operationScope(db, user);
   const built = operationLogQuery(scope, query);
@@ -185,7 +330,9 @@ export async function queryOperationLogs(db, user, query = {}, perms = null) {
   if (built.empty) return { list: [], nextCursor: null };
   const rows = await db.all(built.sql, built.params);
   const hasMore = rows.length > built.limit;
-  const list = rows.slice(0, built.limit).map((row) => toItem(row, perms));
+  const pageRows = rows.slice(0, built.limit);
+  const list = pageRows.map((row) => toItem(row, perms));
+  await attachTargetNames(db, list, pageRows, scope, perms);
   const last = list[list.length - 1];
   return {
     list,
@@ -211,8 +358,11 @@ export async function queryOperationLogsForExport(
   if (built.empty) return { rows: [], truncated: false, max: built.max };
   const rows = await db.all(built.sql, built.params);
   const truncated = rows.length > built.max;
+  const pageRows = rows.slice(0, built.max);
+  const items = pageRows.map((row) => toItem(row, perms));
+  await attachTargetNames(db, items, pageRows, scope, perms);
   return {
-    rows: rows.slice(0, built.max).map((row) => toItem(row, perms)),
+    rows: items,
     truncated,
     max: built.max,
   };

@@ -97,7 +97,7 @@ async function log(db, orgId, actorId, createdAt, orgName = "", detail = "") {
 
 const RANGE = { from: "2026-10-01", to: "2026-10-31" };
 const AT = "2026-10-15 09:00:00.000";
-const HEADER = "\uFEFF时间,单位,操作者,动作,对象类型,对象编号,结果,来源 IP,明细\r\n";
+const HEADER = "\uFEFF时间,单位,操作者,动作,对象类型,对象编号,对象名称,结果,来源 IP,明细\r\n";
 
 /** mock ctx 直调导出处理器：download 收全 CSV 文本与附加头，fail 收错误口径。 */
 async function invokeExport(db, user, query = {}) {
@@ -154,9 +154,11 @@ test("机构角色导出只见本单位及下级，org_name 非空，CSV 列与�
     const leadRow = rows.find((line) => line.includes("采样机构甲"));
     assert.equal(
       leadRow,
-      `${AT},采样机构甲,90,登录,user,90,成功,10.0.0.1,"{""added"":[""sys:oplog:export""]}"`
+      `${AT},采样机构甲,90,登录,user,90,agency.lead,成功,10.0.0.1,"{""added"":[""sys:oplog:export""]}"`
     );
-    assert.ok(rows.some((line) => line.startsWith(`${AT},甲现场组,7,登录,user,7,成功,10.0.0.1,`)));
+    assert.ok(
+      rows.some((line) => line.startsWith(`${AT},甲现场组,7,登录,user,7,人员 #7,成功,10.0.0.1,`))
+    );
     // 范围外单位一个字都不出现
     for (const leak of ["采样机构乙", "乙现场组", "华南分公司", "系统管理"])
       assert.ok(!out.text.includes(leak), `${leak} 泄露到导出里`);

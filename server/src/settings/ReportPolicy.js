@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   activeTaskSql,
-  deriveTrip,
-  ENDED_SQL,
+  boxHeldSql,
   initialOf,
   isEndedFor,
   isLocalSample,
@@ -10,6 +9,7 @@ import {
   prefixOf,
   TRANSFER_TRACK,
   transferStatusOf,
+  tripModeOf,
 } from "./taskFlow.js";
 import { formatTimestamp } from "../domain/Clock.js";
 import { estimateBattery, parseBatteryModel } from "../domain/BatteryEstimate.js";
@@ -144,10 +144,11 @@ export async function transferBlock(db, box, target = null) {
   if (!box) return { reasonCode: "BOX_MISSING", reason: "采样箱已删除或停用，请刷新后重试" };
   if (box.life === "停用")
     return { reasonCode: "BOX_DISABLED", reason: "采样箱已删除或停用，请刷新后重试" };
-  // 与 createTask 的 busy 查询同款：未结束单占用（检测站已开始检测的箱子不算占用）。
-  // 划拨两态 ∈ ENDED，所以划拨单不会拦自己。
+  // 与 createTask 的 busy 查询同款：未结束单占用（检测站已开始检测的箱子不算占用；
+  // R28 双向寄回单在寄回腿期间仍攥着箱子，boxHeldSql 例外）。
+  // 划拨终态 ∈ ENDED，所以划拨单不会拦自己。
   const busy = await db.get(
-    `SELECT t.name,t.status FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL LIMIT 1`,
+    `SELECT t.name,t.status FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()} LIMIT 1`,
     [box.id]
   );
   if (busy)
@@ -248,10 +249,10 @@ async function handOverBoxes(tx, task, ids, signerFit = "none") {
   if (!ids.length) return { moved, skipped };
   const depts = await tx.all("SELECT id, parent_id AS parentId, name, sort FROM sys_dept");
   const nameOf = new Map(depts.map((row) => [String(row.id), row.name]));
-  // R22 双向合并单：寄回腿的寄出方＝采样单位（首腿确认到达时箱子已交接到分公司），
-  // 不是 fromOrg（检测站）——否则箱子全被「已改挂」守卫跳过。单向/旧单口径不变。
+  // R22 历史站首腿双向（tripMode=stationFirst）：寄回腿的寄出方＝采样单位（首腿确认到达时箱子已交接到分公司），
+  // 不是 fromOrg（检测站）——否则箱子全被「已改挂」守卫跳过。单向/新双向寄回（return）/旧单口径不变。
   const source =
-    task.tripDerived === true && task.trip === "双向"
+    tripModeOf(task) === "stationFirst"
       ? { ...task, fromOrgId: task.orgId, fromOrg: task.org }
       : task;
   // null = 判不出寄出单位（旧单只存了单位名），沿用改造前的无条件交接，不批量跳过
@@ -359,9 +360,11 @@ export function receiverOrgIds(depts, task) {
  * 与 handOverBoxes 同一事务、同一加锁顺序（排序后逐台 FOR UPDATE）、同一跳过守卫：
  * 建单后被改挂到检测站子树之外的箱子跳过并记录，不静默拉走；箱子已删除同样跳过。
  * 保管人写回寄出人（senderId），前提是寄出人仍挂在 fromOrg 子树里（外来用户不写成保管人）。
+ * R28 签收归还（已归还，clearCustodian=true）复用本函数：归属同样回 fromOrg，
+ * 但保管人清空（箱子回到分公司可重新分配，不沿用检测阶段的任何保管人）。
  * 返回 { moved, skipped }，结构与签收交接一致，控制器/详情读模型复用。
  */
-async function returnHandOverBoxes(tx, task, ids) {
+async function returnHandOverBoxes(tx, task, ids, { clearCustodian = false } = {}) {
   const moved = [];
   const skipped = [];
   if (!ids.length) return { moved, skipped };
@@ -370,9 +373,10 @@ async function returnHandOverBoxes(tx, task, ids) {
   const fromId = String(task.fromOrgId ?? "");
   const toIds = receiverOrgIds(depts, task);
   const fromIds = senderOrgIds(depts, task);
-  // 寄出人还在原寄出分公司里才写回保管人；调走了就清空（与签收交接的外来守卫同口径）
+  // 寄出人还在原寄出分公司里才写回保管人；调走了就清空（与签收交接的外来守卫同口径）。
+  // 签收归还（R28）恒清空：归还的箱子由分公司重新分配保管人。
   let custodian = "";
-  if (task.senderId) {
+  if (!clearCustodian && task.senderId) {
     const sender = await tx.get("SELECT dept_id FROM sys_user WHERE id=?", [String(task.senderId)]);
     const deptId = String(sender?.dept_id ?? "");
     if (sender && (!fromIds || fromIds.has(deptId))) custodian = String(task.senderId);
@@ -425,7 +429,7 @@ export class ReportPolicy {
     // The new terminal can receive a dispatch as soon as the assignment commits.
     if (!active && supportsDispatch(box.firmware)) {
       active = await db.get(
-        `SELECT t.id,t.body FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND m.inspected_at IS NULL AND ${activeTaskSql()} LIMIT 1`,
+        `SELECT t.id,t.body FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${boxHeldSql()} AND ${activeTaskSql()} LIMIT 1`,
         [box.id]
       );
     }
@@ -489,9 +493,7 @@ export class ReportPolicy {
   // Existing open tasks have no assignment snapshot. Capture the effective policy
   // once at upgrade; historical values before the upgrade are not recoverable.
   async initializeAssignments() {
-    const rows = await this.db.all(
-      `SELECT id FROM sample_task WHERE status NOT IN (${ENDED_SQL}) AND NOT (kind='采样' AND status='已封箱' AND body LIKE '%"localOnly":true%')`
-    );
+    const rows = await this.db.all(`SELECT id FROM sample_task t WHERE ${activeTaskSql()}`);
     for (const { id } of rows) {
       await this.db.transaction(async (tx) => {
         const row = await tx.get(
@@ -694,9 +696,10 @@ export class ReportPolicy {
         );
         if (!box || box.life === "停用") throw conflict("采样箱已删除或停用，请刷新后重试");
         // 一台箱子同时只能在一张没结束的任务单里（还没开始的也算）
-        // 检测站已开始检测的箱子，这张单对它来说已经结束
+        // 检测站已开始检测的箱子，这张单对它来说已经结束；
+        // R28 双向寄回单在 已检测→待归还 期间仍攥着箱子（boxHeldSql 例外），到已归还才释放
         const busy = await tx.get(
-          `SELECT t.name FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL LIMIT 1`,
+          `SELECT t.name FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()} LIMIT 1`,
           [boxId]
         );
         if (busy)
@@ -705,10 +708,12 @@ export class ReportPolicy {
           );
         snapshots.set(boxId, box);
       }
-      // R22/R23 派生校验（锁内权威）：同一任务单的箱子须同归属（混归属整单拒，沿划拨 D-2 口径）；
+      // R22/R23 归属校验（锁内权威）：同一任务单的箱子须同归属（混归属整单拒，沿划拨 D-2 口径）；
       // 未分配箱（org_id 空）归一总公司根。寄出方 fromOrg＝箱当前归属，客户端值不作数。
-      // 三 kind：采样后送检（含旧合并别名 kind=采样＋inspect）派生 trip；采样（localOnly）仅本地无 trip；
-      // 送检仅寄送无 trip。例外：显式 trip 且无 tripDerived 标记＝旧形状模拟（测试/迁移造历史数据），保留旧流。
+      // R28（任务 #92）：寄送类（送检/采样后送检）方向改用户可选（单向/双向，默认单向），
+      // 箱必须在寄出方（分公司/总部）——箱在检测站整单拒（回分公司请用划拨）；
+      // tripMode 分流：双向＝return（寄回腿）、单向＝oneWay。采样（localOnly）仅本地无 trip。
+      // 例外：显式 trip 且无 tripDerived 标记＝旧形状模拟（测试/迁移造历史数据），保留旧流。
       let policyOrgId = input.fromOrgId;
       const local = isLocalSample(input);
       const merged = input.kind === "采样后送检" || (input.kind === "采样" && !local);
@@ -728,13 +733,19 @@ export class ReportPolicy {
           if (input.fromOrgId && String(input.fromOrgId) !== boxOrg)
             throw conflict("箱子归属已变化，请刷新后重试");
         }
+        if (merged || input.kind === "送检") {
+          // 箱在检测站：寄送类建单拒（控制器已先拒一次，锁内复核兜住并发改挂）
+          if (boxOrg && toOrgId && boxOrg === String(toOrgId))
+            throw conflict("箱在检测站：回分公司请用划拨");
+        }
         if (merged) {
-          const trip = deriveTrip(boxOrg, toOrgId, input.orgId);
-          if (input.trip && input.trip !== trip) throw conflict("寄送方向已变化，请刷新后重试");
+          // R28：方向用户可选（控制器已校验枚举），默认单向；tripDerived 标记沿用（legacy 判别用）
+          const trip = input.trip === "双向" ? "双向" : "单向";
           body.trip = trip;
+          body.tripMode = trip === "双向" ? "return" : "oneWay";
           body.tripDerived = true;
-          initial = initialOf({ ...input, trip, tripDerived: true });
-          // R13④/R22：任务期间公司策略按采样单位（双向 fromOrg＝检测站，检测站无公司策略）
+          initial = initialOf({ ...input, trip, tripMode: body.tripMode, tripDerived: true });
+          // R13④/R22：任务期间公司策略按采样单位（历史 stationFirst 双向 fromOrg＝检测站，检测站无公司策略）
           policyOrgId = input.orgId || input.fromOrgId;
         } else if (local) {
           // 仅本地采样：无寄送/检测站，已封箱终态，箱留采样单位
@@ -742,8 +753,11 @@ export class ReportPolicy {
           initial = initialOf({ ...input, localOnly: true });
           policyOrgId = input.orgId || input.fromOrgId;
         } else {
-          // 送检：仅寄送（箱已封箱在寄出方），首步待寄出，公司策略按寄出方
-          initial = initialOf(input);
+          // 送检：仅寄送（箱已封箱在寄出方），首步待寄出，公司策略按寄出方；R28 方向可选带寄回腿
+          const trip = input.trip === "双向" ? "双向" : "单向";
+          body.trip = trip;
+          body.tripMode = trip === "双向" ? "return" : "oneWay";
+          initial = initialOf({ ...input, trip, tripMode: body.tripMode });
           policyOrgId = input.fromOrgId || input.orgId;
         }
       }
@@ -760,9 +774,10 @@ export class ReportPolicy {
           [boxId]
         );
         body.assignedPolicies ??= Object.create(null);
-        // R22 双向：箱在检测站期间公司 idle 层按采样分公司（R13④「寄出公司」的双向等价）
+        // R22 历史站首腿双向（stationFirst）：箱在检测站期间公司 idle 层按采样分公司
+        // （R13④「寄出公司」的双向等价）；R28 新单箱在寄出分公司，无需此等价
         const idleBox =
-          body.tripDerived === true && body.trip === "双向" && input.orgId
+          tripModeOf(body) === "stationFirst" && input.orgId
             ? { ...box, org_id: input.orgId }
             : box;
         body.assignedPolicies[boxId] = resolvePolicy(
@@ -1493,6 +1508,7 @@ export class ReportPolicy {
       handOver = null,
       returnHandOver = null,
       outboundHandOver = null,
+      handBack = null,
     } = {}
   ) {
     let from = "";
@@ -1544,10 +1560,10 @@ export class ReportPolicy {
           "UPDATE sample_task_box SET opens_end=(SELECT opens FROM sample_box WHERE id=sample_task_box.box_id) WHERE task_id=? AND opens_start IS NOT NULL AND opens_end IS NULL",
           [id]
         );
-      } else if (status === "退回中") {
-        // 退回（组织简化 D3）：箱子重新占用、生命周期回「在途」。
-        // 从 待检测 退回时箱子本就占用（幂等）；从 已检测 退回时箱子已释放，这里重新登记，
-        // 避免返程途中被别的单抢走。归属此刻不动，到「已退回」才回迁原寄出分公司。
+      } else if (status === "退回中" || status === "待寄回") {
+        // 退回（组织简化 D3）/寄回（R28）：箱子重新占用、生命周期回「在途」。
+        // 从 待检测 退回时箱子本就占用（幂等）；从 已检测 退回/发起寄回时箱子可能已释放，这里重新登记，
+        // 避免返程途中被别的单抢走。归属此刻不动，到「已退回」/「已归还」才回迁原寄出分公司。
         for (const { box_id } of ids) {
           const busy = await tx.get("SELECT task_id FROM box_active_task WHERE box_id=?", [box_id]);
           if (!busy)
@@ -1555,28 +1571,33 @@ export class ReportPolicy {
           await tx.run("UPDATE sample_box SET life='在途' WHERE id=? AND life='未使用'", [box_id]);
         }
       }
+      // 已检测：整张单一起「开始检测」，还没扫的箱子都记上（开箱超限作废的不检测，不记）。
+      // R28 双向寄回单（return）已检测是中间态：检测事实/开箱次数照记，占用不释放（等已归还）。
+      if (status === "已检测") {
+        const voided = await voidBoxIds(tx, id, JSON.parse(task.body));
+        const at = new Date().toISOString(),
+          by = String(actor.name || "").slice(0, 64);
+        for (const { box_id } of ids) {
+          if (voided.has(box_id)) continue;
+          await tx.run(
+            "UPDATE sample_task_box SET inspected_at=?, inspected_by=? WHERE task_id=? AND box_id=? AND inspected_at IS NULL",
+            [at, by, id, box_id]
+          );
+        }
+        await tx.run(
+          "UPDATE sample_task_box SET opens_end=(SELECT opens FROM sample_box WHERE id=sample_task_box.box_id) WHERE task_id=? AND opens_start IS NOT NULL AND opens_end IS NULL",
+          [id]
+        );
+      }
       // 终态释放（含仅本地采样单已封箱）：解除占用、生命周期回「未使用」、开箱次数定住。
       // 已封箱的封箱次数已在上面记过；这里与状态更新同事务，任一台失败整体回滚。
       if (terminal) {
-        if (status === "已检测") {
-          // 整张单一起「开始检测」：还没扫的箱子都记上；开箱超限作废的不检测，不记
-          const voided = await voidBoxIds(tx, id, JSON.parse(task.body));
-          const at = new Date().toISOString(),
-            by = String(actor.name || "").slice(0, 64);
-          for (const { box_id } of ids) {
-            if (voided.has(box_id)) continue;
-            await tx.run(
-              "UPDATE sample_task_box SET inspected_at=?, inspected_by=? WHERE task_id=? AND box_id=? AND inspected_at IS NULL",
-              [at, by, id, box_id]
-            );
-          }
-        }
         await tx.run("DELETE FROM box_active_task WHERE task_id=?", [id]);
         for (const { box_id } of ids) {
           // 没有别的进行中任务、也没有别的没结束的单（这张单的状态还没改，要排除自己）才回到「未使用」
           await tx.run(
             `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
-              AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.id<>? AND ${activeTaskSql()} AND m.inspected_at IS NULL)`,
+              AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND t.id<>? AND ${activeTaskSql()} AND ${boxHeldSql()})`,
             [box_id, box_id, box_id, id]
           );
         }
@@ -1645,6 +1666,25 @@ export class ReportPolicy {
               .map(({ boxId, reason }) => ({ boxId, reason })),
           },
         };
+      } else if (handBack && status === "已归还") {
+        // 签收归还交接（R28）：归属回寄出分公司 fromOrg＋保管人清空（可重新分配），
+        // 与状态更新同事务，任一台失败整体回滚；跳过守卫与退回交接同口径
+        handOverResult = await returnHandOverBoxes(
+          tx,
+          JSON.parse(task.body),
+          ids.map((b) => b.box_id),
+          { clearCustodian: true }
+        );
+        detail = {
+          ...(detail || {}),
+          handOver: {
+            movedCount: handOverResult.moved.length,
+            skippedCount: handOverResult.skipped.length,
+            skipped: handOverResult.skipped
+              .slice(0, 200)
+              .map(({ boxId, reason }) => ({ boxId, reason })),
+          },
+        };
       }
       await addTaskLog(tx, {
         taskId: id,
@@ -1669,6 +1709,8 @@ export class ReportPolicy {
   /**
    * 检测站扫一台箱子「开始检测」：这台箱子的本次任务结束——不再占用、回到「未使用」、
    * 开箱次数定在签收那一刻（下一张单从头算，相当于清零）。全部箱子都开始检测后整张单变「已检测」。
+   * R28 双向寄回单（tripMode=return）：已检测是中间态，检测事实照记（inspected_at/opens_end），
+   * 但占用不释放（box_active_task/life 保持），等寄回腿走完、分公司签收归还（已归还）才释放。
    * 返回 { done: 整张单是否已结束, left: 还剩几台没检测 }。
    */
   async inspectBox(taskId, boxId, { actor = {} } = {}) {
@@ -1679,6 +1721,7 @@ export class ReportPolicy {
         [taskId]
       );
       if (!task || task.status !== "待检测") throw conflict("这张单不在「待检测」，请刷新后重试");
+      const returns = tripModeOf({ ...JSON.parse(task.body), kind: task.kind }) === "return";
       const link = await tx.get(
         "SELECT box_id, inspected_at FROM sample_task_box WHERE task_id=? AND box_id=?",
         [taskId, boxId]
@@ -1694,12 +1737,14 @@ export class ReportPolicy {
         "UPDATE sample_task_box SET inspected_at=?, inspected_by=?, opens_end=COALESCE(opens_end,(SELECT opens FROM sample_box WHERE id=?)) WHERE task_id=? AND box_id=?",
         [now, by, boxId, taskId, boxId]
       );
-      await tx.run("DELETE FROM box_active_task WHERE box_id=? AND task_id=?", [boxId, taskId]);
-      await tx.run(
-        `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
-          AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL)`,
-        [boxId, boxId, boxId]
-      );
+      if (!returns) {
+        await tx.run("DELETE FROM box_active_task WHERE box_id=? AND task_id=?", [boxId, taskId]);
+        await tx.run(
+          `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
+            AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()})`,
+          [boxId, boxId, boxId]
+        );
+      }
       const box = await tx.get("SELECT name FROM sample_box WHERE id=?", [boxId]);
       await addTaskLog(tx, {
         taskId,
@@ -1716,17 +1761,18 @@ export class ReportPolicy {
       const left = waiting.filter((row) => !voided.has(row.box_id)).length;
       const released = [boxId];
       if (left === 0) {
-        await tx.run("DELETE FROM box_active_task WHERE task_id=?", [taskId]);
+        if (!returns) await tx.run("DELETE FROM box_active_task WHERE task_id=?", [taskId]);
         await tx.run("UPDATE sample_task SET status='已检测' WHERE id=? AND status='待检测'", [
           taskId,
         ]);
-        // 作废的箱子不检测，整张单结束时一起回到「未使用」
+        // 作废的箱子不检测，整张单结束时一起回到「未使用」（双向寄回单保持占用到已归还）
         for (const { box_id } of waiting) {
-          await tx.run(
-            `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
-              AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL)`,
-            [box_id, box_id, box_id]
-          );
+          if (!returns)
+            await tx.run(
+              `UPDATE sample_box SET life='未使用' WHERE id=? AND life='在途' AND NOT EXISTS (SELECT 1 FROM box_active_task WHERE box_id=?)
+                AND NOT EXISTS (SELECT 1 FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()})`,
+              [box_id, box_id, box_id]
+            );
           released.push(box_id);
         }
         const note = waiting.length
@@ -1773,6 +1819,11 @@ export const TASK_ACTIONS = {
   待核验: "到达核验点",
   // 带寄送的旧采样单：箱子寄到采样单位
   待采样: "确认到达",
+  // R28 双向寄回腿：检测站发起寄回/确认寄回/确认到达，寄出分公司签收归还
+  待寄回: "发起寄回",
+  寄回在途: "确认寄回",
+  待归还: "确认到达",
+  已归还: "签收归还",
 };
 
 /**
@@ -1783,7 +1834,7 @@ export const TASK_ACTIONS = {
 async function syncBoundTask(db, boxId) {
   const row = await db.get(
     `SELECT t.id, t.created_at FROM sample_task_box m JOIN sample_task t ON t.id=m.task_id
-     WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL
+     WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()}
      ORDER BY t.created_at LIMIT 1`,
     [boxId]
   );

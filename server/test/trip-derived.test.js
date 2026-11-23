@@ -219,6 +219,53 @@ async function setup() {
       assert.ok(res.ok, `${status} 失败：${res.code} ${res.message || res.msg}`);
     }
   };
+  /**
+   * R28 契约演进：箱在检测站新建寄送单已拒（回分公司请用划拨），R22 站首腿（stationFirst）
+   * 历史行只能来自迁移/旧库——直接造 R22 派生形状行（tripDerived＋双向、无 tripMode）供旧流回归。
+   * 流程/交接/渲染断言原样保留（legacy 不混新）。
+   */
+  const seedRound = async (boxIds, extra = {}) => {
+    const id = `TK-r22-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const body = {
+      kind: "采样",
+      name: "R22 站首腿历史单",
+      boxIds,
+      orgId: "2",
+      org: "华南分公司",
+      fromOrgId: "6",
+      fromOrg: "总部检测站",
+      toOrgId: "6",
+      toOrg: "总部检测站",
+      inspect: true,
+      trip: "双向",
+      tripDerived: true,
+      senderId: "61",
+      sender: "检测站值守",
+      signerId: "60",
+      signer: "检测站长",
+      placeAt: { address: "华南采样点", lng: 114.1, lat: 22.6 },
+      fromPlace: { address: "寄出仓库", lng: 114.1, lat: 22.6 },
+      toPlace: { address: "检测站收发室", lng: 114.3, lat: 22.8 },
+      ...extra,
+    };
+    await db.run(
+      "INSERT INTO sample_task (id,name,kind,status,body,created_at,from_org_id,to_org_id,is_inspect) VALUES (?,?,?,?,?,?,?,?,1)",
+      [id, body.name, "采样", "待寄出", JSON.stringify(body), new Date().toISOString(), "6", "6"]
+    );
+    for (const boxId of boxIds) {
+      const b = await db.get("SELECT org_id, owner_id, opens FROM sample_box WHERE id=?", [boxId]);
+      await db.run(
+        "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id,opens_start) VALUES (?,?,?,?,?)",
+        [id, boxId, b.org_id, b.owner_id, Number(b.opens) || 0]
+      );
+    }
+    // 建单日志（与 createTask 的 addTaskLog 同形状，流转记录全序断言用）
+    await db.run(
+      "INSERT INTO sample_task_log (id,task_id,status,action,actor_id,actor_name,note,detail,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+      [`log-${id}`, id, "待寄出", "创建", "61", "检测站值守", "", null, new Date().toISOString()]
+    );
+    return id;
+  };
   const teardown = async () => {
     applyBoxSettings({});
     await boxes.flush?.();
@@ -246,6 +293,7 @@ async function setup() {
     taskRow,
     create,
     advance,
+    seedRound,
     teardown,
   };
 }
@@ -284,13 +332,12 @@ test("派生矩阵：箱归属×采样单位→trip；双向 9 步/单向 7 步�
   assert.equal(isLegacySample({ kind: "采样", inspect: true }), false);
 });
 
-test("双向全腿：检测站寄出（sign 码即可）→分公司确认到达交接→采样封箱寄回→签收归属回检测站→已检测", async () => {
+test("双向全腿（legacy stationFirst）：检测站寄出（sign 码即可）→分公司确认到达交接→采样封箱寄回→签收归属回检测站→已检测", async () => {
   const s = await setup();
   try {
     const a = await s.makeBox("6");
-    const res = await s.create([a.id], { orgId: "2", fromOrgId: "6", senderId: "61", maxOpens: 2 });
-    assert.ok(res.ok, `${res.code} ${res.message}`);
-    const id = res.data.id;
+    // R28：站首腿历史单造库行（新建已拒箱在检测站）；旧流断言原样保留
+    const id = await s.seedRound([a.id], { maxOpens: 2 });
     const row = await s.taskRow(id);
     assert.equal(row.status, "待寄出", "双向首步待寄出");
     assert.equal(row.from_org_id, "6", "寄出方＝箱当前归属（检测站）");
@@ -385,12 +432,11 @@ test("双向全腿：检测站寄出（sign 码即可）→分公司确认到达
   }
 });
 
-test("双向退回：目的地＝寄出方 fromOrg＝检测站（PM 裁量），检测站自己接收退回、保管人写回寄出人", async () => {
+test("双向退回（legacy stationFirst）：目的地＝寄出方 fromOrg＝检测站（PM 裁量），检测站自己接收退回、保管人写回寄出人", async () => {
   const s = await setup();
   try {
     const a = await s.makeBox("6");
-    const res = await s.create([a.id], { orgId: "2", fromOrgId: "6", senderId: "61" });
-    const id = res.data.id;
+    const id = await s.seedRound([a.id]);
     await s.advance(id, ["运送中"], s.station);
     await s.advance(id, ["待采样", "采样中", "已封箱", "在途"], s.south);
     await s.moveBox(a.id, 114.3, 22.8);
@@ -426,11 +472,11 @@ test("双向退回：目的地＝寄出方 fromOrg＝检测站（PM 裁量），
   }
 });
 
-test("双向取消：首腿可取消（归属仍检测站）；分公司确认到达后取消，归属留在分公司（箱子实际已在现场）", async () => {
+test("双向取消（legacy stationFirst）：首腿可取消（归属仍检测站）；分公司确认到达后取消，归属留在分公司（箱子实际已在现场）", async () => {
   const s = await setup();
   try {
     const a = await s.makeBox("6");
-    const id1 = (await s.create([a.id], { orgId: "2", fromOrgId: "6", senderId: "61" })).data.id;
+    const id1 = await s.seedRound([a.id]);
     await s.advance(id1, ["运送中"], s.station);
     await s.advance(id1, ["已取消"], s.station);
     assert.equal((await s.taskRow(id1)).status, "已取消");
@@ -438,7 +484,7 @@ test("双向取消：首腿可取消（归属仍检测站）；分公司确认�
     assert.equal((await s.boxRow(a.id)).life, "未使用");
     // 确认到达后取消：归属已交分公司，取消不回滚归属（与物理事实一致）
     const b = await s.makeBox("6");
-    const id2 = (await s.create([b.id], { orgId: "2", fromOrgId: "6", senderId: "61" })).data.id;
+    const id2 = await s.seedRound([b.id]);
     await s.advance(id2, ["运送中"], s.station);
     await s.advance(id2, ["待采样"], s.south);
     await s.advance(id2, ["已取消"], s.station);
@@ -495,17 +541,18 @@ test("混归属整单拒：分公司×分公司、分公司×检测站都拒绝�
     const mixedStation = await s.create([a.id, c.id]);
     assert.equal(mixedStation.ok, false);
     assert.match(mixedStation.message, /同一任务单的箱子须同归属/);
-    // 同归属多台正常（双向）
-    const d = await s.makeBox("6");
-    const ok = await s.create([c.id, d.id], { orgId: "2", fromOrgId: "6", senderId: "61" });
+    // 同归属多台正常（R28：箱在分公司＋显式双向＝return 寄回腿；箱在检测站新建已拒，见 trip-return 用例）
+    const d = await s.makeBox("2");
+    const ok = await s.create([a.id, d.id], { trip: "双向" });
     assert.ok(ok.ok, ok.message);
-    assert.equal((await s.taskRow(ok.data.id)).status, "待寄出");
+    assert.equal((await s.taskRow(ok.data.id)).status, "待采样");
+    assert.equal(JSON.parse((await s.taskRow(ok.data.id)).body).tripMode, "return");
   } finally {
     await s.teardown();
   }
 });
 
-test("未分配箱（org_id 空）归一总公司根：单向、寄出方＝总公司；锁内归属/方向不一致 409", async () => {
+test("未分配箱（org_id 空）归一总公司根：单向、寄出方＝总公司；锁内归属不一致/箱在检测站 409", async () => {
   const s = await setup();
   try {
     const a = await s.makeBox("2");
@@ -532,7 +579,7 @@ test("未分配箱（org_id 空）归一总公司根：单向、寄出方＝总�
       }),
       /箱子归属已变化/
     );
-    // trip 与箱归属不一致 → 409（箱在检测站却声称单向）
+    // R28：箱在检测站却建寄送单 → 409「箱在检测站：回分公司请用划拨」（原「方向不一致」派生校验已废）
     const c = await s.makeBox("6");
     await assert.rejects(
       s.policies.createTask({
@@ -546,7 +593,7 @@ test("未分配箱（org_id 空）归一总公司根：单向、寄出方＝总�
         toOrgId: "6",
         orgId: "2",
       }),
-      /寄送方向已变化/
+      /箱在检测站：回分公司请用划拨/
     );
   } finally {
     await s.teardown();
@@ -710,7 +757,7 @@ test("059 幂等：按首箱快照回填 body.trip/tripDerived；_bak 留底；�
   }
 });
 
-test("R13④等价：双向单公司策略按采样分公司——建单兜底入快照、检测站期间 idle 层随采样公司", async () => {
+test("R13④等价：公司策略按采样分公司——新单建单兜底入快照；legacy stationFirst 检测站期间 idle 层随采样公司", async () => {
   const s = await setup();
   try {
     // 华南公司层：idle 300 秒、task 90 秒
@@ -719,23 +766,20 @@ test("R13④等价：双向单公司策略按采样分公司——建单兜底�
       JSON.stringify({ reportPeriodSec: 300, reportOnlyWhenCharging: false }),
       JSON.stringify({ reportPeriodSec: 90, reportOnlyWhenCharging: false }),
     ]);
-    const a = await s.makeBox("6");
-    const res = await s.create([a.id], {
-      orgId: "2",
-      fromOrgId: "6",
-      senderId: "61",
-      policy: null,
-    });
-    assert.ok(res.ok, res.message);
-    const body = JSON.parse((await s.taskRow(res.data.id)).body);
+    // R28 新单（箱在分公司）：空策略兜底取采样分公司（华南）task 层
+    const n = await s.makeBox("2");
+    const fresh = await s.create([n.id], { policy: null });
+    assert.ok(fresh.ok, fresh.message);
+    const freshBody = JSON.parse((await s.taskRow(fresh.data.id)).body);
     assert.equal(
-      body.policy.reportPeriodSec,
+      freshBody.policy.reportPeriodSec,
       90,
       "空策略兜底取采样分公司（华南）task 层，不是检测站/总公司"
     );
-    assert.equal(body.assignedPolicies[a.id].reportPeriodSec, 90);
-    // 推进到已检测（箱回检测站）：旧固件 1.0.16 无快照优先，idle 层按采样分公司华南＝300
-    const id = res.data.id;
+    assert.equal(freshBody.assignedPolicies[n.id].reportPeriodSec, 90);
+    // legacy stationFirst（造库行）：旧固件 1.0.16 无快照优先，检测站期间 idle 层按采样分公司华南＝300
+    const a = await s.makeBox("6");
+    const id = await s.seedRound([a.id]);
     await s.advance(id, ["运送中"], s.station);
     await s.advance(id, ["待采样", "采样中", "已封箱", "在途"], s.south);
     await s.moveBox(a.id, 114.3, 22.8);
@@ -754,13 +798,12 @@ test("R13④等价：双向单公司策略按采样分公司——建单兜底�
   }
 });
 
-test("双向首腿交接跳过守卫：建单后被改挂出检测站子树的箱子不随单交接", async () => {
+test("双向首腿交接跳过守卫（legacy stationFirst）：建单后被改挂出检测站子树的箱子不随单交接", async () => {
   const s = await setup();
   try {
     const a = await s.makeBox("6");
     const b = await s.makeBox("6");
-    const res = await s.create([a.id, b.id], { orgId: "2", fromOrgId: "6", senderId: "61" });
-    const id = res.data.id;
+    const id = await s.seedRound([a.id, b.id]);
     await s.advance(id, ["运送中"], s.station);
     // 建单后 b 被资产纠错改挂到华东
     await s.boxes.updateBox(b.id, (item) => {

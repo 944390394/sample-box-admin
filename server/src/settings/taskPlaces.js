@@ -14,6 +14,7 @@ export const MOVING = [
   "在途",
   "待核验",
   "退回中",
+  "寄回在途",
 ];
 
 /**
@@ -27,10 +28,12 @@ export function targetOf(body, status) {
       return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
     return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
   }
-  // R23 送检：仅寄送，寄出前/退回看寄出地址，其余看检测站收货地址（无采样段）
+  // R23 送检：仅寄送，寄出前/退回看寄出地址，其余看检测站收货地址（无采样段）。
+  // R28 寄回腿：待寄回箱子还在检测站（收货地址）；寄回在途/待归还朝寄出分公司去（寄出地址）。
   if (body.kind === "送检") {
-    if (status === "待寄出" || status === "退回中")
+    if (["待寄出", "退回中", "寄回在途", "待归还"].includes(status))
       return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
+    if (status === "已归还") return null;
     return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
   }
   const plan = body.placeAt ? { ...body.placeAt, role: "计划地点" } : null;
@@ -40,12 +43,14 @@ export function targetOf(body, status) {
   }
   // 合并采样单（采样后送检＋旧合并别名）：采样段看计划地点；在途/待签收/待检测看检测站收货地址；退回看寄出地址。
   // R22 双向首腿：待寄出看寄出地址（检测站），运送中朝采样分公司的计划地点去。
+  // R28 寄回腿：待寄回箱子还在检测站（收货地址）；寄回在途/待归还朝寄出分公司去（寄出地址）；已归还终态无目标。
   if (isMergedSample({ ...body, status })) {
     if (["待采样", "采样中", "已封箱", "运送中"].includes(status)) return plan;
     if (status === "待寄出") return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
-    if (["在途", "待签收", "待检测"].includes(status))
+    if (["在途", "待签收", "待检测", "待寄回"].includes(status))
       return body.toPlace ? { ...body.toPlace, role: "收货地址" } : null;
-    if (status === "退回中") return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
+    if (["退回中", "寄回在途", "待归还"].includes(status))
+      return body.fromPlace ? { ...body.fromPlace, role: "寄出地址" } : null;
     return null;
   }
   if (body.trip) {

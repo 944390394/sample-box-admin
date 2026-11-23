@@ -1,6 +1,7 @@
 /**
  * #26 B2（D4）：操作日志导出 CSV。
  * - 列与列表页一致（时间/单位/操作者/动作/对象/结果/来源 IP），外加详情抽屉里的「明细」（055a 的 detail 列）；
+ *   #94 起对象拆「对象类型/对象编号/对象名称」三列，名称与列表 targetName 同口径（additive，编号保留供追溯）；
  * - 范围与过滤复用 operationLog.js 的 operationScope/operationLogExportQuery：越权 orgId 收敛为空表，不报错泄露；
  * - 上限 5 万行，超出截断：响应头 X-Export-Truncated/X-Export-Row-Count/X-Export-Max + CSV 末尾注释行双标明；
  * - 文件名只含日期，不含账号/单位等敏感信息；
@@ -21,6 +22,9 @@ const COLUMNS = [
   ["动作", (item) => item.action],
   ["对象类型", (item) => item.targetType],
   ["对象编号", (item) => item.targetId],
+  // #94：对象可读名（与列表/详情同口径的 targetName，含回退「类型 #id」）；
+  // additive 加列保留对象编号供精确追溯，csvCell 防注入同样覆盖本列。
+  ["对象名称", (item) => item.targetName],
   ["结果", (item) => item.result],
   ["来源 IP", (item) => item.ip],
   ["明细", (item) => item.detail],

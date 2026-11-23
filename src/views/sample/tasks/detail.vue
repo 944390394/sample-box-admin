@@ -10,9 +10,9 @@
           v-if="task.trip"
           :type="merged ? (task.trip === '双向' ? 'warning' : 'success') : 'warning'"
           effect="plain"
-          :title="merged ? MERGED_TRIP_TEXT[task.trip] : TRIP_TEXT[task.trip]"
+          :title="tripTitle"
         >
-          {{ task.trip }}{{ merged ? "（派生）" : "寄送" }}
+          {{ task.trip }}{{ tripTagSuffix }}
         </el-tag>
         <el-tag v-if="task.recordVideo" type="success" effect="plain">开箱录像</el-tag>
         <el-tag v-if="stale" type="warning" effect="plain" data-test="task-stale">
@@ -162,8 +162,9 @@
         <dl v-else-if="!logistics" class="facts">
           <div v-if="merged && task.trip" class="wide">
             <dt>寄送方向</dt>
-            <dd :title="MERGED_TRIP_TEXT[task.trip]">
-              {{ task.trip }}（按箱归属派生）· {{ MERGED_TRIP_TEXT[task.trip] }}
+            <dd :title="tripTitle" data-test="task-trip-fact">
+              {{ task.trip }}{{ tripMode === "stationFirst" ? "（按箱归属派生）" : "" }} ·
+              {{ tripTitle }}
             </dd>
           </div>
           <div>
@@ -476,6 +477,7 @@ import {
   MERGED_TRIP_TEXT,
   NEEDS_REASON,
   TASK_ACTIONS,
+  TRIP_MODE_TEXT,
   TRIP_TEXT,
   endedToneFor,
   isEndedFor,
@@ -483,6 +485,7 @@ import {
   isMergedSample,
   stepsOf,
   taskStatusType,
+  tripModeOf,
 } from "./status";
 import { ago, fullTime, shortTime, span, trackColor } from "@/utils/time";
 import { boxTitle, imeiText } from "@/utils/boxLabel";
@@ -510,8 +513,32 @@ const logistics = computed(() => task.value?.kind === "调拨" || task.value?.ki
 const merged = computed(() => isMergedSample(task.value as Record<string, unknown>));
 /** R23 仅本地采样单：无物流段，已封箱终态、箱留采样单位。 */
 const localOnly = computed(() => isLocalSample(task.value as Record<string, unknown>));
-/** R22 双向合并单：寄出方（检测站）→采样单位（分公司）→检测站三段路线，步条含首腿。 */
-const roundTrip = computed(() => merged.value && task.value?.trip === "双向");
+/** R28 方向语义：oneWay/return（寄回腿）/stationFirst（历史 R22 派生双向，只读旧样）。 */
+const tripMode = computed(() =>
+  task.value ? tripModeOf(task.value as Record<string, unknown>) : "oneWay"
+);
+/** 方向说明（tag title/facts 共用）：历史站首腿用旧派生文案，新单按 tripMode，旧采样单用旧手选文案。 */
+const tripTitle = computed(() => {
+  const t = task.value;
+  if (!t?.trip) return "";
+  if (merged.value)
+    return tripMode.value === "stationFirst"
+      ? MERGED_TRIP_TEXT[t.trip]
+      : TRIP_MODE_TEXT[tripMode.value];
+  if (t.kind === "送检") return TRIP_MODE_TEXT[tripMode.value];
+  return TRIP_TEXT[t.trip];
+});
+/** 方向 tag 后缀：历史派生单标「（派生）」、旧手选单标「寄送」，R28 新单（显式 tripMode）不加后缀。 */
+const tripTagSuffix = computed(() => {
+  const t = task.value;
+  if (!t?.trip) return "";
+  if (t.tripMode) return tripMode.value === "stationFirst" ? "（派生）" : "";
+  return merged.value ? "（派生）" : "寄送";
+});
+/** R22 历史站首腿双向（stationFirst）：寄出方（检测站）→采样单位（分公司）→检测站三段路线，步条含首腿。 */
+const roundTrip = computed(() => merged.value && tripMode.value === "stationFirst");
+/** R28 双向寄回腿（return）：合并流＋寄回分公司，步条含寄回腿；路线仍是寄出分公司→检测站（寄去·寄回）。 */
+const returnLeg = computed(() => tripMode.value === "return");
 /** 寄出方→接收方路线：旧物流单、合并单、带寄送的旧采样单都画。 */
 const showRoute = computed(() => logistics.value || merged.value || Boolean(task.value?.trip));
 /** 接收方是检测站：旧送检与合并单固定寄检测站。 */
@@ -658,6 +685,15 @@ const waitingFor = computed(() => {
   if (roundTrip.value && t.status === "待寄出") return `等待 ${t.fromOrg || "检测站"} 寄出箱子`;
   if (roundTrip.value && t.status === "运送中")
     return `箱子寄往 ${t.org || "采样单位"} 途中，等待确认到达`;
+  // R28 双向寄回腿：检测站发起寄回/确认寄回/确认到达，分公司签收归还
+  if (returnLeg.value && t.status === "已检测")
+    return `检测完成，等待 ${t.toOrg || "检测站"} 发起寄回`;
+  if (returnLeg.value && t.status === "待寄回")
+    return `等待 ${t.toOrg || "检测站"} 把箱子寄回 ${t.fromOrg || "寄出分公司"}`;
+  if (returnLeg.value && t.status === "寄回在途")
+    return `箱子寄回 ${t.fromOrg || "寄出分公司"} 途中，等待确认到达`;
+  if (returnLeg.value && t.status === "待归还")
+    return `等待 ${t.fromOrg || "寄出分公司"} 签收归还（签收后箱子归属回分公司）`;
   if (toStation.value && t.status === "待签收") return `等待 ${t.toOrg} 签收`;
   // 合并单退回不必经拒收（待检测/已检测可直接发起），等待文案不再写「已拒收」
   if (t.status === "退回中")
@@ -860,7 +896,11 @@ async function inspectBox(boxId: string) {
   const box = detail.value?.boxes.find((b) => b.id === boxId);
   try {
     await ElMessageBox.confirm(
-      `${box ? boxTitle(box) : `采样箱 ${imeiText({ id: boxId })}`} 开始检测后，这台箱子的本次任务结束，开箱次数从下一张任务单重新算。`,
+      `${box ? boxTitle(box) : `采样箱 ${imeiText({ id: boxId })}`} 开始检测后，开箱次数从下一张任务单重新算。${
+        returnLeg.value
+          ? "双向寄回单：箱子随后由检测站寄回分公司，分公司签收归还后任务结束。"
+          : "这台箱子的本次任务结束。"
+      }`,
       "开始检测",
       { confirmButtonText: "开始检测", cancelButtonText: "取消" }
     );
@@ -871,14 +911,18 @@ async function inspectBox(boxId: string) {
   try {
     const result = await API.inspect(String(routeInfo.params.id), boxId);
     ElMessage.success(
-      result.done ? "全部箱子已开始检测，任务结束" : `已开始检测，还剩 ${result.left} 台`
+      result.done
+        ? returnLeg.value
+          ? "全部箱子已开始检测，等待检测站发起寄回"
+          : "全部箱子已开始检测，任务结束"
+        : `已开始检测，还剩 ${result.left} 台`
     );
     await load();
   } finally {
     inspecting.value = "";
   }
 }
-/** 寄出、到达、签收、开始采样、封箱、发起退回这几步要和当前目标地址比距离。 */
+/** 寄出、到达、签收、开始采样、封箱、发起退回、寄回腿这几步要和当前目标地址比距离。 */
 const showDistance = computed(() =>
   [
     "运送中",
@@ -893,6 +937,10 @@ const showDistance = computed(() =>
     "待核验",
     "退回中",
     "已退回",
+    "待寄回",
+    "寄回在途",
+    "待归还",
+    "已归还",
   ].includes(action.to)
 );
 /** 取消、拒收、退回标红，强制签收标黄，其余是主按钮。 */
@@ -914,7 +962,9 @@ const actionText = computed(() => {
   }
   if (action.to === "已检测") {
     const left = (detail.value?.boxes || []).filter((b) => !b.inspectedAt && !b.voided).length;
-    return `剩下 ${left} 台箱子一起开始检测，任务结束。也可以在箱子列表里逐台开始检测。`;
+    return returnLeg.value
+      ? `剩下 ${left} 台箱子一起开始检测。检测完成后进入寄回腿：检测站寄回 ${t.fromOrg || "寄出分公司"}，分公司签收归还后任务结束。`
+      : `剩下 ${left} 台箱子一起开始检测，任务结束。也可以在箱子列表里逐台开始检测。`;
   }
   if (action.to === "已签收" && t.kind === "调拨")
     return `由 ${t.signer} 签收 ${n} 台采样箱，签收后箱子改归 ${t.toOrg}${t.signerId ? `，由 ${t.signer} 保管` : ""}。`;
@@ -928,6 +978,15 @@ const actionText = computed(() => {
     return `拒收并退回：${n} 台箱子退回 ${t.fromOrg || "寄出方"}，任务加上返程；寄出方确认退回后任务结束，箱子回到在仓库。`;
   if (action.to === "已退回")
     return `确认退回的 ${n} 台箱子已回到 ${t.fromOrg}，任务结束，箱子回到在仓库。`;
+  // R28 双向寄回腿
+  if (action.to === "待寄回")
+    return `检测完成，发起寄回：${n} 台箱子将寄回 ${t.fromOrg || "寄出分公司"}，由分公司签收归还后箱子归属回分公司。`;
+  if (action.to === "寄回在途")
+    return `确认 ${n} 台箱子已从 ${t.toOrg || "检测站"} 寄出，寄回 ${t.fromOrg || "寄出分公司"}。`;
+  if (action.to === "待归还")
+    return `确认 ${n} 台箱子已到达 ${t.fromOrg || "寄出分公司"}，等待分公司签收归还。`;
+  if (action.to === "已归还")
+    return `签收归还 ${n} 台箱子：箱子归属回 ${t.fromOrg || "寄出分公司"}，保管人清空（可重新分配），任务结束。`;
   if (action.to === "已取消")
     return "取消后任务结束，箱子恢复原来的上报设置；已经发生的流转记录会保留。";
   if (action.to === "运送中")

@@ -119,7 +119,7 @@ const IMEI = "861234567890123";
 const MASKED = "861********0123";
 const IMEI2 = "869876543210987";
 const MASKED2 = "869********0987";
-const HEADER = "\uFEFF时间,单位,操作者,动作,对象类型,对象编号,结果,来源 IP,明细\r\n";
+const HEADER = "\uFEFF时间,单位,操作者,动作,对象类型,对象编号,对象名称,结果,来源 IP,明细\r\n";
 
 /** 三个无标识权限的管理角色 + 对照 admin/asset，连同各自范围内的箱子审计一起备好。 */
 async function scenario(db) {

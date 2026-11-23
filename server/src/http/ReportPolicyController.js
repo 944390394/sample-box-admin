@@ -96,6 +96,7 @@ import {
 
 import {
   activeTaskSql,
+  boxHeldSql,
   deriveTrip,
   ENDED,
   ENDED_OK,
@@ -104,12 +105,15 @@ import {
   isLocalSample,
   isMergedSample,
   nextOf,
+  RETURN_LEG_STEPS,
   RETURN_STEPS,
   SAMPLE_FLOW,
   SAMPLE_OUTBOUND_STEPS,
   signTargetOf,
   stepsOf,
   transferStatusOf,
+  TRIPS,
+  tripModeOf,
 } from "../settings/taskFlow.js";
 
 /** 签收人以外的人代签：流转里记成「已签收」，动作名记「强制签收」。 */
@@ -254,9 +258,21 @@ export class ReportPolicyController {
     const [box] = await this.targets(ctx, [ctx.params.id]);
     ctx.ok(await this.policies.get(box));
   }
+  /**
+   * R28（#95）单箱/批量策略入口范围守卫：补码（068）让分公司管理员持 policyWrite/policyBatch 后，
+   * 非 ADMIN 的目标箱 org 必须落在 manageOrgIds（本公司子树）内，任一越权整单拒 403
+   *（沿划拨整单拒先例，不静默过滤）；ADMIN 全范围不变。与 inPartyScope 参与方门同口径
+   *（scope.all 只认 ADMIN；手工构造 scope 无 manageOrgIds 退回 orgIds）。targets() 的 canSee 只是
+   * 读可见（orgIds 含祖先），写动作另收 manage 口径——否则读范围宽于管理范围的角色可越权改他司箱。
+   */
+  #policyScopeGuard(ctx, boxes) {
+    if (boxes.some((b) => !inPartyScope(ctx, b.org_id)))
+      throw noPermission("只能设置本公司范围内的采样箱策略");
+  }
   async save(ctx) {
     this.require(ctx, P.single);
-    await this.targets(ctx, [ctx.params.id]);
+    const [box] = await this.targets(ctx, [ctx.params.id]);
+    this.#policyScopeGuard(ctx, [box]);
     const policy = validatePolicy(ctx.body.policy);
     await this.policies.save([ctx.params.id], "single", policy);
     await this.log(ctx, policy ? "设置单箱上报策略" : "恢复上报策略继承", ctx.params.id);
@@ -298,6 +314,8 @@ export class ReportPolicyController {
       ids = rows;
     }
     const boxes = await this.targets(ctx, ids);
+    // 批量预览同为 P.batch 写流入口：与 batch 同口径范围守卫，越权早拒同文案（不等保存才拒）。
+    this.#policyScopeGuard(ctx, boxes);
     let overridden = 0;
     for (const box of boxes) {
       const p = await this.policies.get(box);
@@ -312,6 +330,7 @@ export class ReportPolicyController {
   async batch(ctx) {
     this.require(ctx, P.batch);
     const boxes = await this.targets(ctx, ctx.body.ids);
+    this.#policyScopeGuard(ctx, boxes);
     const policy = validatePolicy(ctx.body.policy);
     await this.policies.save(
       boxes.map((b) => b.id),
@@ -596,6 +615,14 @@ export class ReportPolicyController {
       metadata.toOrg = station.name;
       metadata.toPlace = readPlace(input.toPlace);
       metadata.inspect = true;
+      // R28（任务 #92）：寄送类建单要求箱在寄出方（分公司/总部）——箱在检测站整单拒，
+      // 回分公司请用划拨（旧 R22 站首腿双向不再新建，存量 stationFirst 单只读收尾）。
+      if (String(from.id) === String(station.id)) throw badRequest("箱在检测站：回分公司请用划拨");
+      // R28：寄送方向用户可选（单向/双向，默认单向）；双向＝检测完寄回分公司（tripMode=return）
+      const trip = input.trip == null || input.trip === "" ? "单向" : input.trip;
+      if (!TRIPS.includes(trip)) throw badRequest("寄送方向只能是单向或双向");
+      metadata.trip = trip;
+      metadata.tripMode = trip === "双向" ? "return" : "oneWay";
       if (inspectKind) {
         // 送检：仅寄送（箱已采样封箱在寄出方），无采样段；orgId＝寄出方（公司策略/来源归属用）
         metadata.orgId = String(from.id);
@@ -607,7 +634,7 @@ export class ReportPolicyController {
         if (!metadata.sender || !metadata.signer) throw badRequest("请填写寄出人和签收人");
         domainKind = "送检";
       } else {
-        // 采样后送检（含旧客户端 kind=采样 合并别名）：采样单位可选分公司，方向由箱归属派生（R22）
+        // 采样后送检（含旧客户端 kind=采样 合并别名）：采样单位可选分公司，方向用户可选（R28，默认单向）
         let samplerId = String(input.orgId ?? "") || String(input.fromOrgId ?? "");
         if (samplerId === String(station.id) && input.trip && input.fromOrgId)
           samplerId = String(input.fromOrgId);
@@ -615,7 +642,6 @@ export class ReportPolicyController {
         if (!sampler) throw badRequest("请选择采样单位（分公司）");
         if (String(sampler.id) === String(station.id)) throw badRequest("采样单位不能是检测站");
         if (sampler.type !== "公司") throw badRequest("采样单位必须是分公司（公司类型）");
-        const trip = deriveTrip(String(from.id), String(station.id), String(sampler.id));
         // #87：采样单位（客户端 orgId/fromOrgId）必须在建单方范围内——原 OR 口径（采样单位或寄出方
         // 任一在范围即过）让分公司管理员拿自己的箱把采样单位写成兄弟公司（越权建单洞）。
         // 寄出方＝箱当前归属，已被 targets() 的箱子范围门把住，无需再 OR；管理员全量不受限。
@@ -623,7 +649,7 @@ export class ReportPolicyController {
           throw noPermission("采样单位不在你的管理范围内");
         metadata.orgId = String(sampler.id);
         metadata.org = sampler.name;
-        metadata.trip = trip;
+        // trip/tripMode 已在上方按用户选择写入；tripDerived 标记沿用（legacy 判别：带标记＝新单）
         metadata.tripDerived = true;
         // 开箱录像只给分公司采样现场；检测站恒禁（录音⑥）。gate 按采样单位（双向寄出方是检测站）
         if (input.recordVideo) {
@@ -794,8 +820,9 @@ export class ReportPolicyController {
     }
     const base = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     // 各状态数量（不受状态筛选影响）。R23：本地采样已封箱是终态，按 kind+localOnly 区分进行中/已结束。
+    // R28：双向寄回单（tripMode=return）已检测是中间态，计进行中（与 isEndedFor/activeTaskSql 同口径）。
     const grouped = await this.db.all(
-      `SELECT t.status, t.kind, CASE WHEN t.body LIKE '%"localOnly":true%' THEN 1 ELSE 0 END AS local, COUNT(*) AS n FROM sample_task t ${base} GROUP BY t.status, t.kind, local`,
+      `SELECT t.status, t.kind, CASE WHEN t.body LIKE '%"localOnly":true%' THEN 1 ELSE 0 END AS local, CASE WHEN t.body LIKE '%"tripMode":"return"%' THEN 1 ELSE 0 END AS ret, COUNT(*) AS n FROM sample_task t ${base} GROUP BY t.status, t.kind, local, ret`,
       params
     );
     const counts = { 全部: 0, 进行中: 0, 已结束: 0, 签收: 0 };
@@ -805,7 +832,7 @@ export class ReportPolicyController {
       if (SIGN_STEPS.includes(row.status)) counts.签收 += n;
       counts.全部 += n;
       const ended =
-        ENDED.includes(row.status) ||
+        (ENDED.includes(row.status) && !(Number(row.ret) === 1 && row.status === "已检测")) ||
         (row.kind === "采样" && Number(row.local) === 1 && row.status === "已封箱");
       counts[ended ? "已结束" : "进行中"] += n;
     }
@@ -1232,9 +1259,9 @@ export class ReportPolicyController {
         row,
         target ? { id: String(target.id), name: target.name } : null
       );
-      // 占用关系与 busy 守卫同一判定（未结束单 × 未开始检测），多单取最早建单那张
+      // 占用关系与 busy 守卫同一判定（未结束单 × 未开始检测；R28 寄回腿期间仍占用），多单取最早建单那张
       const bound = await this.db.get(
-        `SELECT t.id,t.name,t.kind,t.status,t.created_at FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL ORDER BY t.created_at LIMIT 1`,
+        `SELECT t.id,t.name,t.kind,t.status,t.created_at FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()} ORDER BY t.created_at LIMIT 1`,
         [row.id]
       );
       if (hit) blockedCount += 1;
@@ -1715,7 +1742,7 @@ export class ReportPolicyController {
       });
     }
     // 轨迹和开关箱事件按任务窗口取；没有位置权限只给事件不给坐标
-    const window = taskWindow(row.created_at, row.status, logs);
+    const window = taskWindow(row.created_at, row.status, logs, new Date(), task);
     await this.boxes.flush?.();
     const track = await taskTrack(this.db, task.boxIds || [], window, {
       places: await taskPlaces(task, this.db),
@@ -1883,6 +1910,13 @@ export class ReportPolicyController {
           if (to === "退回中") return [to, may(T.rejectReturn, signer || receiver)];
           if (to === "已退回") return [to, may(T.acceptReturn, sender)];
           if (to === "已检测") return [to, may(T.inspect, receiver)];
+          // R28 双向寄回腿（tripMode=return）：待寄回/寄回在途/待归还的动作门＝检测站（接收方）。
+          // 发起寄回/确认寄回双码门 send‖sign（沿 R22 首腿先例：DUTY/VERIFY 持 sign 无 send）；
+          // 确认到达（待归还）arrive‖sign 同理。签收归还（已归还）门＝寄出分公司（fromOrg）。
+          if (to === "待寄回" || to === "寄回在途")
+            return [to, may(T.send, receiver) || may(T.sign, receiver)];
+          if (to === "待归还") return [to, may(T.arrive, receiver) || may(T.sign, receiver)];
+          if (to === "已归还") return [to, may(T.sign, sender) || may(T.acceptReturn, sender)];
           return [to, false];
         })
       );
@@ -2070,7 +2104,7 @@ export class ReportPolicyController {
         ? overOpenLimit(task, await openCounts(this.db, row.id)).length
         : 0;
       for (const key of bucketsOf(task, row.status, can, openOver)) groups[key].push(brief);
-      if (["运送中", "在途"].includes(row.status)) groups.moving.push(brief);
+      if (["运送中", "在途", "寄回在途"].includes(row.status)) groups.moving.push(brief);
       if (
         (me && (task.senderId === me || task.signerId === me)) ||
         (myName && String(task.people || "").includes(myName))
@@ -2125,9 +2159,11 @@ export class ReportPolicyController {
       const opensNow = Number(box.toJSON().opens ?? 0);
       tasks = rows.map((row) => {
         const task = JSON.parse(row.body);
-        // 检测站已开始检测的箱子：这张单对它来说已经结束；R23 本地采样已封箱也是终态
+        // 检测站已开始检测的箱子：这张单对它来说已经结束；R23 本地采样已封箱也是终态。
+        // R28 双向寄回单例外：已检测后还要寄回分公司（占用保持到已归还），扫码仍可推进寄回腿
         const active =
-          !isEndedFor({ ...task, kind: row.kind, status: row.status }) && !row.box_inspected_at;
+          !isEndedFor({ ...task, kind: row.kind, status: row.status }) &&
+          (!row.box_inspected_at || tripModeOf({ ...task, kind: row.kind }) === "return");
         const can = active ? this.#abilities(ctx, task, row.status, owned) : {};
         // 待检测时扫到的这台箱子：能逐台开始检测；整张单的「全部开始检测」留在任务详情里
         if (active && row.status === "待检测") {
@@ -2248,7 +2284,7 @@ export class ReportPolicyController {
       "SELECT status, created_at FROM sample_task_log WHERE task_id=? ORDER BY created_at, id",
       [row.id]
     );
-    const window = taskWindow(row.created_at, row.status, logs);
+    const window = taskWindow(row.created_at, row.status, logs, new Date(), task);
     await this.boxes.flush?.();
     const places = await taskPlaces(task, this.db);
     const track = await taskTrack(this.db, boxId ? [boxId] : all, window, { places });
@@ -2278,7 +2314,7 @@ export class ReportPolicyController {
       "SELECT * FROM sample_task_log WHERE task_id=? ORDER BY created_at, id",
       [row.id]
     );
-    const window = taskWindow(row.created_at, row.status, logs);
+    const window = taskWindow(row.created_at, row.status, logs, new Date(), task);
     const all = task.boxIds || [];
     const boxId =
       typeof ctx.query.boxId === "string" && all.includes(ctx.query.boxId) ? ctx.query.boxId : "";
@@ -2392,7 +2428,11 @@ export class ReportPolicyController {
             ? `只有签收人 ${task.signer} 可以签收，你可以强制签收`
             : (transfer || stationFlow) && [signTo, "已拒收", "已检测"].includes(status)
               ? "只有接收单位（检测站）的人员可以签收、拒收或开始检测"
-              : "没有这项操作权限";
+              : stationFlow && ["待寄回", "寄回在途", "待归还"].includes(status)
+                ? "只有检测站的人员可以发起寄回、确认寄回或确认到达"
+                : stationFlow && status === "已归还"
+                  ? "只有寄出分公司的人员可以签收归还"
+                  : "没有这项操作权限";
       throw noPermission(message);
     }
     if (force && !note.trim()) throw badRequest("请填写强制签收的原因");
@@ -2413,10 +2453,13 @@ export class ReportPolicyController {
     const party =
       (isMergedSample(task) || isLocalSample(task)) &&
       (inScope(ctx, task.orgId) || (task.trip && inScope(ctx, task.fromOrgId)));
-    // 合并单/送检：检测站签收/拒收/开始检测/发起退回、寄出方接收退回时，箱子可能已挂检测站，按参与方放行
+    // 合并单/送检：检测站签收/拒收/开始检测/发起退回/寄回腿、寄出方接收退回/签收归还时，
+    // 箱子可能已挂检测站，按参与方放行
     const mergedReceive =
       stationFlow &&
-      ["待签收", "待检测", "已检测", "已拒收", "退回中", "已退回"].includes(status) &&
+      ["待签收", "待检测", "已检测", "已拒收", "退回中", "已退回", ...RETURN_LEG_STEPS].includes(
+        status
+      ) &&
       (inScope(ctx, task.toOrgId) || inScope(ctx, task.fromOrgId) || isSigner(ctx, task));
     if (
       !party &&
@@ -2428,9 +2471,17 @@ export class ReportPolicyController {
       )
     )
       await this.targets(ctx, ids);
-    // 寄出、寄回这两步记的是出发地的距离；拒收并退回记离收货地址多远，接收退回记离寄出地址多远
+    // 寄出、寄回这两步记的是出发地的距离；拒收并退回记离收货地址多远，接收退回记离寄出地址多远；
+    // R28 寄回腿：确认寄回记离检测站（收货地址）多远，签收归还记离寄出分公司多远
     const at =
-      { 运送中: "待寄出", 在途: "已封箱", 退回中: "待签收", 已退回: "退回中" }[status] || status;
+      {
+        运送中: "待寄出",
+        在途: "已封箱",
+        退回中: "待签收",
+        已退回: "退回中",
+        寄回在途: "待寄回",
+        已归还: "待归还",
+      }[status] || status;
     const target = targetOf(task, at);
     const detail =
       target && hasCoords(target)
@@ -2456,6 +2507,7 @@ export class ReportPolicyController {
     // 签收交接（R-5）：归属迁移并入 transition 的同一事务，任一台失败整体回滚，
     // 不再出现「已签收但归属只移了一半」。跳过守卫（已改挂/不在寄出方）语义不变。
     // 退回交接（D3）：合并单/送检「已退回」时归属回迁原寄出分公司，同样同事务、整体回滚。
+    // 签收归还交接（R28）：「已归还」时归属回寄出分公司＋保管人清空（可重新分配）。
     const result = await this.policies.transition(id, status, {
       actor: actorOf(ctx),
       note,
@@ -2464,6 +2516,7 @@ export class ReportPolicyController {
       handOver: (transfer || stationFlow) && status === signTo ? { signerFit } : null,
       returnHandOver: stationFlow && status === "已退回" ? true : null,
       outboundHandOver: outbound ? true : null,
+      handBack: stationFlow && status === "已归还" ? true : null,
     });
     const handOver = result.handOver;
     // 旧字段兼容：handOverSkipped 仍是 [{id, reason}]；新字段 handOver 给全量 moved/skipped
@@ -2589,6 +2642,7 @@ const STATUS_KEYS = [
     ...SAMPLE_FLOW,
     ...SAMPLE_OUTBOUND_STEPS,
     ...RETURN_STEPS,
+    ...RETURN_LEG_STEPS,
     ...ENDED_OK,
     ...ENDED_VOID,
     "待接受", // R25 划拨三态进行中态（不在全局 ENDED）
@@ -2656,10 +2710,11 @@ function bucketsOf(task, status, can, openOver = null) {
     if (can.cancel) buckets.push("transferCancel");
     return buckets;
   }
-  if (can["运送中"]) buckets.push("send");
-  if (can["待签收"] || (status === "运送中" && can["待采样"])) buckets.push("arrive");
-  if (can["已签收"] || can["待检测"] || can[FORCE_SIGN]) buckets.push("sign");
-  if (can["已退回"]) buckets.push("returning");
+  if (can["运送中"] || can["寄回在途"]) buckets.push("send");
+  if (can["待签收"] || can["待归还"] || (status === "运送中" && can["待采样"]))
+    buckets.push("arrive");
+  if (can["已签收"] || can["待检测"] || can[FORCE_SIGN] || can["已归还"]) buckets.push("sign");
+  if (can["已退回"] || can["待寄回"]) buckets.push("returning");
   if (can["已检测"]) buckets.push("inspect");
   if (
     (isLocalSample(task) || isMergedSample(task)) &&

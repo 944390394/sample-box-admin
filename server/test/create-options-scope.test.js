@@ -249,7 +249,7 @@ test("taskOptions 权限门口径不变：event-only/无建单码 403，inspect-
   }
 });
 
-test("createTask 合并种：越权采样单位 403 不落库；范围内 200 不回归；双向 ADMIN/站侧总公司根不回归", async () => {
+test("createTask 合并种：越权采样单位 403 不落库；范围内 200 不回归；R28 箱在检测站拒＋显式双向 return", async () => {
   const s = await setup();
   try {
     const branch = await s.ctxOf("9103");
@@ -306,48 +306,60 @@ test("createTask 合并种：越权采样单位 403 不落库；范围内 200 �
       },
     });
     assert.ok(desk.ok, desk.error);
-    // 双向不回归①：ADMIN 箱在检测站＋采样单位＝华南 → 双向 200
+    // R28 契约演进：箱在检测站新建寄送单整单拒（回分公司请用划拨）——原 R22 派生双向 200 已废
     const admin = await s.ctxOf("2");
     const round = await s.call(s.controller.createTask.bind(s.controller), admin, {
       body: {
         ...base,
         boxIds: ["864317080990004"],
-        name: "管理员双向",
+        name: "箱在检测站",
         kind: "采样后送检",
         fromOrgId: "2",
         orgId: "2",
         senderId: "5",
       },
     });
-    assert.ok(round.ok, round.error);
-    const roundBody = JSON.parse(
-      (await s.db.get("SELECT body FROM sample_task WHERE id=?", [round.data.id])).body
+    assert.equal(round.ok, false);
+    assert.equal(round.status, 400);
+    assert.match(round.error, /箱在检测站：回分公司请用划拨/);
+    // 显式双向（箱在分公司）＝return 寄回腿 200：ADMIN 不回归
+    const two = await s.call(s.controller.createTask.bind(s.controller), admin, {
+      body: {
+        ...base,
+        boxIds: ["864317080990003"],
+        name: "管理员双向",
+        kind: "采样后送检",
+        trip: "双向",
+        fromOrgId: "2",
+        orgId: "2",
+        senderId: "6",
+      },
+    });
+    assert.ok(two.ok, two.error);
+    const twoBody = JSON.parse(
+      (await s.db.get("SELECT body FROM sample_task WHERE id=?", [two.data.id])).body
     );
-    assert.equal(roundBody.trip, "双向");
-    assert.equal(roundBody.fromOrgId, "13");
-    // 双向不回归②：站侧角色（scope2 dept13，orgIds=[1,13]）采样单位＝总公司根（inScope 祖先，UI 修后默认候选）→ 200
+    assert.equal(twoBody.trip, "双向");
+    assert.equal(twoBody.tripMode, "return");
+    assert.equal(twoBody.fromOrgId, "21", "寄出方＝箱归属（分公司），不再是检测站");
+    // 站侧角色（scope2 dept13，orgIds=[1,13]）箱在检测站同样拒（R28 不分角色）
     await s.box("864317080990005", "13");
     const stationCtx = await s.ctxOf("9402");
     const stationRound = await s.call(s.controller.createTask.bind(s.controller), stationCtx, {
       body: {
         ...base,
         boxIds: ["864317080990005"],
-        name: "站侧双向",
+        name: "站侧箱在检测站",
         kind: "采样后送检",
         fromOrgId: "1",
         orgId: "1",
         senderId: "5",
       },
     });
-    assert.ok(stationRound.ok, stationRound.error);
-    assert.equal(
-      JSON.parse(
-        (await s.db.get("SELECT body FROM sample_task WHERE id=?", [stationRound.data.id])).body
-      ).trip,
-      "双向"
-    );
-    // 站侧角色把采样单位写成范围外分公司（2）→ 403（与 UI 修后候选一致：站侧只见总公司根）
-    await s.box("864317080990006", "13");
+    assert.equal(stationRound.ok, false);
+    assert.match(stationRound.error, /箱在检测站：回分公司请用划拨/);
+    // 站侧角色把采样单位写成范围外分公司（2）→ 403（箱挂总公司根 1，绕开站箱拒先 hit 范围门）
+    await s.box("864317080990006", "1");
     const stationNeg = await s.call(s.controller.createTask.bind(s.controller), stationCtx, {
       body: {
         ...base,

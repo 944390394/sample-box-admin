@@ -14,7 +14,7 @@ import { rawStorage } from "./schema.js";
 import { UplinkBatch } from "./UplinkBatch.js";
 import { scopeSql, usableMv } from "../auth/boxAccess.js";
 import { queueWipe } from "../settings/DeviceCommands.js";
-import { activeTaskSql } from "../settings/taskFlow.js";
+import { activeTaskSql, boxHeldSql } from "../settings/taskFlow.js";
 import { ESCAPE_SQL, likePattern } from "./sqlText.js";
 import { badRequest } from "../domain/AppError.js";
 
@@ -429,7 +429,7 @@ export class SqlBoxStore extends BoxStore {
       if (!["未使用", "停用"].includes(row.life))
         return { error: "只能删除未使用或停用的采样箱", status: 409 };
       const pending = await db.get(
-        `SELECT t.id FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND m.inspected_at IS NULL LIMIT 1`,
+        `SELECT t.id FROM sample_task t JOIN sample_task_box m ON m.task_id=t.id WHERE m.box_id=? AND ${activeTaskSql()} AND ${boxHeldSql()} LIMIT 1`,
         [id]
       );
       const active = await db.get("SELECT task_id FROM box_active_task WHERE box_id=?", [id]);

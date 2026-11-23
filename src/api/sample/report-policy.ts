@@ -67,9 +67,11 @@ export interface PolicyTask {
   orgId?: string;
   org?: string;
   placeAt?: Place | null;
-  /** R22 派生寄送方向（只读）：箱在检测站＝双向，否则单向；旧单为手选值/读时回算。 */
+  /** R28 寄送方向（寄送类建单可选，默认单向）：单向＝检测完留检测站；双向＝检测完寄回分公司。旧单为派生/手选值。 */
   trip?: "单向" | "双向";
-  /** R22 派生方向标记：true＝合并单（ trip 由箱归属派生）；旧 trip 单无此标记。 */
+  /** R28 方向语义分流：oneWay＝单向；return＝双向寄回腿；stationFirst＝历史 R22 派生双向（站首腿，只读）。 */
+  tripMode?: "oneWay" | "return" | "stationFirst";
+  /** R22 新单标记：true＝合并单（非 legacy）；旧 trip 单无此标记。R28 沿用（方向改用户可选）。 */
   tripDerived?: boolean;
   /** 这张单的流程步骤，服务端按类型和寄送方式给出。 */
   steps?: string[];

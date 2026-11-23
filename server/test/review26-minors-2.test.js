@@ -70,7 +70,7 @@ const deptIdsOf = async (db, roleId) =>
 
 const RANGE = { from: "2026-10-01", to: "2026-10-31" };
 const AT = "2026-10-15 09:00:00.000";
-const HEADER = "\uFEFF时间,单位,操作者,动作,对象类型,对象编号,结果,来源 IP,明细\r\n";
+const HEADER = "\uFEFF时间,单位,操作者,动作,对象类型,对象编号,对象名称,结果,来源 IP,明细\r\n";
 
 async function log(db, orgId, actorId, orgName, actorName = actorId, detail = "") {
   await db.run(

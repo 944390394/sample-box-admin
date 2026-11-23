@@ -281,7 +281,25 @@ test("检测站：扫码签收后逐台开始检测，开箱次数定在签收�
       ["开始检测", "开始检测", "检测完成"]
     );
     assert.equal((await boxes.findById(b.id)).life, "未使用");
-    // 合并采样单可再建（箱子已释放）
+    // R28：箱在检测站新建寄送单整单拒（回分公司请用划拨）——检测完的箱子要回分公司走划拨
+    const rejected = await call(c.createTask.bind(c), {
+      ...ctxOf(null),
+      body: {
+        name: "下一单",
+        kind: "采样",
+        boxIds: [a.id, b.id],
+        fromOrgId: "2",
+        sender: "x",
+        signer: "y",
+      },
+    }).catch((e) => ({ error: e.message }));
+    assert.match(String(rejected.error || ""), /箱在检测站：回分公司请用划拨/);
+    // 划拨回分公司后（此处模拟归属已回 2）：箱子已释放可再建合并单
+    for (const id of [a.id, b.id])
+      await boxes.updateBox(id, (x) => {
+        x.orgId = "2";
+        x.org = "华南分公司";
+      });
     const again = await call(c.createTask.bind(c), {
       ...ctxOf(null),
       body: {

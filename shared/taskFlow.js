@@ -8,15 +8,20 @@
  *
  * 组织简化（B1a/P6）后两类新建单据（kind 是权威来源，单号前缀只是显示）：
  * - 采样 TK-：采样＋送检合并成一张单。接收方固定唯一检测站，签收后逐台扫码开始检测。
- *   寄送方向 trip（R22）由箱子当前归属派生、只读，不再手选：
- *   - 单向（箱在分公司/总部）：本地采样后寄检测站。主路径 7 步：
+ *   寄送方向 trip（R28/任务 #92）改回可选：单向/双向，默认单向；建单要求箱在寄出分公司
+ *   （箱在检测站→拒，回分公司请用划拨）。方向语义由 body.tripMode 分流：
+ *   - oneWay（单向）：本地采样后寄检测站，检测完箱留检测站。主路径 7 步：
  *     待采样→采样中→已封箱→在途→待签收→待检测→已检测(终态OK)。
- *   - 双向（箱在检测站、采样单位是分公司）：检测站先把箱子寄到采样分公司（首腿 待寄出→运送中→待采样，
- *     分公司确认到达时归属交采样单位），采样封箱后寄回检测站。主路径 9 步＝首腿 2 步＋单向 7 步。
+ *   - return（双向，R28 新语义）：合并流＋寄回腿，主路径 11 步＝单向 7 步＋
+ *     待寄回→寄回在途→待归还→已归还(终态OK)。已检测→待寄回→寄回在途→待归还 归检测站，
+ *     待归还→已归还（签收归还）归寄出分公司：箱归属回 fromOrg＋保管人清空。
+ *     已检测在 return 单里是中间态（占用保持到已归还，isEndedFor/activeTaskSql 例外）。
+ *   - stationFirst（历史 R22 派生双向，067 打标）：箱在检测站、检测站先寄到采样分公司
+ *     （首腿 待寄出→运送中→待采样，分公司确认到达时归属交采样单位），采样封箱后寄回检测站。
+ *     主路径 9 步＝首腿 2 步＋单向 7 步。只读保留旧语义，新单不再产生。
  *   分支：已取消（最终待签收之前可取消）；已拒收（签收动作可选拒收→终态）；
- *   退回中→已退回（待检测/已检测可发起退回，退回目的地＝寄出方 fromOrg＝建单时箱归属：
- *   单向回原寄出分公司，双向回检测站）。
- *   新建合并单恒写 tripDerived=true＋派生 trip；旧数据（无 tripDerived 标记）只读兼容。
+ *   退回中→已退回（待检测/已检测可发起退回，退回目的地＝寄出方 fromOrg＝建单时箱归属）。
+ *   新建合并单恒写 tripDerived=true＋tripMode；旧数据（无 tripDerived 标记）只读兼容。
  * - 划拨 AL-（R25 三态，任务 #71）：创建→待接受→（目标分公司管理员）接受→已完成；归属在接受时转移。
  *   接受前出口＝创建方取消（已取消）＋接收方拒收（已拒收，原因必填）；接受后不可撤销，只能重新划拨。
  *   待接受是进行中态（占用箱子，不在 ENDED）；已完成/已取消/已拒收是终态。无物流步骤，
@@ -31,13 +36,31 @@
  * 「开始检测」，这台箱子的本次任务就结束、开箱次数从下一张单重新算；全部开始检测后整张单变「已检测」。
  */
 
-/** 寄送方向：R22 起由箱当前归属派生（deriveTrip），只读展示；旧单的手选值只读兼容。 */
+/** 寄送方向：R28 起寄送类（送检/采样后送检）建单可选，默认单向；旧单的手选/派生值只读兼容。 */
 export const TRIPS = ["单向", "双向"];
 
 /**
- * 派生寄送方向（R22，用户拍板「箱在分公司就是分公司寄出，在检测站就是检测站寄出」）：
- * 箱当前归属＝唯一检测站 且 采样单位≠检测站 → 双向（检测站寄出→分公司采样→寄回检测站）；
- * 其余（箱在分公司/总部/未分配）→ 单向（本地采样后寄检测站）。
+ * 方向语义分流（R28/任务 #92，body.tripMode）：
+ * - oneWay：单向（检测完箱留检测站）；
+ * - return：双向寄回腿（检测完寄回寄出分公司，分公司签收归还）；
+ * - stationFirst：历史 R22 派生双向（检测站首腿寄出→分公司采样→寄回检测站），只读保留。
+ * 067 给存量合并单打标：旧 trip=双向→stationFirst、旧单向→oneWay；新单恒写显式 tripMode。
+ */
+export const TRIP_MODES = ["oneWay", "return", "stationFirst"];
+
+/**
+ * 这张单的方向语义。显式 body.tripMode 优先（新单/067 回填）；
+ * 无标记的存量合并单按 trip 推断：双向＝R22 派生的站首腿（stationFirst），其余＝oneWay。
+ * 只对合并单/送检有意义；旧采样单（isLegacySample）走自己的旧流，不读本函数。
+ */
+export function tripModeOf(task) {
+  if (TRIP_MODES.includes(task?.tripMode)) return task.tripMode;
+  return isMergedSample(task) && task?.trip === "双向" ? "stationFirst" : "oneWay";
+}
+
+/**
+ * 派生寄送方向（R22 历史口径，仅供 059 迁移与未迁移库读时回算兜底；R28 新建单不再派生）：
+ * 箱当前归属＝唯一检测站 且 采样单位≠检测站 → 双向（站首腿）；其余 → 单向。
  * 入参一律 String 归一；检测站未解析（空）时恒单向。
  */
 export function deriveTrip(boxOrgId, stationOrgId, samplerOrgId) {
@@ -58,8 +81,8 @@ export function deriveTrip(boxOrgId, stationOrgId, samplerOrgId) {
  */
 export const DOC_KINDS = ["采样", "送检", "采样后送检", "划拨"];
 
-/** 走完流程结束的：老任务完成、旧调拨签收完、检测站全部开始检测、划拨接受完成（已划拨＝历史别名）。 */
-export const ENDED_OK = ["已完成", "已签收", "已检测", "已划拨"];
+/** 走完流程结束的：老任务完成、旧调拨签收完、检测站全部开始检测、双向寄回分公司签收归还、划拨接受完成（已划拨＝历史别名）。 */
+export const ENDED_OK = ["已完成", "已签收", "已检测", "已归还", "已划拨"];
 /** 中途作废结束的（含划拨取消/拒收/历史撤销）。 */
 export const ENDED_VOID = ["已取消", "已拒收", "已退回", "已撤销"];
 
@@ -79,6 +102,12 @@ export function isEnded(status) {
 export const INSPECT_STEPS = ["待检测", "已检测"];
 /** 退回后的返程两步。 */
 export const RETURN_STEPS = ["退回中", "已退回"];
+/**
+ * 双向寄回腿（R28/任务 #92，tripMode=return）：已检测后检测站发起寄回→寄回在途→待归还，
+ * 寄出分公司签收归还（已归还，终态OK：箱归属回 fromOrg＋保管人清空）。
+ * 待寄回/寄回在途/待归还的动作门＝检测站；已归还签收门＝寄出分公司。
+ */
+export const RETURN_LEG_STEPS = ["待寄回", "寄回在途", "待归还", "已归还"];
 
 /** 划拨无物流步骤：通用任务进度条不渲染（详情页用 TRANSFER_TRACK 三步条，R25）。 */
 export const TRANSFER_STEPS = [];
@@ -95,6 +124,8 @@ export const TRANSFER_TRACK = ["创建划拨", "接受划拨", "已完成"];
 export const INSPECT_FLOW = ["待寄出", "运送中", "待签收", "待检测", "已检测"];
 /** 旧送检拒收并退回的返程路径（只读保留）。 */
 export const INSPECT_RETURN_FLOW = ["待寄出", "运送中", "待签收", "退回中", "已退回"];
+/** 送检双向（R28 tripMode=return）主路径 9 步＝仅寄送 5 步＋寄回腿 4 步。 */
+export const INSPECT_RETURN_LEG_FLOW = [...INSPECT_FLOW, ...RETURN_LEG_STEPS];
 
 /** 合并采样单主路径 7 步（P6，含首末态）：分公司自采→封箱→寄检测站→签收→逐台检测。 */
 export const SAMPLE_FLOW = ["待采样", "采样中", "已封箱", "在途", "待签收", "待检测", "已检测"];
@@ -104,8 +135,8 @@ export const SAMPLE_FLOW = ["待采样", "采样中", "已封箱", "在途", "�
  */
 export const SAMPLE_LOCAL_FLOW = ["待采样", "采样中", "已封箱"];
 /**
- * 合并采样单退回路径：待检测/已检测可发起退回，回寄出方 fromOrg（单向＝原寄出分公司，双向＝检测站）。
- * 进度条把检测段换成返程（已检测后退回的，检测事实在流转记录里）。
+ * 合并采样单退回路径：待检测/已检测可发起退回，回寄出方 fromOrg（单向/新双向＝原寄出分公司，
+ * 历史 stationFirst 双向＝检测站）。进度条把检测段换成返程（已检测后退回的，检测事实在流转记录里）。
  */
 export const SAMPLE_RETURN_FLOW = [
   "待采样",
@@ -128,6 +159,11 @@ export const SAMPLE_OUTBOUND_STEPS = ["待寄出", "运送中"];
 export const SAMPLE_ROUND_FLOW = [...SAMPLE_OUTBOUND_STEPS, ...SAMPLE_FLOW];
 /** 双向合并单退回路径＝首腿 2 步＋单向退回 8 步。 */
 export const SAMPLE_ROUND_RETURN_FLOW = [...SAMPLE_OUTBOUND_STEPS, ...SAMPLE_RETURN_FLOW];
+/**
+ * 双向合并单（R28 tripMode=return）主路径 11 步＝单向 7 步＋寄回腿 4 步。
+ * 已检测在此是中间态（箱仍占用，等检测站寄回）；已归还终态OK。
+ */
+export const SAMPLE_RETURN_LEG_FLOW = [...SAMPLE_FLOW, ...RETURN_LEG_STEPS];
 
 /**
  * 这张采样单是不是旧数据（只读兼容）。判别按 tripDerived 标记＋inspect（review-org M2＋R22）：
@@ -172,24 +208,44 @@ export function isInspectKind(task) {
 }
 
 /**
- * 这张单（按 kind＋状态）是不是结束了。全局 ENDED 之外，仅本地采样单的「已封箱」是终态OK
- * （合并单的同名状态仍是中间态，不能进全局 ENDED，否则占用 SQL 会提前释放合并单的箱子）。
+ * 这张单（按 kind＋状态）是不是结束了。全局 ENDED 之外：
+ * - 仅本地采样单的「已封箱」是终态OK（合并单的同名状态仍是中间态，不能进全局 ENDED，
+ *   否则占用 SQL 会提前释放合并单的箱子）；
+ * - 双向寄回单（tripMode=return）的「已检测」是中间态（箱等检测站寄回，占用保持到已归还），
+ *   虽然同名状态在全局 ENDED 里（单向/送检/旧单仍是终态）。
  */
 export function isEndedFor(task) {
   const status = String(task?.status || "");
+  if (tripModeOf(task) === "return" && status === "已检测") return false;
   if (ENDED.includes(status)) return true;
   return isLocalSample(task) && status === "已封箱";
 }
 
 /**
- * 占用/进行中判定的 SQL 条件（别名默认 t）：全局 ENDED 之外，排除仅本地采样单已封箱终态。
- * localOnly 标记走 body LIKE（与 isLocalSample 同口径，SQLite/MySQL 通用），合并别名（inspect=true、
+ * 占用/进行中判定的 SQL 条件（别名默认 t）：全局 ENDED 之外，排除仅本地采样单已封箱终态、
+ * 把双向寄回单（body.tripMode=return）的已检测算回进行中（与 isEndedFor 同口径）。
+ * localOnly/tripMode 标记走 body LIKE（SQLite/MySQL 通用），合并别名（inspect=true、
  * 无 localOnly）不受影响。所有「箱子是否被未结束单占用」「进行中任务」查询统一用它。
  */
 export function activeTaskSql(alias = "t") {
   return (
-    `(${alias}.status NOT IN (${ENDED_SQL}) AND NOT (` +
+    `((${alias}.status NOT IN (${ENDED_SQL}) OR ` +
+    `(${alias}.body LIKE '%"tripMode":"return"%' AND ${alias}.status = '已检测')) AND NOT (` +
     `${alias}.kind = '采样' AND ${alias}.status = '已封箱' AND ${alias}.body LIKE '%"localOnly":true%'))`
+  );
+}
+
+/**
+ * busy 查询里「这台箱子还被这张单攥着」的谓词（R28）：通常检测站开始检测后箱子不再算占用
+ * （inspected_at 非空即放行下一张单）；但双向寄回单在 已检测→待寄回→寄回在途→待归还 期间
+ * 箱子还在本单流程里（要寄回分公司），检测事实不解除占用，到已归还才释放。
+ * 与 activeTaskSql 组合使用：`... AND ${activeTaskSql()} AND ${boxHeldSql()}`。
+ */
+export function boxHeldSql(taskAlias = "t", linkAlias = "m") {
+  return (
+    `(${linkAlias}.inspected_at IS NULL OR ` +
+    `(${taskAlias}.body LIKE '%"tripMode":"return"%' AND ` +
+    `${taskAlias}.status IN ('已检测','待寄回','寄回在途','待归还')))`
   );
 }
 
@@ -202,9 +258,11 @@ export function prefixOf(kind) {
 
 export function stepsOf(task) {
   if (task.kind === "划拨") return TRANSFER_STEPS;
-  // 送检（R23 新建＋旧只读同流）：仅寄送，无采样段
-  if (task.kind === "送检")
-    return RETURN_STEPS.includes(task.status) ? INSPECT_RETURN_FLOW : INSPECT_FLOW;
+  // 送检（R23 新建＋旧只读同流）：仅寄送，无采样段；R28 双向（return）带寄回腿
+  if (task.kind === "送检") {
+    if (RETURN_STEPS.includes(task.status)) return INSPECT_RETURN_FLOW;
+    return tripModeOf(task) === "return" ? INSPECT_RETURN_LEG_FLOW : INSPECT_FLOW;
+  }
   // 旧调拨（只读）
   if (task.kind === "调拨") {
     const head = task.direct ? ["待签收"] : ["待寄出", "运送中", "待签收"];
@@ -227,9 +285,13 @@ export function stepsOf(task) {
     if (INSPECT_STEPS.includes(task.status)) return SAMPLE_FLOW;
     return [...sampling, ...back];
   }
-  // 合并采样单（采样后送检；旧合并别名 kind=采样＋inspect 也走这里）：R22 双向带首腿，单向 7 步
+  // 合并采样单（采样后送检；旧合并别名 kind=采样＋inspect 也走这里）：按 tripMode 分流（R28）——
+  // stationFirst（历史 R22 派生双向）带首腿；return（新双向）带寄回腿；oneWay 7 步。
   const base = RETURN_STEPS.includes(task.status) ? SAMPLE_RETURN_FLOW : SAMPLE_FLOW;
-  return task.trip === "双向" ? [...SAMPLE_OUTBOUND_STEPS, ...base] : base;
+  const mode = tripModeOf(task);
+  if (mode === "stationFirst") return [...SAMPLE_OUTBOUND_STEPS, ...base];
+  if (mode === "return" && !RETURN_STEPS.includes(task.status)) return SAMPLE_RETURN_LEG_FLOW;
+  return base;
 }
 
 /** 签收推进到哪一步：合并采样单/送检/送检测站的到「待检测」，旧调拨/旧采样到「已签收」。 */
@@ -254,6 +316,18 @@ const INSPECT_NEXT = {
 };
 
 /**
+ * 送检双向寄回（R28 tripMode=return）：已检测不再是终态，检测站发起寄回；
+ * 寄回腿途中不能取消（箱子正在回寄出分公司）。
+ */
+const INSPECT_RETURN_LEG_NEXT = {
+  ...INSPECT_NEXT,
+  已检测: ["待寄回"],
+  待寄回: ["寄回在途"],
+  寄回在途: ["待归还"],
+  待归还: ["已归还"],
+};
+
+/**
  * 合并采样单各状态的推进集合（P6）。
  * 已取消只在待签收之前（待采样/采样中/已封箱/在途）；待签收只能签收或拒收；
  * 待检测/已检测可发起退回（已检测是终态OK，但仍允许退回，故单列）；退回途中不能取消。
@@ -270,13 +344,26 @@ const SAMPLE_NEXT = {
 };
 
 /**
- * 双向合并单（R22）：首腿 待寄出→运送中→待采样（分公司确认到达＝签收，归属交采样单位），
- * 之后与单向完全一致。首腿也在最终待签收之前，可取消。
+ * 双向合并单（R22 历史站首腿，tripMode=stationFirst）：首腿 待寄出→运送中→待采样
+ * （分公司确认到达＝签收，归属交采样单位），之后与单向完全一致。首腿也在最终待签收之前，可取消。
  */
 const SAMPLE_ROUND_NEXT = {
   待寄出: ["运送中", "已取消"],
   运送中: ["待采样", "已取消"],
   ...SAMPLE_NEXT,
+};
+
+/**
+ * 双向合并单寄回腿（R28 tripMode=return）：已检测后检测站发起寄回（仍可改走退回），
+ * 待寄回→寄回在途→待归还 归检测站，待归还→已归还（签收归还）归寄出分公司。
+ * 寄回腿途中不能取消；已归还终态OK（归属回 fromOrg＋保管人清空）。
+ */
+const SAMPLE_RETURN_LEG_NEXT = {
+  ...SAMPLE_NEXT,
+  已检测: ["待寄回", "退回中"],
+  待寄回: ["寄回在途"],
+  寄回在途: ["待归还"],
+  待归还: ["已归还"],
 };
 
 /**
@@ -291,15 +378,27 @@ const SAMPLE_LOCAL_NEXT = {
 
 /**
  * 从 status 能推进到哪些状态。划拨恒为 []（R25 走专用 accept/cancel/reject/tracking 端点，不走通用 transition）。
- * 合并采样单按 SAMPLE_NEXT（双向带首腿 SAMPLE_ROUND_NEXT）；旧送检/调拨/采样按各自旧流（读兼容）。
+ * 合并采样单按 tripMode 分流（R28）：return＝SAMPLE_RETURN_LEG_NEXT、stationFirst＝SAMPLE_ROUND_NEXT、
+ * oneWay＝SAMPLE_NEXT；送检 return 带寄回腿；旧送检/调拨/采样按各自旧流（读兼容）。
  */
 export function nextOf(task, status) {
   if (task.kind === "划拨") return [];
-  if (task.kind === "送检") return ENDED.includes(status) ? [] : INSPECT_NEXT[status] || [];
+  if (task.kind === "送检") {
+    if (tripModeOf(task) === "return") return INSPECT_RETURN_LEG_NEXT[status] || [];
+    return ENDED.includes(status) ? [] : INSPECT_NEXT[status] || [];
+  }
   // R23 仅本地采样单：已封箱终态，之前可取消
   if (isLocalSample(task)) return SAMPLE_LOCAL_NEXT[status] || [];
-  if (isMergedSample(task))
-    return (task.trip === "双向" ? SAMPLE_ROUND_NEXT : SAMPLE_NEXT)[status] || [];
+  if (isMergedSample(task)) {
+    const mode = tripModeOf(task);
+    const map =
+      mode === "return"
+        ? SAMPLE_RETURN_LEG_NEXT
+        : mode === "stationFirst"
+          ? SAMPLE_ROUND_NEXT
+          : SAMPLE_NEXT;
+    return map[status] || [];
+  }
   if (ENDED.includes(status)) return [];
   // 056 映射后的旧无 trip 采样单（待核验→待检测，M2）：收尾按旧核验语义——
   // 推进到已检测（已签收的映射像）、可拒收/取消；不进合并单的新退回分支（无检测站交接事实）。

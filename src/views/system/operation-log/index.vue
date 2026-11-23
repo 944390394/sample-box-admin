@@ -46,6 +46,7 @@
         />
         <el-button type="primary" @click="search">查询</el-button>
         <el-button @click="resetFilters">重置</el-button>
+        <span class="filter-bar__spacer" />
         <el-tooltip
           v-if="canExport"
           content="按当前筛选导出 CSV，一次最多 50,000 行"
@@ -63,7 +64,9 @@
         </template>
       </el-alert>
 
-      <el-table v-loading="loading" :data="list" class="log-table">
+      <!-- #94：32px 密行＋sticky 表头（max-height 内滚，沿任务单列表基线；
+           345px＝页头＋两行筛选条＋分页＋页边距，900 高下分页不折行到折叠线外） -->
+      <el-table v-loading="loading" :data="list" class="log-table" max-height="calc(100vh - 345px)">
         <template #empty>
           <el-empty>
             <template #description>
@@ -75,25 +78,47 @@
             <el-button v-if="loadError" type="primary" @click="load">重试</el-button>
           </el-empty>
         </template>
-        <el-table-column label="时间" width="150">
+        <el-table-column label="时间" width="110">
           <template #default="{ row }">
-            <span class="time" :title="row.createdAt">{{ logTime(row.createdAt) }}</span>
+            <TimeText :value="row.createdAt" />
           </template>
         </el-table-column>
-        <el-table-column label="操作者" min-width="150">
+        <el-table-column label="操作者" min-width="170">
           <template #default="{ row }">
-            <div>{{ row.actorName || "—" }}</div>
-            <div class="text-muted">{{ row.orgName || "" }}</div>
+            <span class="actor">
+              {{ row.actorName || "—" }}
+              <span class="text-muted org-name">{{ row.orgName || "" }}</span>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="动作" min-width="180">
           <template #default="{ row }">
-            <b class="action">{{ actionText(row) }}</b>
+            <el-tag
+              size="small"
+              :type="actionTag(actionText(row)).type"
+              :effect="actionTag(actionText(row)).plain ? 'plain' : 'light'"
+              class="action-tag"
+              data-test="oplog-action"
+            >
+              {{ actionText(row) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="对象" min-width="220">
           <template #default="{ row }">
-            <span class="target">{{ targetText(row) }}</span>
+            <el-tooltip
+              :disabled="!row.targetId && !targetDisplay(row).fallback"
+              :content="tooltipText(row)"
+              placement="top"
+            >
+              <span
+                class="target"
+                :class="{ fallback: targetDisplay(row).fallback }"
+                data-test="oplog-target"
+              >
+                {{ targetDisplay(row).text }}
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="结果" width="80">
@@ -135,11 +160,37 @@
           <span v-if="detailRow.actorId" class="text-muted">（{{ detailRow.actorId }}）</span>
         </el-descriptions-item>
         <el-descriptions-item label="动作">{{ actionText(detailRow) }}</el-descriptions-item>
-        <el-descriptions-item label="对象">{{ targetText(detailRow) || "—" }}</el-descriptions-item>
+        <el-descriptions-item label="对象">
+          <span class="target inline" :class="{ fallback: targetDisplay(detailRow).fallback }">
+            {{ targetDisplay(detailRow).text || "—" }}
+          </span>
+          <span v-if="detailRow.targetId" class="text-muted">（{{ detailRow.targetId }}）</span>
+        </el-descriptions-item>
         <el-descriptions-item label="结果">{{ detailRow.result }}</el-descriptions-item>
         <el-descriptions-item label="来源 IP">{{ detailRow.ip || "—" }}</el-descriptions-item>
         <el-descriptions-item label="明细">
-          <pre v-if="detailText" class="detail-json">{{ detailText }}</pre>
+          <!-- #94：detail 是 JSON 对象时结构化——grant diff 差集行＋其余键值对表格；原始 JSON 折叠可查 -->
+          <template v-if="detailObj">
+            <div v-if="diffRows.length" class="detail-diff" data-test="oplog-detail-diff">
+              <div v-for="(r, i) in diffRows" :key="i" class="diff-row" :class="r.cls">
+                <span v-if="r.sign" class="sign">{{ r.sign }}</span>
+                {{ r.text }}
+              </div>
+            </div>
+            <table v-if="kvRows.length" class="detail-kv" data-test="oplog-detail-kv">
+              <tbody>
+                <tr v-for="r in kvRows" :key="r.label">
+                  <th>{{ r.label }}</th>
+                  <td>{{ r.value }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <el-button link type="primary" class="raw-toggle" @click="showRaw = !showRaw">
+              {{ showRaw ? "收起原始 JSON" : "查看原始 JSON" }}
+            </el-button>
+            <pre v-if="showRaw" class="detail-json">{{ detailText }}</pre>
+          </template>
+          <pre v-else-if="detailText" class="detail-json">{{ detailText }}</pre>
           <span v-else>—</span>
         </el-descriptions-item>
       </el-descriptions>
@@ -149,6 +200,7 @@
 
 <script setup lang="ts">
 import PageHeader from "@/components/biz/PageHeader.vue";
+import TimeText from "@/components/biz/TimeText.vue";
 import { fullTime } from "@/utils/time";
 import OperationLogAPI, {
   type OperationLogCursor,
@@ -184,6 +236,7 @@ const loadError = ref<{ title: string; detail: string } | null>(null);
 const exporting = ref(false);
 const detailOpen = ref(false);
 const detailRow = ref<OperationLogItem | null>(null);
+const showRaw = ref(false);
 
 /** 明细多是 JSON（grant diff/scope 前后），能解析就格式化展示，否则原样给文本 */
 const detailText = computed(() => {
@@ -196,15 +249,132 @@ const detailText = computed(() => {
   }
 });
 
-function openDetail(row: unknown) {
-  detailRow.value = row as OperationLogItem;
-  detailOpen.value = true;
+/** #94：detail 解析成对象才结构化；数组/标量/非 JSON 走原文本通路 */
+const detailObj = computed<Record<string, unknown> | null>(() => {
+  const raw = detailRow.value?.detail || "";
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+});
+
+/** 数据范围文案（与角色页 SCOPES 同词汇） */
+const SCOPES: Record<number, string> = {
+  1: "全部数据",
+  2: "本单位及下级",
+  3: "本单位",
+  4: "仅本人",
+  5: "自定义部门数据",
+};
+const scopeText = (value: unknown) => SCOPES[Number(value)] || "—";
+
+/** grant diff 专用键：走差集行，不再进键值表 */
+const DIFF_KEYS = new Set([
+  "added",
+  "removed",
+  "grantOn",
+  "grantOff",
+  "scopeBefore",
+  "scopeAfter",
+  "scope",
+  "deptBefore",
+  "deptAfter",
+  "deptIds",
+  "limitedBefore",
+  "limitedAfter",
+  "maxScopeBefore",
+  "maxScopeAfter",
+]);
+
+type DiffRow = { sign: string; text: string; cls: "add" | "del" | "pass" | "range" };
+
+/** #94：before/after 差集结构化（沿 RoleAuditDrawer 的 ＋/－/⇄/范围行视觉） */
+const diffRows = computed<DiffRow[]>(() => {
+  const d = detailObj.value;
+  if (!d) return [];
+  const rows: DiffRow[] = [];
+  const codes = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+  for (const code of codes(d.added)) rows.push({ sign: "＋", text: code, cls: "add" });
+  for (const code of codes(d.removed)) rows.push({ sign: "－", text: code, cls: "del" });
+  for (const code of codes(d.grantOn))
+    rows.push({ sign: "⇄", text: `${code} 开可转授`, cls: "pass" });
+  for (const code of codes(d.grantOff))
+    rows.push({ sign: "⇄", text: `${code} 关可转授`, cls: "pass" });
+  if (d.scopeBefore != null)
+    rows.push({
+      sign: "",
+      text: `数据范围：${scopeText(d.scopeBefore)} → ${scopeText(d.scopeAfter)}`,
+      cls: "range",
+    });
+  if (d.scope != null)
+    rows.push({ sign: "", text: `初始数据范围：${scopeText(d.scope)}`, cls: "range" });
+  const before = Array.isArray(d.deptBefore) ? d.deptBefore.map(String) : [];
+  const after = Array.isArray(d.deptAfter) ? d.deptAfter.map(String) : [];
+  if (before.length || after.length) {
+    const bs = new Set(before);
+    const as = new Set(after);
+    for (const id of after.filter((x) => !bs.has(x)))
+      rows.push({ sign: "＋", text: `自定义部门 ${id}`, cls: "add" });
+    for (const id of before.filter((x) => !as.has(x)))
+      rows.push({ sign: "－", text: `自定义部门 ${id}`, cls: "del" });
+  }
+  if (Array.isArray(d.deptIds) && d.deptIds.length)
+    rows.push({ sign: "", text: `自定义部门：${d.deptIds.map(String).join("、")}`, cls: "range" });
+  if (typeof d.limitedBefore === "boolean" || typeof d.limitedAfter === "boolean")
+    rows.push({
+      sign: "",
+      text: `部门权限上限：${d.limitedBefore ? "开" : "关"} → ${d.limitedAfter ? "开" : "关"}`,
+      cls: "range",
+    });
+  if (d.maxScopeBefore !== undefined || d.maxScopeAfter !== undefined)
+    rows.push({
+      sign: "",
+      text: `最大数据范围：${scopeText(d.maxScopeBefore)} → ${scopeText(d.maxScopeAfter)}`,
+      cls: "range",
+    });
+  return rows;
+});
+
+/** 键值表中文标签（未知键原样给键名） */
+const DETAIL_LABELS: Record<string, string> = {
+  before: "改前",
+  after: "改后",
+  affectedBoxCount: "影响箱数",
+  二次确认: "口令再认证",
+  原因: "原因",
+  trackingNo: "快递单号",
+  asOrgId: "切换视角单位",
+  asRoleCode: "切换视角角色",
+  note: "备注",
+};
+
+function formatDetailValue(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (Array.isArray(value))
+    return (
+      value.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))).join("、") || "—"
+    );
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
-/** 日志精确到秒：今年的不写年份，悬停看完整时间。 */
-function logTime(time: string) {
-  const text = fullTime(time);
-  return text.startsWith(String(new Date().getFullYear())) ? text.slice(5) : text;
+/** #94：差集之外的键补键值对表格（改前/改后、二次确认、快递单号等） */
+const kvRows = computed(() => {
+  const d = detailObj.value;
+  if (!d) return [];
+  return Object.entries(d)
+    .filter(([key]) => !DIFF_KEYS.has(key))
+    .map(([key, value]) => ({ label: DETAIL_LABELS[key] || key, value: formatDetailValue(value) }));
+});
+
+function openDetail(row: unknown) {
+  detailRow.value = row as OperationLogItem;
+  showRaw.value = false;
+  detailOpen.value = true;
 }
 
 function pad(value: number) {
@@ -234,15 +404,37 @@ const TARGET_TYPES: Record<string, string> = {
   "report-policy": "上报策略",
   oplog: "操作日志",
 };
+/** 旧服务端（无 targetName）兼容：类型＋编号拼接 */
 function targetText(row: unknown) {
   const item = row as OperationLogItem;
   const id = item.targetId || "";
   const type = id.startsWith("TK-")
     ? "任务单"
-    : TARGET_TYPES[item.targetType || ""] || item.targetType || "";
+    : id.startsWith("AL-")
+      ? "划拨单"
+      : TARGET_TYPES[item.targetType || ""] || item.targetType || "";
   // 系统名称这类全局设置没有编号，编号和类型相同时不重复显示
   return [type, id && id !== item.targetType ? id : ""].filter(Boolean).join(" ");
 }
+
+/**
+ * #94：对象列显示服务端解析的 targetName（人名/部门名/箱名/单号+名称）；
+ * 回退态（targetResolved=false）灰字＋tooltip 原编号；旧服务端无字段时回退旧拼接。
+ * 表格插槽 row 是 DefaultRow，沿旧 targetText 的 unknown＋断言口径。
+ */
+function targetDisplay(row: unknown): { text: string; fallback: boolean } {
+  const item = row as OperationLogItem;
+  if (item.targetName) return { text: item.targetName, fallback: item.targetResolved === false };
+  return { text: targetText(item), fallback: false };
+}
+
+/** tooltip：可读名＋原编号（回退态靠它看编号；长名截断时靠它看全） */
+function tooltipText(row: unknown) {
+  const item = row as OperationLogItem;
+  const { text } = targetDisplay(item);
+  return item.targetId ? `${text}（编号 ${item.targetId}）` : text;
+}
+
 /** 旧记录里的技术说法换成业务说法。 */
 function actionText(row: unknown) {
   const action = (row as OperationLogItem).action || "";
@@ -250,6 +442,29 @@ function actionText(row: unknown) {
   const legacy = action.match(/^任务(.+)，更新上报策略覆盖$/);
   if (legacy) return legacy[1] === "强制签收" ? "任务单强制签收" : `任务单推进到「${legacy[1]}」`;
   return action;
+}
+
+/**
+ * #94 动作语义色族：登录 info／建单 primary／改权限·改设置 warning／签收·检测 success／
+ * 划拨·撤销 danger／其余中性。EP tag 没有 default type（缺省即 primary，会与建单撞色），
+ * 其余用 info＋plain 中性灰描边，与登录的 info 浅底区分。
+ */
+function actionTag(action: string): {
+  type: "primary" | "success" | "warning" | "info" | "danger";
+  plain: boolean;
+} {
+  if (/划拨|撤销|删除|拒收|退回|取消|强制下线/.test(action))
+    return { type: "danger", plain: false };
+  if (/签收|检测|封箱|采样中|已采样/.test(action)) return { type: "success", plain: false };
+  if (
+    /权限|角色|设置|策略|密码|改密|上限|改名|修改部门|修改显示|修改数据库|修改天地图|修改公司/.test(
+      action
+    )
+  )
+    return { type: "warning", plain: false };
+  if (/新增|创建|建单/.test(action)) return { type: "primary", plain: false };
+  if (/登录|退出|解锁|解绑|绑定/.test(action)) return { type: "info", plain: false };
+  return { type: "info", plain: true };
 }
 
 /** 错误态按码分流：无权限给授权指引，网络错误可重试，其余（如超 31 天）照服务端文案。 */
@@ -415,19 +630,63 @@ onMounted(async () => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
-.time,
-.mono {
-  font-variant-numeric: tabular-nums;
+/* #94：32px 密行＋sticky 表头＋12px 字号（沿任务单列表基线；全站 override 的 46px td 收回） */
+.log-table {
+  --el-table-border-color: var(--el-border-color-extra-light);
+}
+.log-table :deep(.el-table__body td.el-table__cell) {
+  height: 32px;
+  padding: 1px 0;
+}
+.log-table :deep(.cell) {
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.log-table :deep(th.el-table__cell) {
+  height: 28px;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-lighter);
+}
+.log-table :deep(.el-table__body-wrapper) {
+  min-height: 120px;
+}
+.actor {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.org-name {
+  margin-left: 6px;
+  font-size: 11px;
+}
+.action-tag {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-}
-.action {
-  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .target {
-  overflow-wrap: anywhere;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.target.inline {
+  display: inline;
+}
+/* 回退态（范围外/已删除/未解析）：灰字，编号靠 tooltip */
+.target.fallback {
+  color: var(--el-text-color-secondary);
 }
 .result {
   display: inline-flex;
@@ -453,9 +712,59 @@ onMounted(async () => {
   justify-content: space-between;
   margin-top: 12px;
 }
+/* #94 详情抽屉：差集行（沿 RoleAuditDrawer 视觉）＋键值对表格 */
+.detail-diff {
+  margin-bottom: 8px;
+}
+.diff-row {
+  padding: 1px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.diff-row .sign {
+  margin-right: 4px;
+  font-weight: 600;
+}
+.diff-row.add {
+  color: var(--el-color-success-dark-2);
+}
+.diff-row.del {
+  color: var(--el-color-danger);
+}
+.diff-row.pass {
+  color: var(--el-color-primary);
+}
+.diff-row.range {
+  color: var(--el-text-color-regular);
+}
+.detail-kv {
+  width: 100%;
+  margin-bottom: 4px;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+.detail-kv th,
+.detail-kv td {
+  padding: 4px 8px;
+  vertical-align: top;
+  text-align: left;
+  word-break: break-all;
+  border: 1px solid var(--el-border-color-extra-light);
+}
+.detail-kv th {
+  width: 88px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-lighter);
+}
+.raw-toggle {
+  padding: 0;
+  font-size: 12px;
+}
 .detail-json {
   max-height: 320px;
-  margin: 0;
+  margin: 4px 0 0;
   overflow: auto;
   font-size: 12px;
   word-break: break-all;

@@ -10,6 +10,8 @@
 /* SysTick 1 ms。确认包可以改周期，也可以改成只在充电时投递 EVENT_TIMER。 */
 void clock_start(lid_t *lid, charger_t *charger, event_queue_t *events, uint32_t period_ms);
 void clock_set_period(uint32_t period_ms);
+/* 事件唤醒上报后把下次定时上报重置为满周期之后（睡中开箱→唤醒→报→重新睡满周期）。 */
+void clock_refresh_due(void);
 void clock_set_charge_only(int enabled);
 uint32_t clock_ms(void);
 uint32_t clock_period_seconds(void);

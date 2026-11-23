@@ -1,7 +1,7 @@
 import { formatTimestamp } from "../domain/Clock.js";
 import { distanceM } from "../geo/place.js";
 import { currentBoxSettings } from "./boxConfig.js";
-import { ENDED } from "./taskFlow.js";
+import { ENDED, isEndedFor } from "./taskFlow.js";
 
 /* 结束状态（taskFlow 的 ENDED）：任务窗口到这条流转记录为止。 */
 /** 时间线里展示的设备事件。定时、充电上报太多，只进轨迹不进时间线。 */
@@ -15,11 +15,11 @@ const MIN_GAP_MS = 5 * 60000;
 
 /**
  * 任务窗口：创建到结束（没结束到现在）。任务时间是 ISO，上报时间是服务器本地时间，统一成本地格式再查。
+ * R28：传 task body 时按 isEndedFor 判终态——双向寄回单（return）已检测是中间态，窗口仍 live。
  */
-export function taskWindow(createdAt, status, logs, now = new Date()) {
-  const end = ENDED.includes(status)
-    ? [...logs].reverse().find((log) => log.status === status)
-    : null;
+export function taskWindow(createdAt, status, logs, now = new Date(), task = null) {
+  const ended = task ? isEndedFor({ ...task, status }) : ENDED.includes(status);
+  const end = ended ? [...logs].reverse().find((log) => log.status === status) : null;
   return {
     from: formatTimestamp(new Date(createdAt)),
     to: formatTimestamp(end ? new Date(end.created_at) : now),

@@ -255,7 +255,10 @@ test("R23 建单：三 kind 字段必需性＋前缀＋初始态＋权限兜底"
     assert.equal(ir.to_org_id, "6");
     const ib = JSON.parse(ir.body);
     assert.equal(ib.inspect, true);
-    assert.ok(!ib.trip && !ib.localOnly);
+    // R28：送检方向可选，默认单向（oneWay）；无 localOnly
+    assert.equal(ib.trip, "单向");
+    assert.equal(ib.tripMode, "oneWay");
+    assert.ok(!ib.localOnly);
     assert.equal(ib.orgId, "2", "送检 orgId＝寄出方（公司策略/来源归属）");
     // 采样后送检：显式新 kind，合并流
     const merged = await s.create({

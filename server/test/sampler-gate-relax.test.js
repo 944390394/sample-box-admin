@@ -185,7 +185,7 @@ async function setup() {
     assert.ok(r.ok, r.message);
     return { id: r.data.id, boxId: b };
   };
-  // 合并单（采样后送检）：boxOrg 决定派生 trip（13＝双向，其余单向）；signerId="" 省略签收人（ADMIN 正常签收用）
+  // 合并单（采样后送检）：R28 方向用户可选（默认单向）；signerId="" 省略签收人（ADMIN 正常签收用）
   const mergedTask = async (ownerId = "7", opts = {}) => {
     const orgId = opts.orgId ?? "21";
     const boxOrg = opts.boxOrg ?? orgId;
@@ -204,6 +204,42 @@ async function setup() {
     });
     assert.ok(r.ok, r.message);
     return { id: r.data.id, boxId: b };
+  };
+  /**
+   * R28 契约演进：箱在检测站新建寄送单已拒——站首腿（stationFirst）历史单造库行
+   * （R22 派生形状：tripDerived＋双向、无 tripMode），供本人保管门旧流回归。
+   */
+  const seedRoundTask = async (ownerId = "7") => {
+    const b = await makeBox("13", ownerId);
+    const id = `TK-r22gate-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const body = {
+      kind: "采样",
+      name: "双向合并单",
+      boxIds: [b],
+      orgId: "2",
+      org: "华南分公司",
+      fromOrgId: "13",
+      fromOrg: "总部检测站",
+      toOrgId: "13",
+      toOrg: "总部检测站",
+      inspect: true,
+      trip: "双向",
+      tripDerived: true,
+      senderId: "60",
+      sender: "检测站长",
+      signerId: "60",
+      signer: "检测站长",
+      placeAt: { address: "x", lng: 114.1, lat: 22.6 },
+    };
+    await db.run(
+      "INSERT INTO sample_task (id,name,kind,status,body,created_at,from_org_id,to_org_id,is_inspect) VALUES (?,?,?,?,?,?,?,?,1)",
+      [id, body.name, "采样", "待寄出", JSON.stringify(body), new Date().toISOString(), "13", "13"]
+    );
+    await db.run(
+      "INSERT INTO sample_task_box (task_id,box_id,org_id,owner_id,opens_start) VALUES (?,?,?,?,0)",
+      [id, b, "13", ownerId]
+    );
+    return { id, boxId: b };
   };
   return {
     db,
@@ -227,6 +263,7 @@ async function setup() {
     taskRow,
     localTask,
     mergedTask,
+    seedRoundTask,
     teardown: async () => {
       await db.close?.();
       await rm(dir, { recursive: true, force: true });
@@ -455,10 +492,11 @@ test("⑦ 合并单采样段本人保管可推进、寄送段不放宽（单向�
     assert.equal(sendBack.ok, false);
     assert.equal(sendBack.status, 403, "合并单寄送段不放宽");
     assert.equal((await s.taskRow(m.id)).status, "已封箱");
-    // 双向合并单：箱在检测站（org13）本人保管，采样单位分公司 2；首腿由 ADMIN 推进
-    const r = await s.mergedTask("7", { orgId: "2", boxOrg: "13", name: "双向合并单" });
+    // 双向合并单（legacy stationFirst 造库行，R28 新建已拒箱在检测站）：箱在检测站（org13）本人保管，
+    // 采样单位分公司 2；首腿由 ADMIN 推进
+    const r = await s.seedRoundTask("7");
     const row = await s.taskRow(r.id);
-    assert.equal(JSON.parse(row.body).trip, "双向", "箱在检测站应派生双向");
+    assert.equal(JSON.parse(row.body).trip, "双向", "站首腿历史单 trip 双向");
     assert.equal(row.status, "待寄出");
     assert.ok((await s.advance(r.id, "运送中")).ok);
     // 首腿确认到达（运送中→待采样）不放宽：持 arrive 码的 scope4 仍 403

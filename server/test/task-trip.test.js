@@ -69,7 +69,7 @@ test("流程：R22 派生 trip——合并采样单按新流（双向带首腿�
   assert.deepEqual(nextOf({ kind: "调拨" }, "待签收"), ["已签收", "已拒收", "退回中", "已取消"]);
 });
 
-test("合并单：建单 trip 按箱归属派生（旧客户端传双向不作数），接收方固定检测站、采样单位＝寄出分公司", async () => {
+test("合并单：R28 方向用户可选（旧客户端 trip=双向＝寄回腿），orgId=检测站回落寄出分公司、接收方固定检测站", async () => {
   applyBoxSettings({
     box: { reportPeriodSec: 60, batteryReserve: 20, arriveRadiusM: 2000, stationDeptId: "6" },
   });
@@ -132,7 +132,7 @@ test("合并单：建单 trip 按箱归属派生（旧客户端传双向不作�
       user: { id: "1", nickname: "管理员" },
       access: { roles: ["ADMIN"], perms, scope: { all: true, orgIds: [], ownerIds: [] } },
     };
-    // 旧客户端仍传 trip=双向 + orgId=检测站：R22 服务端忽略客户端 trip（按箱归属派生），
+    // 旧客户端仍传 trip=双向 + orgId=检测站：R28 方向用户可选——双向＝寄回腿（return）；
     // orgId=station 回落 fromOrgId（采样单位不能是检测站），接收方固定检测站
     const { id } = await call(c.createTask.bind(c), {
       ...admin,
@@ -149,8 +149,9 @@ test("合并单：建单 trip 按箱归属派生（旧客户端传双向不作�
       },
     });
     const detail = await call(c.taskDetail.bind(c), { ...admin, params: { id } });
-    assert.equal(detail.task.status, "待采样", "箱在分公司→单向，不从待寄出起步");
-    assert.equal(detail.task.trip, "单向", "R22：客户端 trip 不作数，按箱归属派生");
+    assert.equal(detail.task.status, "待采样", "新双向首步本地待采样（无站首腿）");
+    assert.equal(detail.task.trip, "双向", "R28：客户端方向作数（用户可选）");
+    assert.equal(detail.task.tripMode, "return");
     assert.equal(detail.task.tripDerived, true);
     assert.equal(detail.task.orgId, "2", "采样单位＝寄出分公司，不是旧 orgId");
     assert.equal(detail.task.toOrgId, "6", "接收方固定检测站");
@@ -163,6 +164,10 @@ test("合并单：建单 trip 按箱归属派生（旧客户端传双向不作�
       "待签收",
       "待检测",
       "已检测",
+      "待寄回",
+      "寄回在途",
+      "待归还",
+      "已归还",
     ]);
     assert.equal(detail.target.role, "计划地点");
     // 推进合并主路径到待检测（签收），箱子交检测站
@@ -179,7 +184,43 @@ test("合并单：建单 trip 按箱归属派生（旧客户端传双向不作�
       (await db.get("SELECT status FROM sample_task WHERE id=?", [id])).status,
       "已检测"
     );
+    assert.equal((await boxes.findById(box.id)).life, "在途", "return 单已检测是中间态，占用保持");
+    // 寄回腿：检测站寄回→分公司签收归还，归属回寄出分公司、箱子释放
+    for (const status of ["待寄回", "寄回在途", "待归还", "已归还"])
+      await call(c.transition.bind(c), { ...admin, params: { id }, body: { status } });
+    assert.equal((await boxes.findById(box.id)).orgId, "2", "签收归还归属回寄出分公司");
     assert.equal((await boxes.findById(box.id)).life, "未使用");
+    // 默认单向（不传 trip）：7 步、已检测终态不回归
+    const b2 = await ingest.accept(
+      packet({
+        imei: "864317080992518",
+        uart: "why=boot,opens=0,seq=9",
+        gpsfix: 1,
+        lng: 114.1,
+        lat: 22.6,
+      })
+    );
+    await boxes.updateBox(b2.box.id, (b) => {
+      b.life = "未使用";
+      b.orgId = "2";
+      b.org = "华南分公司";
+    });
+    const one = await call(c.createTask.bind(c), {
+      ...admin,
+      body: {
+        name: "默认单向",
+        kind: "采样",
+        boxIds: [b2.box.id],
+        fromOrgId: "2",
+        senderId: "20",
+        signer: "检测员",
+        placeAt: { address: "华南采样点", lng: 114.1, lat: 22.6 },
+      },
+    });
+    const oneDetail = await call(c.taskDetail.bind(c), { ...admin, params: { id: one.id } });
+    assert.equal(oneDetail.task.trip, "单向", "不传 trip 默认单向");
+    assert.equal(oneDetail.task.tripMode, "oneWay");
+    assert.equal(oneDetail.task.steps.length, 7);
   } finally {
     await boxes.flush();
     await db.close();
